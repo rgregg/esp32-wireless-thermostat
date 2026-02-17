@@ -53,6 +53,7 @@ class ControllerApp {
   void publish();
 
   IControllerTransport &transport_;
+  ControllerConfig config_{};
   ControllerRuntime runtime_;
 
   bool has_indoor_temp_ = false;

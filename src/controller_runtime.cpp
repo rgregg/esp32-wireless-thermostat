@@ -7,16 +7,16 @@ namespace {
 
 constexpr uint32_t kOneMinuteMs = 60000;
 
-bool elapsed_at_least(uint32_t now, uint32_t then, uint32_t interval_ms) {
-  return static_cast<uint32_t>(now - then) >= interval_ms;
-}
-
 }  // namespace
 
 namespace thermostat {
 
 ControllerRuntime::ControllerRuntime(const ControllerConfig &config)
-    : config_(config) {}
+    : config_(config) {
+  last_heating_off_ms_ = 0;
+  last_cooling_off_ms_ = 0;
+  hvac_state_since_ms_ = 0;
+}
 
 void ControllerRuntime::note_heartbeat(uint32_t now_ms) {
   heartbeat_last_seen_ms_ = now_ms;
@@ -25,9 +25,10 @@ void ControllerRuntime::note_heartbeat(uint32_t now_ms) {
 void ControllerRuntime::set_hvac_lockout(bool locked_out) {
   hvac_lockout_ = locked_out;
   if (hvac_lockout_) {
+    hvac_state_ = HvacState::Idle;
+    relay_.fan = false;
     relay_.heat = false;
     relay_.cool = false;
-    relay_.fan = false;
   }
 }
 
@@ -63,9 +64,9 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
 
 void ControllerRuntime::tick(const ControllerTickInput &in) {
   update_failsafe(in.now_ms);
-  apply_hvac_calls(in.heat_call, in.cool_call);
+  apply_hvac_calls(in.now_ms, in.heat_call, in.cool_call);
   run_minute_tasks(in.now_ms);
-  enforce_safety_interlocks();
+  enforce_safety_interlocks(in.now_ms);
 }
 
 FurnaceStateCode ControllerRuntime::furnace_state() const {
@@ -82,10 +83,9 @@ ThermostatSnapshot ControllerRuntime::snapshot() const {
   return s;
 }
 
-void ControllerRuntime::enforce_safety_interlocks() {
+void ControllerRuntime::enforce_safety_interlocks(uint32_t now_ms) {
   if (failsafe_active_ || hvac_lockout_) {
-    relay_.heat = false;
-    relay_.cool = false;
+    enter_idle(now_ms);
     relay_.fan = false;
   }
 
@@ -103,30 +103,57 @@ void ControllerRuntime::update_failsafe(uint32_t now_ms) {
                                            config_.failsafe_timeout_ms);
 }
 
-void ControllerRuntime::apply_hvac_calls(bool heat_call, bool cool_call) {
+void ControllerRuntime::apply_hvac_calls(uint32_t now_ms, bool heat_call, bool cool_call) {
   if (failsafe_active_ || hvac_lockout_) {
-    relay_.heat = false;
-    relay_.cool = false;
+    enter_idle(now_ms);
     relay_.fan = false;
     return;
   }
 
-  if (heat_call) {
-    relay_.heat = true;
-    relay_.cool = false;
-    relay_.fan = false;
-    return;
-  }
+  switch (hvac_state_) {
+    case HvacState::Heating: {
+      const bool min_run_done =
+          elapsed_at_least(now_ms, hvac_state_since_ms_, config_.min_heating_run_time_ms);
+      if (!heat_call && min_run_done) {
+        enter_idle(now_ms);
+      } else {
+        relay_.heat = true;
+        relay_.cool = false;
+      }
+      break;
+    }
+    case HvacState::Cooling: {
+      const bool min_run_done =
+          elapsed_at_least(now_ms, hvac_state_since_ms_, config_.min_cooling_run_time_ms);
+      if (!cool_call && min_run_done) {
+        enter_idle(now_ms);
+      } else {
+        relay_.heat = false;
+        relay_.cool = true;
+      }
+      break;
+    }
+    case HvacState::Idle:
+    default: {
+      const bool idle_ready = elapsed_at_least(now_ms, hvac_state_since_ms_, config_.min_idle_time_ms);
+      const bool heat_off_ready =
+          !has_heating_off_timestamp_ ||
+          elapsed_at_least(now_ms, last_heating_off_ms_, config_.min_heating_off_time_ms);
+      const bool cool_off_ready =
+          !has_cooling_off_timestamp_ ||
+          elapsed_at_least(now_ms, last_cooling_off_ms_, config_.min_cooling_off_time_ms);
 
-  if (cool_call) {
-    relay_.heat = false;
-    relay_.cool = true;
-    relay_.fan = false;
-    return;
+      if (heat_call && idle_ready && heat_off_ready) {
+        enter_heating(now_ms);
+      } else if (cool_call && idle_ready && cool_off_ready) {
+        enter_cooling(now_ms);
+      } else {
+        relay_.heat = false;
+        relay_.cool = false;
+      }
+      break;
+    }
   }
-
-  relay_.heat = false;
-  relay_.cool = false;
 
   if (fan_mode_ == FanMode::AlwaysOn && !spare_relay_4_) {
     relay_.fan = true;
@@ -164,6 +191,46 @@ void ControllerRuntime::run_minute_tasks(uint32_t now_ms) {
       fan_circulate_elapsed_min_ = 0;
     }
   }
+}
+
+bool ControllerRuntime::elapsed_at_least(uint32_t now_ms,
+                                         uint32_t start_ms,
+                                         uint32_t duration_ms) const {
+  if (duration_ms == 0) {
+    return true;
+  }
+  return static_cast<uint32_t>(now_ms - start_ms) >= duration_ms;
+}
+
+void ControllerRuntime::enter_idle(uint32_t now_ms) {
+  if (hvac_state_ == HvacState::Heating) {
+    last_heating_off_ms_ = now_ms;
+    has_heating_off_timestamp_ = true;
+  } else if (hvac_state_ == HvacState::Cooling) {
+    last_cooling_off_ms_ = now_ms;
+    has_cooling_off_timestamp_ = true;
+  }
+
+  hvac_state_ = HvacState::Idle;
+  hvac_state_since_ms_ = now_ms;
+  relay_.heat = false;
+  relay_.cool = false;
+}
+
+void ControllerRuntime::enter_heating(uint32_t now_ms) {
+  hvac_state_ = HvacState::Heating;
+  hvac_state_since_ms_ = now_ms;
+  relay_.heat = true;
+  relay_.cool = false;
+  relay_.fan = false;
+}
+
+void ControllerRuntime::enter_cooling(uint32_t now_ms) {
+  hvac_state_ = HvacState::Cooling;
+  hvac_state_since_ms_ = now_ms;
+  relay_.heat = false;
+  relay_.cool = true;
+  relay_.fan = false;
 }
 
 }  // namespace thermostat

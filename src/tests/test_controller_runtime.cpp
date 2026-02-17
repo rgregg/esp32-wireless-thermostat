@@ -5,6 +5,11 @@
 TEST_CASE(controller_runtime_failsafe_lockout) {
   thermostat::ControllerConfig cfg;
   cfg.failsafe_timeout_ms = 5000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
   thermostat::ControllerRuntime rt(cfg);
 
   rt.note_heartbeat(1000);
@@ -39,6 +44,11 @@ TEST_CASE(controller_runtime_filter_runtime_and_circulate) {
   thermostat::ControllerConfig cfg;
   cfg.fan_circulate_period_min = 5;
   cfg.fan_circulate_duration_min = 2;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
   thermostat::ControllerRuntime rt(cfg);
 
   CommandWord cmd;
@@ -60,5 +70,54 @@ TEST_CASE(controller_runtime_filter_runtime_and_circulate) {
   third.now_ms = 121000;
   rt.tick(third);
   ASSERT_TRUE(rt.filter_runtime_seconds() >= 60);
+}
+
+TEST_CASE(controller_runtime_enforces_min_run_min_off_and_min_idle) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 30000;
+  cfg.min_heating_run_time_ms = 180000;
+  cfg.min_heating_off_time_ms = 180000;
+  cfg.min_cooling_run_time_ms = 300000;
+  cfg.min_cooling_off_time_ms = 300000;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  rt.tick(t1);
+  ASSERT_TRUE(!rt.heat_demand());
+
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 31000;
+  t2.heat_call = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.heat_demand());
+
+  thermostat::ControllerTickInput t3;
+  t3.now_ms = 60000;
+  t3.heat_call = false;
+  rt.tick(t3);
+  ASSERT_TRUE(rt.heat_demand());
+
+  thermostat::ControllerTickInput t4;
+  t4.now_ms = 211000;
+  t4.heat_call = false;
+  rt.tick(t4);
+  ASSERT_TRUE(!rt.heat_demand());
+
+  thermostat::ControllerTickInput t5;
+  t5.now_ms = 220000;
+  t5.heat_call = true;
+  rt.tick(t5);
+  ASSERT_TRUE(!rt.heat_demand());
+
+  thermostat::ControllerTickInput t6;
+  t6.now_ms = 392000;
+  t6.heat_call = true;
+  rt.tick(t6);
+  ASSERT_TRUE(rt.heat_demand());
 }
 #endif

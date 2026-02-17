@@ -17,7 +17,15 @@ class FakeControllerTransport : public thermostat::IControllerTransport {
 
 TEST_CASE(controller_app_auto_hvac_from_indoor_temp) {
   FakeControllerTransport tx;
-  thermostat::ControllerApp app(tx);
+  thermostat::ControllerConfig cfg;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_idle_time_ms = 0;
+  cfg.heat_deadband_c = 0.5f;
+  cfg.heat_overrun_c = 0.5f;
+  thermostat::ControllerApp app(tx, cfg);
 
   CommandWord cmd;
   cmd.mode = FurnaceMode::Heat;
@@ -27,12 +35,16 @@ TEST_CASE(controller_app_auto_hvac_from_indoor_temp) {
   ASSERT_TRUE(app.on_command_word(espnow_cmd::encode(cmd)).accepted);
 
   app.on_heartbeat(1000);
-  app.on_indoor_temperature_c(19.0f);
+  app.on_indoor_temperature_c(20.4f);
   app.tick(2000);
   ASSERT_TRUE(app.runtime().heat_demand());
 
-  app.on_indoor_temperature_c(22.0f);
+  app.on_indoor_temperature_c(21.2f);
   app.tick(3000);
+  ASSERT_TRUE(app.runtime().heat_demand());
+
+  app.on_indoor_temperature_c(21.6f);
+  app.tick(4000);
   ASSERT_TRUE(!app.runtime().heat_demand());
   ASSERT_TRUE(tx.count > 0);
 }

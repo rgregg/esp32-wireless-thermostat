@@ -11,6 +11,15 @@ struct ControllerConfig {
   uint32_t failsafe_timeout_ms = 300000;
   uint16_t fan_circulate_period_min = 60;
   uint16_t fan_circulate_duration_min = 10;
+  uint32_t min_cooling_off_time_ms = 300000;
+  uint32_t min_cooling_run_time_ms = 300000;
+  uint32_t min_heating_off_time_ms = 180000;
+  uint32_t min_heating_run_time_ms = 180000;
+  uint32_t min_idle_time_ms = 30000;
+  float heat_deadband_c = 0.5f;
+  float heat_overrun_c = 0.5f;
+  float cool_deadband_c = 0.5f;
+  float cool_overrun_c = 0.5f;
 };
 
 struct ControllerTickInput {
@@ -57,9 +66,19 @@ class ControllerRuntime {
   ThermostatSnapshot snapshot() const;
 
  private:
-  void enforce_safety_interlocks();
+  enum class HvacState : uint8_t {
+    Idle = 0,
+    Heating = 1,
+    Cooling = 2,
+  };
+
+  void enforce_safety_interlocks(uint32_t now_ms);
   void update_failsafe(uint32_t now_ms);
-  void apply_hvac_calls(bool heat_call, bool cool_call);
+  void apply_hvac_calls(uint32_t now_ms, bool heat_call, bool cool_call);
+  bool elapsed_at_least(uint32_t now_ms, uint32_t start_ms, uint32_t duration_ms) const;
+  void enter_idle(uint32_t now_ms);
+  void enter_heating(uint32_t now_ms);
+  void enter_cooling(uint32_t now_ms);
   void run_minute_tasks(uint32_t now_ms);
 
   ControllerConfig config_;
@@ -76,6 +95,12 @@ class ControllerRuntime {
 
   uint32_t heartbeat_last_seen_ms_ = 0;
   uint32_t filter_runtime_seconds_ = 0;
+  uint32_t hvac_state_since_ms_ = 0;
+  uint32_t last_heating_off_ms_ = 0;
+  uint32_t last_cooling_off_ms_ = 0;
+  bool has_heating_off_timestamp_ = false;
+  bool has_cooling_off_timestamp_ = false;
+  HvacState hvac_state_ = HvacState::Idle;
 
   int fan_circulate_elapsed_min_ = 0;
   uint32_t last_minute_tick_ms_ = 0;

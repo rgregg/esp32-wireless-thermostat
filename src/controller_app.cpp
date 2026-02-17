@@ -4,16 +4,9 @@
 
 namespace thermostat {
 
-namespace {
-
-constexpr float kHeatCallDeltaC = 0.3f;
-constexpr float kCoolCallDeltaC = 0.3f;
-
-}  // namespace
-
 ControllerApp::ControllerApp(IControllerTransport &transport,
                              const ControllerConfig &config)
-    : transport_(transport), runtime_(config) {}
+    : transport_(transport), config_(config), runtime_(config) {}
 
 void ControllerApp::on_heartbeat(uint32_t now_ms) {
   runtime_.note_heartbeat(now_ms);
@@ -98,13 +91,25 @@ void ControllerApp::compute_hvac_calls(bool *heat_call, bool *cool_call) const {
   const float target = runtime_.target_temperature_c();
 
   switch (runtime_.mode()) {
-    case FurnaceMode::Heat:
-      *heat_call = indoor_temp_c_ < (target - kHeatCallDeltaC);
+    case FurnaceMode::Heat: {
+      const bool heat_active = runtime_.heat_demand();
+      if (heat_active) {
+        *heat_call = indoor_temp_c_ < (target + config_.heat_overrun_c);
+      } else {
+        *heat_call = indoor_temp_c_ <= (target - config_.heat_deadband_c);
+      }
       break;
+    }
 
-    case FurnaceMode::Cool:
-      *cool_call = indoor_temp_c_ > (target + kCoolCallDeltaC);
+    case FurnaceMode::Cool: {
+      const bool cool_active = runtime_.cool_demand();
+      if (cool_active) {
+        *cool_call = indoor_temp_c_ > (target - config_.cool_overrun_c);
+      } else {
+        *cool_call = indoor_temp_c_ >= (target + config_.cool_deadband_c);
+      }
       break;
+    }
 
     case FurnaceMode::Off:
     default:
