@@ -11,6 +11,10 @@ void ThermostatDisplayApp::set_temperature_unit(TemperatureUnit unit) {
   model_.set_temperature_unit(unit);
 }
 
+void ThermostatDisplayApp::sync_from_app() {
+  model_.set_local_setpoint_c(app_.local_setpoint_c());
+}
+
 void ThermostatDisplayApp::on_local_sensor_update(float indoor_temp_c,
                                                   float indoor_humidity) {
   model_.set_local_indoor_temperature_c(indoor_temp_c);

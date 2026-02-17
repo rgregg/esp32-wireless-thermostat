@@ -15,6 +15,8 @@ class ThermostatDisplayApp {
   void set_temperature_unit(TemperatureUnit unit);
   TemperatureUnit temperature_unit() const { return model_.temperature_unit(); }
 
+  void sync_from_app();
+
   void on_local_sensor_update(float indoor_temp_c, float indoor_humidity);
   void on_outdoor_weather_update(float outdoor_temp_c, const std::string &condition);
 

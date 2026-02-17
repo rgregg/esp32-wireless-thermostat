@@ -3,6 +3,7 @@
 #include "controller_app.h"
 #include "controller_node.h"
 #include "espnow_cmd_word.h"
+#include "thermostat_device_runtime.h"
 
 #if defined(ARDUINO)
 #include <Arduino.h>
@@ -25,7 +26,53 @@ class DemoTransport final : public thermostat::IControllerTransport {
 
 #if defined(ARDUINO)
 
-thermostat::ControllerNode *g_node = nullptr;
+#if defined(THERMOSTAT_ROLE_THERMOSTAT)
+thermostat::ThermostatDeviceRuntime *g_thermostat = nullptr;
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) {
+    delay(10);
+  }
+
+  thermostat::ThermostatDeviceRuntimeConfig cfg;
+  cfg.transport.channel = 6;
+  cfg.transport.heartbeat_interval_ms = 10000;
+  cfg.controller_connection_timeout_ms = 30000;
+
+  static thermostat::ThermostatDeviceRuntime runtime(cfg);
+  g_thermostat = &runtime;
+
+  const bool ok = g_thermostat->begin();
+  Serial.printf("thermostat_runtime_begin=%u\n", static_cast<unsigned>(ok));
+}
+
+void loop() {
+  if (g_thermostat != nullptr) {
+    const uint32_t now = millis();
+
+    // Placeholder sensor/weather feeds until hardware drivers are bound.
+    const float indoor_temp_c = 21.5f;
+    const float indoor_humidity = 45.0f;
+    g_thermostat->on_local_sensor_update(indoor_temp_c, indoor_humidity);
+    g_thermostat->on_outdoor_weather_update(6.0f, "Cloudy");
+
+    g_thermostat->tick(now);
+
+    static uint32_t last_print_ms = 0;
+    if (now - last_print_ms > 5000) {
+      last_print_ms = now;
+      Serial.printf("status=%s setpoint=%s indoor=%s\n",
+                    g_thermostat->status_text(now).c_str(),
+                    g_thermostat->setpoint_text().c_str(),
+                    g_thermostat->indoor_temp_text().c_str());
+    }
+  }
+  delay(200);
+}
+
+#else
+thermostat::ControllerNode *g_controller = nullptr;
 
 void setup() {
   Serial.begin(115200);
@@ -43,18 +90,19 @@ void setup() {
   transport_cfg.heartbeat_interval_ms = 10000;
 
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);
-  g_node = &node;
+  g_controller = &node;
 
-  const bool ok = g_node->begin();
+  const bool ok = g_controller->begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
 }
 
 void loop() {
-  if (g_node != nullptr) {
-    g_node->tick(millis());
+  if (g_controller != nullptr) {
+    g_controller->tick(millis());
   }
   delay(100);
 }
+#endif
 
 #else
 
