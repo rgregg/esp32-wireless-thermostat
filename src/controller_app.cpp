@@ -1,0 +1,126 @@
+#include "controller_app.h"
+
+#include "espnow_cmd_word.h"
+
+namespace thermostat {
+
+namespace {
+
+constexpr float kHeatCallDeltaC = 0.3f;
+constexpr float kCoolCallDeltaC = 0.3f;
+
+}  // namespace
+
+ControllerApp::ControllerApp(IControllerTransport &transport,
+                             const ControllerConfig &config)
+    : transport_(transport), runtime_(config) {}
+
+void ControllerApp::on_heartbeat(uint32_t now_ms) {
+  runtime_.note_heartbeat(now_ms);
+}
+
+CommandApplyResult ControllerApp::on_command_word(uint32_t packed_word) {
+  const CommandWord cmd = espnow_cmd::decode(packed_word);
+  const CommandApplyResult result = runtime_.apply_remote_command(cmd);
+  if (result.accepted) {
+    publish();
+  }
+  return result;
+}
+
+void ControllerApp::set_hvac_lockout(bool locked) {
+  runtime_.set_hvac_lockout(locked);
+  publish();
+}
+
+void ControllerApp::on_indoor_temperature_c(float temp_c) {
+  indoor_temp_c_ = temp_c;
+  has_indoor_temp_ = true;
+}
+
+void ControllerApp::on_indoor_humidity(float humidity_pct) {
+  indoor_humidity_pct_ = humidity_pct;
+  has_indoor_humidity_ = true;
+}
+
+void ControllerApp::tick(uint32_t now_ms) {
+  bool heat_call = false;
+  bool cool_call = false;
+  compute_hvac_calls(&heat_call, &cool_call);
+  tick(now_ms, heat_call, cool_call);
+}
+
+void ControllerApp::tick(uint32_t now_ms, bool heat_call, bool cool_call) {
+  ControllerTickInput in;
+  in.now_ms = now_ms;
+  in.heat_call = heat_call;
+  in.cool_call = cool_call;
+  runtime_.tick(in);
+  publish();
+}
+
+uint8_t ControllerApp::mode_to_code(FurnaceMode mode) {
+  switch (mode) {
+    case FurnaceMode::Heat:
+      return 1;
+    case FurnaceMode::Cool:
+      return 2;
+    case FurnaceMode::Off:
+    default:
+      return 0;
+  }
+}
+
+uint8_t ControllerApp::fan_to_code(FanMode mode) {
+  switch (mode) {
+    case FanMode::AlwaysOn:
+      return 1;
+    case FanMode::Circulate:
+      return 2;
+    case FanMode::Automatic:
+    default:
+      return 0;
+  }
+}
+
+void ControllerApp::compute_hvac_calls(bool *heat_call, bool *cool_call) const {
+  if (heat_call == nullptr || cool_call == nullptr) {
+    return;
+  }
+
+  *heat_call = false;
+  *cool_call = false;
+
+  if (!has_indoor_temp_) {
+    return;
+  }
+
+  const float target = runtime_.target_temperature_c();
+
+  switch (runtime_.mode()) {
+    case FurnaceMode::Heat:
+      *heat_call = indoor_temp_c_ < (target - kHeatCallDeltaC);
+      break;
+
+    case FurnaceMode::Cool:
+      *cool_call = indoor_temp_c_ > (target + kCoolCallDeltaC);
+      break;
+
+    case FurnaceMode::Off:
+    default:
+      break;
+  }
+}
+
+void ControllerApp::publish() {
+  ControllerTelemetry t;
+  t.state = runtime_.furnace_state();
+  t.filter_runtime_hours = runtime_.filter_runtime_hours();
+  t.lockout = runtime_.hvac_lockout();
+  t.mode_code = mode_to_code(runtime_.mode());
+  t.fan_code = fan_to_code(runtime_.fan_mode());
+  t.setpoint_c = runtime_.target_temperature_c();
+  transport_.publish_telemetry(t);
+}
+
+}  // namespace thermostat

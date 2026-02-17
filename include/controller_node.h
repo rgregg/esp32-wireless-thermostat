@@ -1,0 +1,39 @@
+#pragma once
+
+#include <stdint.h>
+
+#include "controller_app.h"
+#include "transport/espnow_controller_transport.h"
+
+namespace thermostat {
+
+class ControllerNode {
+ public:
+  ControllerNode(const ControllerConfig &controller_config,
+                 const EspNowControllerConfig &transport_config);
+
+  bool begin();
+
+  // Runs transport loop and app tick using internally computed HVAC calls.
+  void tick(uint32_t now_ms);
+
+  ControllerApp &app() { return app_; }
+  EspNowControllerTransport &transport() { return transport_; }
+
+ private:
+  static void on_command_word_static(uint32_t packed_word, void *ctx);
+  static void on_heartbeat_static(uint32_t now_ms, void *ctx);
+  static void on_indoor_temp_static(float value, void *ctx);
+  static void on_indoor_humidity_static(float value, void *ctx);
+
+  void on_command_word(uint32_t packed_word);
+  void on_heartbeat(uint32_t now_ms);
+  void on_indoor_temp(float value);
+  void on_indoor_humidity(float value);
+
+  EspNowControllerTransport transport_;
+  ControllerApp app_;
+  EspNowControllerConfig transport_config_{};
+};
+
+}  // namespace thermostat

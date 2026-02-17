@@ -1,0 +1,28 @@
+#if defined(THERMOSTAT_RUN_TESTS)
+#include "display_model.h"
+#include "test_harness.h"
+#include "thermostat_ui_state.h"
+
+TEST_CASE(display_model_units_and_weather) {
+  thermostat::DisplayModel m;
+  m.set_temperature_unit(thermostat::TemperatureUnit::Fahrenheit);
+  m.set_local_setpoint_c(20.0f);
+  m.set_outdoor_temperature_c(0.0f);
+  m.set_weather_condition("Partly Cloudy");
+
+  ASSERT_TRUE(m.format_setpoint_text() == "68\xC2\xB0");
+  ASSERT_TRUE(m.weather_icon() == thermostat::WeatherIcon::PartlyCloudy);
+
+  m.set_temperature_unit(thermostat::TemperatureUnit::Celsius);
+  ASSERT_TRUE(m.format_setpoint_text() == "20.0\xC2\xB0");
+}
+
+TEST_CASE(ui_state_text_mapping) {
+  ASSERT_TRUE(thermostat::furnace_state_text(FurnaceStateCode::Idle, true,
+                                             false, false) == "Idle");
+  ASSERT_TRUE(thermostat::furnace_state_text(FurnaceStateCode::Idle, false,
+                                             false, false) == "Not Connected");
+  ASSERT_TRUE(thermostat::furnace_mode_text(FurnaceMode::Cool) == "Cool");
+  ASSERT_TRUE(thermostat::fan_mode_text(FanMode::Circulate) == "Circulate");
+}
+#endif
