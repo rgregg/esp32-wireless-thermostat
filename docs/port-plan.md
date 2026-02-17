@@ -7,9 +7,11 @@
 - Completed: Bidirectional ESP-NOW transport adapters and node wiring.
 - Completed: Display-domain app/model for UI-facing values, unit conversion, status text, and weather icon mapping.
 - Completed: Native automated tests for core components.
+- Completed: ESP32-S3 thermostat firmware wiring (RGB panel flush, GT911 touch input, backlight dimming, AHT20 polling, runtime loop glue).
+- Completed: LVGL thermostat pages/widgets/interactions for Home/Fan/Mode/Settings/Screensaver flows.
 
 ## Remaining Work
-- Optional: migrate full LVGL layout/widgets 1:1 from YAML into C++ LVGL screen builders.
+- Hardware validation on real controller + display boards.
 - Optional: add transport ACK/retry metrics and persistent diagnostics.
 - Optional: hardware-in-loop verification scripts for both devices.
 

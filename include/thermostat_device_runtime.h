@@ -28,10 +28,21 @@ class ThermostatDeviceRuntime {
   void on_user_set_setpoint(float user_value, uint32_t now_ms);
   void on_user_set_mode(FurnaceMode mode, uint32_t now_ms);
   void on_user_set_fan_mode(FanMode mode, uint32_t now_ms);
+  void request_sync(uint32_t now_ms);
+  void request_filter_reset(uint32_t now_ms);
+  void set_temperature_unit(TemperatureUnit unit);
+  TemperatureUnit temperature_unit() const;
+
+  FurnaceMode local_mode() const;
+  FanMode local_fan_mode() const;
+  float local_setpoint_c() const;
 
   std::string status_text(uint32_t now_ms) const;
   std::string setpoint_text() const;
   std::string indoor_temp_text() const;
+  std::string indoor_humidity_text() const;
+  std::string weather_text() const;
+  WeatherIcon weather_icon() const;
 
  private:
   ThermostatDeviceRuntimeConfig config_;

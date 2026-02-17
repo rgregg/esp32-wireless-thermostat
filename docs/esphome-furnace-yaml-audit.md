@@ -103,4 +103,4 @@ Stale command rejection:
 - ESPHome climate thermostat behavior must be replaced by explicit state machine logic in C++.
 - Existing implementation sends packed command as float; preserve exact bit behavior to avoid interop regressions.
 - Relay interlock and startup defaults are safety-critical and should be treated as blocking requirements.
-- LVGL UX is large and should be ported after controller core loop is stable.
+- LVGL UX parity is now implemented with a C++ LVGL firmware layer; remaining validation is hardware-in-loop behavior and visual polish checks.

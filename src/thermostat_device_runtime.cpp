@@ -35,6 +35,30 @@ void ThermostatDeviceRuntime::on_user_set_fan_mode(FanMode mode, uint32_t now_ms
   display_.on_user_set_fan_mode(mode, now_ms);
 }
 
+void ThermostatDeviceRuntime::request_sync(uint32_t now_ms) {
+  node_.app().request_sync(now_ms);
+}
+
+void ThermostatDeviceRuntime::request_filter_reset(uint32_t now_ms) {
+  node_.app().request_filter_reset(now_ms);
+}
+
+void ThermostatDeviceRuntime::set_temperature_unit(TemperatureUnit unit) {
+  display_.set_temperature_unit(unit);
+}
+
+TemperatureUnit ThermostatDeviceRuntime::temperature_unit() const {
+  return display_.temperature_unit();
+}
+
+FurnaceMode ThermostatDeviceRuntime::local_mode() const { return display_.local_mode(); }
+
+FanMode ThermostatDeviceRuntime::local_fan_mode() const { return display_.local_fan_mode(); }
+
+float ThermostatDeviceRuntime::local_setpoint_c() const {
+  return display_.local_setpoint_c();
+}
+
 std::string ThermostatDeviceRuntime::status_text(uint32_t now_ms) const {
   return display_.status_text(now_ms, config_.controller_connection_timeout_ms);
 }
@@ -46,5 +70,15 @@ std::string ThermostatDeviceRuntime::setpoint_text() const {
 std::string ThermostatDeviceRuntime::indoor_temp_text() const {
   return display_.indoor_temp_text();
 }
+
+std::string ThermostatDeviceRuntime::indoor_humidity_text() const {
+  return display_.indoor_humidity_text();
+}
+
+std::string ThermostatDeviceRuntime::weather_text() const {
+  return display_.weather_text();
+}
+
+WeatherIcon ThermostatDeviceRuntime::weather_icon() const { return display_.weather_icon(); }
 
 }  // namespace thermostat

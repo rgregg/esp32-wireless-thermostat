@@ -24,6 +24,10 @@ class ThermostatDisplayApp {
   void on_user_set_mode(FurnaceMode mode, uint32_t now_ms);
   void on_user_set_fan_mode(FanMode mode, uint32_t now_ms);
 
+  FurnaceMode local_mode() const { return app_.local_mode(); }
+  FanMode local_fan_mode() const { return app_.local_fan_mode(); }
+  float local_setpoint_c() const { return app_.local_setpoint_c(); }
+
   std::string status_text(uint32_t now_ms, uint32_t connection_timeout_ms) const;
   std::string setpoint_text() const { return model_.format_setpoint_text(); }
   std::string indoor_temp_text() const { return model_.format_indoor_temperature_text(); }
