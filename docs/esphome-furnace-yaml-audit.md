@@ -2,16 +2,16 @@
 
 This audit covers the furnace thermostat set of YAMLs:
 
-- `/Users/ryan/github/rgregg/esphome-sheridan/furnace-controller.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/furnace-display.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/test-furnace-display.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/espnow/espnow-controller.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/espnow/espnow-thermostat.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/lvgl-ux/ux-thermostat.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/esp32-8048S043C.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/management-defaults.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/sntp-clock.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/firmware-version.yaml`
+- `../esphome-sheridan/furnace-controller.yaml`
+- `../esphome-sheridan/furnace-display.yaml`
+- `../esphome-sheridan/test-furnace-display.yaml`
+- `../esphome-sheridan/espnow/espnow-controller.yaml`
+- `../esphome-sheridan/espnow/espnow-thermostat.yaml`
+- `../esphome-sheridan/lvgl-ux/ux-thermostat.yaml`
+- `../esphome-sheridan/templates/esp32-8048S043C.yaml`
+- `../esphome-sheridan/templates/management-defaults.yaml`
+- `../esphome-sheridan/templates/sntp-clock.yaml`
+- `../esphome-sheridan/templates/firmware-version.yaml`
 
 ## Functional Inventory
 

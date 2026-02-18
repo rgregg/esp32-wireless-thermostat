@@ -4,7 +4,7 @@
 This documents the current ESP-NOW transport adapters present in the PlatformIO port.
 
 ## Packet Types
-Defined in `/Users/ryan/github/rgregg/esp32-wireless-thermostat/include/transport/espnow_packets.h`.
+Defined in `./include/transport/espnow_packets.h`.
 
 - `Heartbeat` (`PacketType::Heartbeat`)
 - `CommandWord` (`PacketType::CommandWord`)
@@ -17,12 +17,12 @@ Protocol version: `1`.
 ## Implemented Adapters
 
 Controller-side adapter:
-- `/Users/ryan/github/rgregg/esp32-wireless-thermostat/include/transport/espnow_controller_transport.h`
-- `/Users/ryan/github/rgregg/esp32-wireless-thermostat/src/transport/espnow_controller_transport.cpp`
+- `./include/transport/espnow_controller_transport.h`
+- `./src/transport/espnow_controller_transport.cpp`
 
 Thermostat-side adapter:
-- `/Users/ryan/github/rgregg/esp32-wireless-thermostat/include/transport/espnow_thermostat_transport.h`
-- `/Users/ryan/github/rgregg/esp32-wireless-thermostat/src/transport/espnow_thermostat_transport.cpp`
+- `./include/transport/espnow_thermostat_transport.h`
+- `./src/transport/espnow_thermostat_transport.cpp`
 
 ## Current Behavior
 

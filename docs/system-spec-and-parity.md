@@ -5,16 +5,16 @@ This document is the formal baseline spec for the thermostat/display + controlle
 ## Scope
 
 Baseline sources:
-- `/Users/ryan/github/rgregg/esphome-sheridan/furnace-controller.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/furnace-display.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/lvgl-ux/ux-thermostat.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/esp32-8048S043C.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/management-defaults.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/espnow/espnow-controller.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/espnow/espnow-thermostat.yaml`
+- `../esphome-sheridan/furnace-controller.yaml`
+- `../esphome-sheridan/furnace-display.yaml`
+- `../esphome-sheridan/lvgl-ux/ux-thermostat.yaml`
+- `../esphome-sheridan/templates/esp32-8048S043C.yaml`
+- `../esphome-sheridan/templates/management-defaults.yaml`
+- `../esphome-sheridan/espnow/espnow-controller.yaml`
+- `../esphome-sheridan/espnow/espnow-thermostat.yaml`
 
 Port under evaluation:
-- `/Users/ryan/github/rgregg/esp32-wireless-thermostat`
+- `.`
 
 Status legend:
 - `Implemented`: behavior is present and wired in current firmware.

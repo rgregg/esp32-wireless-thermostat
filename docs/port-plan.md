@@ -2,13 +2,13 @@
 
 ## Verification Scope
 Task list verified against:
-- `/Users/ryan/github/rgregg/esphome-sheridan/furnace-controller.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/furnace-display.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/espnow/espnow-controller.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/espnow/espnow-thermostat.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/lvgl-ux/ux-thermostat.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/management-defaults.yaml`
-- `/Users/ryan/github/rgregg/esphome-sheridan/templates/sntp-clock.yaml`
+- `../esphome-sheridan/furnace-controller.yaml`
+- `../esphome-sheridan/furnace-display.yaml`
+- `../esphome-sheridan/espnow/espnow-controller.yaml`
+- `../esphome-sheridan/espnow/espnow-thermostat.yaml`
+- `../esphome-sheridan/lvgl-ux/ux-thermostat.yaml`
+- `../esphome-sheridan/templates/management-defaults.yaml`
+- `../esphome-sheridan/templates/sntp-clock.yaml`
 
 ## Completed
 - Controller/runtime core: command decode + sequence freshness, failsafe + lockout gating, min run/off/idle state machine, fan circulate scheduler, filter runtime accounting.
