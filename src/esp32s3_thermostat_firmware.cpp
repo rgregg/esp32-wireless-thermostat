@@ -2,10 +2,13 @@
 
 #include "esp32s3_thermostat_firmware.h"
 
+#include <cctype>
 #include <cstring>
 
 #include <Wire.h>
 #include <lvgl.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
 
 #include "thermostat_device_runtime.h"
 #include "thermostat_screen_controller.h"
@@ -37,6 +40,48 @@ constexpr int kTouchI2cSda = 19;
 constexpr int kTouchI2cScl = 20;
 constexpr int kSensorI2cSda = 18;
 constexpr int kSensorI2cScl = 17;
+constexpr uint32_t kNetworkRetryMs = 5000;
+constexpr uint32_t kMqttPublishMs = 10000;
+
+#ifndef THERMOSTAT_WIFI_SSID
+#define THERMOSTAT_WIFI_SSID ""
+#endif
+
+#ifndef THERMOSTAT_WIFI_PASSWORD
+#define THERMOSTAT_WIFI_PASSWORD ""
+#endif
+
+#ifndef THERMOSTAT_MQTT_HOST
+#define THERMOSTAT_MQTT_HOST ""
+#endif
+
+#ifndef THERMOSTAT_MQTT_PORT
+#define THERMOSTAT_MQTT_PORT 1883
+#endif
+
+#ifndef THERMOSTAT_MQTT_USER
+#define THERMOSTAT_MQTT_USER ""
+#endif
+
+#ifndef THERMOSTAT_MQTT_PASSWORD
+#define THERMOSTAT_MQTT_PASSWORD ""
+#endif
+
+#ifndef THERMOSTAT_MQTT_CLIENT_ID
+#define THERMOSTAT_MQTT_CLIENT_ID "esp32-wireless-thermostat"
+#endif
+
+#ifndef THERMOSTAT_MQTT_NODE_ID
+#define THERMOSTAT_MQTT_NODE_ID "esp32_wireless_thermostat"
+#endif
+
+#ifndef THERMOSTAT_MQTT_BASE_TOPIC
+#define THERMOSTAT_MQTT_BASE_TOPIC "thermostat/furnace-display"
+#endif
+
+#ifndef THERMOSTAT_MQTT_DISCOVERY_PREFIX
+#define THERMOSTAT_MQTT_DISCOVERY_PREFIX "homeassistant"
+#endif
 
 struct TouchState {
   bool touched = false;
@@ -57,6 +102,9 @@ Adafruit_AHTX0 g_aht;
 bool g_aht_ready = false;
 TwoWire g_touch_i2c(0);
 TwoWire g_sensor_i2c(1);
+WiFiClient g_wifi_client;
+PubSubClient g_mqtt(g_wifi_client);
+bool g_mqtt_discovery_sent = false;
 
 ThermostatDeviceRuntime *g_runtime = nullptr;
 ThermostatScreenController g_screen;
@@ -81,6 +129,212 @@ uint32_t g_last_ui_tick_ms = 0;
 uint32_t g_last_runtime_tick_ms = 0;
 uint32_t g_last_sensor_poll_ms = 0;
 uint32_t g_last_ui_refresh_ms = 0;
+uint32_t g_last_wifi_attempt_ms = 0;
+uint32_t g_last_mqtt_attempt_ms = 0;
+uint32_t g_last_mqtt_publish_ms = 0;
+
+const char *mode_to_mqtt(FurnaceMode mode) {
+  switch (mode) {
+    case FurnaceMode::Heat:
+      return "heat";
+    case FurnaceMode::Cool:
+      return "cool";
+    case FurnaceMode::Off:
+    default:
+      return "off";
+  }
+}
+
+const char *fan_to_mqtt(FanMode mode) {
+  switch (mode) {
+    case FanMode::AlwaysOn:
+      return "on";
+    case FanMode::Circulate:
+      return "circulate";
+    case FanMode::Automatic:
+    default:
+      return "auto";
+  }
+}
+
+String topic_for(const char *suffix) {
+  String out(THERMOSTAT_MQTT_BASE_TOPIC);
+  out += "/";
+  out += suffix;
+  return out;
+}
+
+bool parse_bool_payload(const char *value) {
+  return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0;
+}
+
+void lower_in_place(char *text) {
+  for (size_t i = 0; text[i] != '\0'; ++i) {
+    text[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(text[i])));
+  }
+}
+
+float parse_numeric_prefix(const std::string &text, bool *ok) {
+  if (ok != nullptr) {
+    *ok = false;
+  }
+  if (text.empty()) {
+    return 0.0f;
+  }
+  if (!((text[0] >= '0' && text[0] <= '9') || text[0] == '-' || text[0] == '+')) {
+    return 0.0f;
+  }
+  char *end = nullptr;
+  const float value = strtof(text.c_str(), &end);
+  if (end == text.c_str()) {
+    return 0.0f;
+  }
+  if (ok != nullptr) {
+    *ok = true;
+  }
+  return value;
+}
+
+void mqtt_publish_state() {
+  if (g_runtime == nullptr || !g_mqtt.connected()) return;
+
+  const uint32_t now = millis();
+
+  g_mqtt.publish(topic_for("state/availability").c_str(), "online", true);
+  g_mqtt.publish(topic_for("state/mode").c_str(), mode_to_mqtt(g_runtime->local_mode()), true);
+  g_mqtt.publish(topic_for("state/fan_mode").c_str(), fan_to_mqtt(g_runtime->local_fan_mode()),
+                 true);
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%.1f", g_runtime->local_setpoint_c());
+  g_mqtt.publish(topic_for("state/target_temp_c").c_str(), buf, true);
+
+  bool ok = false;
+  const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok);
+  if (ok) {
+    snprintf(buf, sizeof(buf), "%.2f", indoor_c);
+    g_mqtt.publish(topic_for("state/current_temp_c").c_str(), buf, true);
+  }
+
+  ok = false;
+  const float indoor_h = parse_numeric_prefix(g_runtime->indoor_humidity_text(), &ok);
+  if (ok) {
+    snprintf(buf, sizeof(buf), "%.2f", indoor_h);
+    g_mqtt.publish(topic_for("state/current_humidity").c_str(), buf, true);
+  }
+
+  g_mqtt.publish(topic_for("state/status").c_str(), g_runtime->status_text(now).c_str(), true);
+}
+
+void mqtt_publish_discovery() {
+  if (!g_mqtt.connected() || g_mqtt_discovery_sent) return;
+
+  const String base = THERMOSTAT_MQTT_BASE_TOPIC;
+  const String node = THERMOSTAT_MQTT_NODE_ID;
+  const String config_topic = String(THERMOSTAT_MQTT_DISCOVERY_PREFIX) + "/climate/" + node +
+                              "/config";
+
+  char payload[1200];
+  snprintf(
+      payload, sizeof(payload),
+      "{\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\",\"mode_cmd_t\":\"%s/cmd/"
+      "mode\",\"mode_stat_t\":\"%s/state/mode\",\"temp_cmd_t\":\"%s/cmd/target_temp_c\","
+      "\"temp_stat_t\":\"%s/state/target_temp_c\",\"curr_temp_t\":\"%s/state/current_temp_c\","
+      "\"fan_mode_cmd_t\":\"%s/cmd/fan_mode\",\"fan_mode_stat_t\":\"%s/state/fan_mode\","
+      "\"curr_hum_t\":\"%s/state/current_humidity\",\"modes\":[\"off\",\"heat\",\"cool\"],"
+      "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],\"avty_t\":\"%s/state/availability\","
+      "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"min_temp\":5,\"max_temp\":35,"
+      "\"temp_step\":0.5,\"temp_unit\":\"C\"}",
+      node.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(),
+      base.c_str(), base.c_str(), base.c_str(), base.c_str());
+  g_mqtt.publish(config_topic.c_str(), payload, true);
+  g_mqtt_discovery_sent = true;
+}
+
+void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
+  if (g_runtime == nullptr || topic == nullptr || payload == nullptr) return;
+
+  char value[64];
+  const size_t copy_len = (length < sizeof(value) - 1) ? length : sizeof(value) - 1;
+  memcpy(value, payload, copy_len);
+  value[copy_len] = '\0';
+  lower_in_place(value);
+
+  const uint32_t now = millis();
+  const String topic_str(topic);
+
+  if (topic_str == topic_for("cmd/mode")) {
+    if (strcmp(value, "heat") == 0) {
+      g_runtime->on_user_set_mode(FurnaceMode::Heat, now);
+    } else if (strcmp(value, "cool") == 0) {
+      g_runtime->on_user_set_mode(FurnaceMode::Cool, now);
+    } else {
+      g_runtime->on_user_set_mode(FurnaceMode::Off, now);
+    }
+  } else if (topic_str == topic_for("cmd/fan_mode")) {
+    if (strcmp(value, "on") == 0 || strcmp(value, "always on") == 0) {
+      g_runtime->on_user_set_fan_mode(FanMode::AlwaysOn, now);
+    } else if (strcmp(value, "circulate") == 0) {
+      g_runtime->on_user_set_fan_mode(FanMode::Circulate, now);
+    } else {
+      g_runtime->on_user_set_fan_mode(FanMode::Automatic, now);
+    }
+  } else if (topic_str == topic_for("cmd/target_temp_c")) {
+    const float celsius = static_cast<float>(atof(value));
+    g_runtime->on_user_set_setpoint_c(celsius, now);
+  } else if (topic_str == topic_for("cmd/unit")) {
+    g_runtime->set_temperature_unit(strcmp(value, "f") == 0 || strcmp(value, "fahrenheit") == 0
+                                        ? TemperatureUnit::Fahrenheit
+                                        : TemperatureUnit::Celsius);
+  } else if (topic_str == topic_for("cmd/sync")) {
+    if (parse_bool_payload(value)) {
+      g_runtime->request_sync(now);
+    }
+  } else if (topic_str == topic_for("cmd/filter_reset")) {
+    if (parse_bool_payload(value)) {
+      g_runtime->request_filter_reset(now);
+    }
+  }
+
+  mqtt_publish_state();
+}
+
+void ensure_wifi_connected(uint32_t now_ms) {
+  if (strlen(THERMOSTAT_WIFI_SSID) == 0) return;
+  if (WiFi.status() == WL_CONNECTED) return;
+  if ((now_ms - g_last_wifi_attempt_ms) < kNetworkRetryMs) return;
+  g_last_wifi_attempt_ms = now_ms;
+  WiFi.begin(THERMOSTAT_WIFI_SSID, THERMOSTAT_WIFI_PASSWORD);
+}
+
+void ensure_mqtt_connected(uint32_t now_ms) {
+  if (strlen(THERMOSTAT_MQTT_HOST) == 0) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (g_mqtt.connected()) return;
+  if ((now_ms - g_last_mqtt_attempt_ms) < kNetworkRetryMs) return;
+
+  g_last_mqtt_attempt_ms = now_ms;
+
+  bool ok = false;
+  if (strlen(THERMOSTAT_MQTT_USER) == 0) {
+    ok = g_mqtt.connect(THERMOSTAT_MQTT_CLIENT_ID);
+  } else {
+    ok = g_mqtt.connect(THERMOSTAT_MQTT_CLIENT_ID, THERMOSTAT_MQTT_USER,
+                        THERMOSTAT_MQTT_PASSWORD);
+  }
+
+  if (!ok) return;
+
+  g_mqtt.subscribe(topic_for("cmd/mode").c_str());
+  g_mqtt.subscribe(topic_for("cmd/fan_mode").c_str());
+  g_mqtt.subscribe(topic_for("cmd/target_temp_c").c_str());
+  g_mqtt.subscribe(topic_for("cmd/unit").c_str());
+  g_mqtt.subscribe(topic_for("cmd/sync").c_str());
+  g_mqtt.subscribe(topic_for("cmd/filter_reset").c_str());
+
+  mqtt_publish_discovery();
+  mqtt_publish_state();
+}
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
   if (g_panel != nullptr) {
@@ -477,6 +731,12 @@ void init_sensors() {
   g_aht_ready = g_aht.begin(&g_sensor_i2c);
 }
 
+void init_network() {
+  WiFi.mode(WIFI_STA);
+  g_mqtt.setServer(THERMOSTAT_MQTT_HOST, THERMOSTAT_MQTT_PORT);
+  g_mqtt.setCallback(mqtt_on_message);
+}
+
 void poll_sensors(uint32_t now_ms) {
   if (g_runtime == nullptr) return;
   if ((now_ms - g_last_sensor_poll_ms) < kSensorPollMs) return;
@@ -514,6 +774,7 @@ void thermostat_firmware_setup() {
 
   init_backlight();
   init_sensors();
+  init_network();
   init_display_and_lvgl();
   create_ui();
 
@@ -536,6 +797,15 @@ void thermostat_firmware_loop() {
     g_screen.tick(now);
     show_page(g_screen.current_page());
     apply_backlight(g_screen.screensaver_active());
+  }
+
+  ensure_wifi_connected(now);
+  ensure_mqtt_connected(now);
+  g_mqtt.loop();
+
+  if (g_mqtt.connected() && (now - g_last_mqtt_publish_ms) >= kMqttPublishMs) {
+    g_last_mqtt_publish_ms = now;
+    mqtt_publish_state();
   }
 
   poll_sensors(now);

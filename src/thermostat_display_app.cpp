@@ -35,6 +35,11 @@ void ThermostatDisplayApp::on_user_set_setpoint(float user_value, uint32_t now_m
   model_.set_local_setpoint_c(app_.local_setpoint_c());
 }
 
+void ThermostatDisplayApp::on_user_set_setpoint_c(float setpoint_c, uint32_t now_ms) {
+  app_.set_local_setpoint_c(setpoint_c, now_ms);
+  model_.set_local_setpoint_c(app_.local_setpoint_c());
+}
+
 void ThermostatDisplayApp::on_user_set_mode(FurnaceMode mode, uint32_t now_ms) {
   app_.set_local_mode(mode, now_ms);
 }

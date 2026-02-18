@@ -42,3 +42,24 @@ PlatformIO port of the ESPHome furnace controller + thermostat display project.
 ## Current Validation Status
 - `native`, `native-tests`, `esp32dev-controller`, and `esp32s3-display` builds passing.
 - Native runtime tests passing for codec, controller runtime/app, thermostat app, and display-model behavior.
+
+## MQTT + Home Assistant
+- Thermostat firmware now publishes/subscribes MQTT topics and sends Home Assistant MQTT discovery for a climate entity.
+- Configure credentials and topic settings with build flags in `platformio.ini` or `platformio_override.ini`:
+  - `THERMOSTAT_WIFI_SSID`
+  - `THERMOSTAT_WIFI_PASSWORD`
+  - `THERMOSTAT_MQTT_HOST`
+  - `THERMOSTAT_MQTT_PORT` (default `1883`)
+  - `THERMOSTAT_MQTT_USER`
+  - `THERMOSTAT_MQTT_PASSWORD`
+  - `THERMOSTAT_MQTT_CLIENT_ID`
+  - `THERMOSTAT_MQTT_NODE_ID`
+  - `THERMOSTAT_MQTT_BASE_TOPIC` (default `thermostat/furnace-display`)
+  - `THERMOSTAT_MQTT_DISCOVERY_PREFIX` (default `homeassistant`)
+- Command topics:
+  - `<base>/cmd/mode` (`off|heat|cool`)
+  - `<base>/cmd/fan_mode` (`auto|on|circulate`)
+  - `<base>/cmd/target_temp_c` (float C)
+  - `<base>/cmd/unit` (`c|f`)
+  - `<base>/cmd/sync` (`1|true|on`)
+  - `<base>/cmd/filter_reset` (`1|true|on`)

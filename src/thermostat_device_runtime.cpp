@@ -27,6 +27,10 @@ void ThermostatDeviceRuntime::on_user_set_setpoint(float user_value, uint32_t no
   display_.on_user_set_setpoint(user_value, now_ms);
 }
 
+void ThermostatDeviceRuntime::on_user_set_setpoint_c(float setpoint_c, uint32_t now_ms) {
+  display_.on_user_set_setpoint_c(setpoint_c, now_ms);
+}
+
 void ThermostatDeviceRuntime::on_user_set_mode(FurnaceMode mode, uint32_t now_ms) {
   display_.on_user_set_mode(mode, now_ms);
 }
