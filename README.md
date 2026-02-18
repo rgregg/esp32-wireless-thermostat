@@ -26,6 +26,9 @@ PlatformIO port of the ESPHome furnace controller + thermostat display project.
 - `include/`: public headers for runtime, transport, and app layers.
 - `src/`: implementation code and native tests.
 
+Primary specification and parity guide:
+- `docs/system-spec-and-parity.md`
+
 ## Build
 - Host compile:
   - `pio run -e native`
