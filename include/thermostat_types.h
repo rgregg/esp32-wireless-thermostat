@@ -28,6 +28,7 @@ struct RelayDemand {
   bool heat = false;
   bool cool = false;
   bool fan = false;
+  bool spare = false;
 };
 
 struct ThermostatSnapshot {

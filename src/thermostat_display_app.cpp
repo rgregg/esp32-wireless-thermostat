@@ -17,9 +17,10 @@ void ThermostatDisplayApp::sync_from_app() {
 
 void ThermostatDisplayApp::on_local_sensor_update(float indoor_temp_c,
                                                   float indoor_humidity) {
-  model_.set_local_indoor_temperature_c(indoor_temp_c);
+  const float compensated_temp_c = indoor_temp_c + local_temperature_compensation_c_;
+  model_.set_local_indoor_temperature_c(compensated_temp_c);
   model_.set_local_indoor_humidity(indoor_humidity);
-  app_.publish_indoor_temperature_c(indoor_temp_c);
+  app_.publish_indoor_temperature_c(compensated_temp_c);
   app_.publish_indoor_humidity(indoor_humidity);
 }
 

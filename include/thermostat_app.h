@@ -48,9 +48,11 @@ class ThermostatApp {
  private:
   static FurnaceMode mode_from_code(uint8_t mode_code);
   static FanMode fan_from_code(uint8_t fan_code);
+  static bool is_newer_u16(uint16_t previous, uint16_t incoming);
 
   void mark_local_interaction(uint32_t now_ms);
   void send_command(bool do_sync, bool do_filter_reset);
+  void ack_controller_seq(uint16_t seq);
 
   IThermostatTransport &transport_;
   ThermostatAppConfig config_;
@@ -68,6 +70,8 @@ class ThermostatApp {
 
   uint32_t last_local_interaction_ms_ = 0;
   uint32_t last_controller_heartbeat_ms_ = 0;
+  bool has_controller_seq_ = false;
+  uint16_t last_controller_seq_ = 0;
 };
 
 }  // namespace thermostat

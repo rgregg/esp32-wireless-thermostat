@@ -55,6 +55,14 @@ TemperatureUnit ThermostatDeviceRuntime::temperature_unit() const {
   return display_.temperature_unit();
 }
 
+void ThermostatDeviceRuntime::set_local_temperature_compensation_c(float value) {
+  display_.set_local_temperature_compensation_c(value);
+}
+
+float ThermostatDeviceRuntime::local_temperature_compensation_c() const {
+  return display_.local_temperature_compensation_c();
+}
+
 FurnaceMode ThermostatDeviceRuntime::local_mode() const { return display_.local_mode(); }
 
 FanMode ThermostatDeviceRuntime::local_fan_mode() const { return display_.local_fan_mode(); }

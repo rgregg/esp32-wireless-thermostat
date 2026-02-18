@@ -12,6 +12,7 @@ enum class PacketType : uint8_t {
   ControllerTelemetry = 3,
   IndoorTemperature = 4,
   IndoorHumidity = 5,
+  ControllerAck = 6,
 };
 
 #pragma pack(push, 1)
@@ -32,6 +33,7 @@ struct CommandWordPacket {
 
 struct ControllerTelemetryPacket {
   PacketHeader header;
+  uint16_t seq;
   uint8_t state;
   uint8_t lockout;
   uint8_t mode;
@@ -43,6 +45,11 @@ struct ControllerTelemetryPacket {
 struct FloatValuePacket {
   PacketHeader header;
   float value;
+};
+
+struct ControllerAckPacket {
+  PacketHeader header;
+  uint16_t seq;
 };
 #pragma pack(pop)
 

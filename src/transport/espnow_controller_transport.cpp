@@ -28,6 +28,8 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
 
   esp_now_register_recv_cb(
       reinterpret_cast<esp_now_recv_cb_t>(&EspNowControllerTransport::on_recv_static));
+  esp_now_register_send_cb(
+      reinterpret_cast<esp_now_send_cb_t>(&EspNowControllerTransport::on_send_static));
 
   esp_now_peer_info_t peer_info;
   memset(&peer_info, 0, sizeof(peer_info));
@@ -73,11 +75,13 @@ void EspNowControllerTransport::set_callbacks(CommandWordCallback command_cb,
                                               HeartbeatCallback heartbeat_cb,
                                               IndoorValueCallback indoor_temp_cb,
                                               IndoorValueCallback indoor_humidity_cb,
+                                              ThermostatAckCallback ack_cb,
                                               void *callback_context) {
   command_cb_ = command_cb;
   heartbeat_cb_ = heartbeat_cb;
   indoor_temp_cb_ = indoor_temp_cb;
   indoor_humidity_cb_ = indoor_humidity_cb;
+  ack_cb_ = ack_cb;
   callback_context_ = callback_context;
 }
 
@@ -90,6 +94,7 @@ void EspNowControllerTransport::publish_telemetry(
   ControllerTelemetryPacket pkt;
   pkt.header.type = static_cast<uint8_t>(PacketType::ControllerTelemetry);
   pkt.header.version = kEspNowProtocolVersion;
+  pkt.seq = telemetry.seq;
   pkt.state = static_cast<uint8_t>(telemetry.state);
   pkt.lockout = telemetry.lockout ? 1 : 0;
   pkt.mode = telemetry.mode_code;
@@ -120,6 +125,21 @@ void EspNowControllerTransport::on_recv_static(const void * /*recv_info*/,
     return;
   }
   instance_->on_recv(data, len);
+}
+
+void EspNowControllerTransport::on_send_static(const uint8_t * /*mac_addr*/, int status) {
+  if (instance_ == nullptr) {
+    return;
+  }
+#if defined(ARDUINO)
+  if (status == static_cast<int>(ESP_NOW_SEND_SUCCESS)) {
+    ++instance_->send_ok_count_;
+  } else {
+    ++instance_->send_fail_count_;
+  }
+#else
+  (void)status;
+#endif
 }
 
 void EspNowControllerTransport::on_recv(const uint8_t *data, int len) {
@@ -163,6 +183,13 @@ void EspNowControllerTransport::on_recv(const uint8_t *data, int len) {
           indoor_humidity_cb_ != nullptr) {
         const auto *pkt = reinterpret_cast<const FloatValuePacket *>(data);
         indoor_humidity_cb_(pkt->value, callback_context_);
+      }
+      break;
+
+    case PacketType::ControllerAck:
+      if (len >= static_cast<int>(sizeof(ControllerAckPacket)) && ack_cb_ != nullptr) {
+        const auto *pkt = reinterpret_cast<const ControllerAckPacket *>(data);
+        ack_cb_(pkt->seq, callback_context_);
       }
       break;
 

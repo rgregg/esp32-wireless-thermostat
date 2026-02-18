@@ -9,6 +9,7 @@
 namespace thermostat {
 
 struct ThermostatControllerTelemetry {
+  uint16_t seq = 0;
   FurnaceStateCode state = FurnaceStateCode::Error;
   bool lockout = false;
   uint8_t mode_code = 0;
@@ -39,11 +40,15 @@ class EspNowThermostatTransport final : public IThermostatTransport {
                      void *callback_context);
 
   void publish_command_word(uint32_t packed_word) override;
+  void publish_controller_ack(uint16_t seq) override;
   void publish_indoor_temperature_c(float temp_c) override;
   void publish_indoor_humidity(float humidity_pct) override;
+  uint32_t send_ok_count() const { return send_ok_count_; }
+  uint32_t send_fail_count() const { return send_fail_count_; }
 
  private:
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
+  static void on_send_static(const uint8_t *mac_addr, int status);
   void on_recv(const uint8_t *data, int len);
   void send_heartbeat(uint32_t now_ms);
 
@@ -57,6 +62,8 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   void *callback_context_ = nullptr;
 
   static EspNowThermostatTransport *instance_;
+  uint32_t send_ok_count_ = 0;
+  uint32_t send_fail_count_ = 0;
 };
 
 }  // namespace thermostat

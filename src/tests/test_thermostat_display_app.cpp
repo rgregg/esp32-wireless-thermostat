@@ -10,6 +10,10 @@ class FakeThermostatTransport : public thermostat::IThermostatTransport {
     last_cmd = packed_word;
     ++cmd_count;
   }
+  void publish_controller_ack(uint16_t seq) override {
+    last_ack_seq = seq;
+    ++ack_count;
+  }
   void publish_indoor_temperature_c(float temp_c) override {
     last_temp = temp_c;
     ++temp_count;
@@ -21,6 +25,8 @@ class FakeThermostatTransport : public thermostat::IThermostatTransport {
 
   uint32_t last_cmd = 0;
   int cmd_count = 0;
+  uint16_t last_ack_seq = 0;
+  int ack_count = 0;
   float last_temp = 0.0f;
   float last_humidity = 0.0f;
   int temp_count = 0;
@@ -38,9 +44,11 @@ TEST_CASE(thermostat_display_app_user_and_sensor_flow) {
   ASSERT_TRUE(tx.cmd_count == 1);
   ASSERT_NEAR(app.local_setpoint_c(), 22.2f, 0.2f);
 
+  display.set_local_temperature_compensation_c(1.5f);
   display.on_local_sensor_update(21.5f, 45.0f);
   ASSERT_TRUE(tx.temp_count == 1);
   ASSERT_TRUE(tx.humidity_count == 1);
+  ASSERT_NEAR(tx.last_temp, 23.0f, 0.01f);
 
   display.on_outdoor_weather_update(0.0f, "Sunny");
   ASSERT_TRUE(display.weather_icon() == thermostat::WeatherIcon::Sunny);
@@ -52,6 +60,7 @@ TEST_CASE(thermostat_display_app_status_text) {
   thermostat::ThermostatDisplayApp display(app);
 
   thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 1;
   telem.state = FurnaceStateCode::HeatOn;
   telem.lockout = false;
   app.on_controller_heartbeat(1000);

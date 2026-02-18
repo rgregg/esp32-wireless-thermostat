@@ -20,6 +20,8 @@ struct ControllerConfig {
   float heat_overrun_c = 0.5f;
   float cool_deadband_c = 0.5f;
   float cool_overrun_c = 0.5f;
+  float indoor_temp_fallback_c = 20.0f;
+  float indoor_humidity_fallback_pct = 50.0f;
 };
 
 struct ControllerTickInput {

@@ -48,9 +48,12 @@ Primary specification and parity guide:
 
 ## MQTT + Home Assistant
 - Thermostat firmware now publishes/subscribes MQTT topics and sends Home Assistant MQTT discovery for a climate entity.
-- Configure credentials and topic settings with build flags in `platformio.ini` or `platformio_override.ini`:
-  - `THERMOSTAT_WIFI_SSID`
-  - `THERMOSTAT_WIFI_PASSWORD`
+- Wi-Fi provisioning behavior:
+  - If `THERMOSTAT_WIFI_SSID` is set, firmware uses that static SSID/password.
+  - If `THERMOSTAT_WIFI_SSID` is empty, firmware attempts stored credentials, then starts BLE provisioning (`WiFiProv`) after a short timeout.
+- Configure network and topic settings with build flags in `platformio.ini` or `platformio_override.ini`:
+  - `THERMOSTAT_WIFI_SSID` (optional)
+  - `THERMOSTAT_WIFI_PASSWORD` (optional; used with `THERMOSTAT_WIFI_SSID`)
   - `THERMOSTAT_MQTT_HOST`
   - `THERMOSTAT_MQTT_PORT` (default `1883`)
   - `THERMOSTAT_MQTT_USER`
@@ -59,6 +62,9 @@ Primary specification and parity guide:
   - `THERMOSTAT_MQTT_NODE_ID`
   - `THERMOSTAT_MQTT_BASE_TOPIC` (default `thermostat/furnace-display`)
   - `THERMOSTAT_MQTT_DISCOVERY_PREFIX` (default `homeassistant`)
+  - `THERMOSTAT_PROV_POP` (default `thermostat-setup`)
+  - `THERMOSTAT_PROV_SERVICE_NAME` (default `PROV_ESP32_THERMOSTAT`)
+  - `THERMOSTAT_PROV_RESET_PROVISIONED` (`0` default, `1` to clear saved credentials at boot)
 - Command topics:
   - `<base>/cmd/mode` (`off|heat|cool`)
   - `<base>/cmd/fan_mode` (`auto|on|circulate`)

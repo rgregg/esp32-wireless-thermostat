@@ -28,6 +28,8 @@ bool EspNowThermostatTransport::begin(const EspNowThermostatConfig &config) {
 
   esp_now_register_recv_cb(
       reinterpret_cast<esp_now_recv_cb_t>(&EspNowThermostatTransport::on_recv_static));
+  esp_now_register_send_cb(
+      reinterpret_cast<esp_now_send_cb_t>(&EspNowThermostatTransport::on_send_static));
 
   esp_now_peer_info_t peer_info;
   memset(&peer_info, 0, sizeof(peer_info));
@@ -88,6 +90,21 @@ void EspNowThermostatTransport::publish_command_word(uint32_t packed_word) {
 #endif
 }
 
+void EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {
+  if (!initialized_) {
+    return;
+  }
+
+  ControllerAckPacket pkt;
+  pkt.header.type = static_cast<uint8_t>(PacketType::ControllerAck);
+  pkt.header.version = kEspNowProtocolVersion;
+  pkt.seq = seq;
+
+#if defined(ARDUINO)
+  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+#endif
+}
+
 void EspNowThermostatTransport::publish_indoor_temperature_c(float temp_c) {
   if (!initialized_) {
     return;
@@ -127,6 +144,21 @@ void EspNowThermostatTransport::on_recv_static(const void * /*recv_info*/,
   instance_->on_recv(data, len);
 }
 
+void EspNowThermostatTransport::on_send_static(const uint8_t * /*mac_addr*/, int status) {
+  if (instance_ == nullptr) {
+    return;
+  }
+#if defined(ARDUINO)
+  if (status == static_cast<int>(ESP_NOW_SEND_SUCCESS)) {
+    ++instance_->send_ok_count_;
+  } else {
+    ++instance_->send_fail_count_;
+  }
+#else
+  (void)status;
+#endif
+}
+
 void EspNowThermostatTransport::on_recv(const uint8_t *data, int len) {
   if (data == nullptr || len < static_cast<int>(sizeof(PacketHeader))) {
     return;
@@ -155,6 +187,7 @@ void EspNowThermostatTransport::on_recv(const uint8_t *data, int len) {
         const auto *pkt = reinterpret_cast<const ControllerTelemetryPacket *>(data);
 
         ThermostatControllerTelemetry telemetry;
+        telemetry.seq = pkt->seq;
         telemetry.state = static_cast<FurnaceStateCode>(pkt->state);
         telemetry.lockout = pkt->lockout != 0;
         telemetry.mode_code = pkt->mode;

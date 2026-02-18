@@ -14,6 +14,12 @@ class ThermostatDisplayApp {
 
   void set_temperature_unit(TemperatureUnit unit);
   TemperatureUnit temperature_unit() const { return model_.temperature_unit(); }
+  void set_local_temperature_compensation_c(float value) {
+    local_temperature_compensation_c_ = value;
+  }
+  float local_temperature_compensation_c() const {
+    return local_temperature_compensation_c_;
+  }
 
   void sync_from_app();
 
@@ -39,6 +45,7 @@ class ThermostatDisplayApp {
  private:
   ThermostatApp &app_;
   DisplayModel model_;
+  float local_temperature_compensation_c_ = 0.0f;
 };
 
 }  // namespace thermostat

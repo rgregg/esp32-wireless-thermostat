@@ -11,6 +11,7 @@ bool ControllerNode::begin() {
                            &ControllerNode::on_heartbeat_static,
                            &ControllerNode::on_indoor_temp_static,
                            &ControllerNode::on_indoor_humidity_static,
+                           &ControllerNode::on_thermostat_ack_static,
                            this);
   return transport_.begin(transport_config_);
 }
@@ -48,7 +49,17 @@ void ControllerNode::on_indoor_humidity_static(float value, void *ctx) {
   static_cast<ControllerNode *>(ctx)->on_indoor_humidity(value);
 }
 
+void ControllerNode::on_thermostat_ack_static(uint16_t seq, void *ctx) {
+  if (ctx == nullptr) {
+    return;
+  }
+  static_cast<ControllerNode *>(ctx)->on_thermostat_ack(seq);
+}
+
 void ControllerNode::on_command_word(uint32_t packed_word) {
+  if (!espnow_command_enabled_) {
+    return;
+  }
   app_.on_command_word(packed_word);
 }
 
@@ -62,6 +73,10 @@ void ControllerNode::on_indoor_temp(float value) {
 
 void ControllerNode::on_indoor_humidity(float value) {
   app_.on_indoor_humidity(value);
+}
+
+void ControllerNode::on_thermostat_ack(uint16_t seq) {
+  app_.on_thermostat_ack(seq);
 }
 
 }  // namespace thermostat

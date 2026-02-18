@@ -6,12 +6,31 @@ ThermostatApp::ThermostatApp(IThermostatTransport &transport,
                              const ThermostatAppConfig &config)
     : transport_(transport), config_(config) {}
 
+bool ThermostatApp::is_newer_u16(uint16_t previous, uint16_t incoming) {
+  const uint16_t diff = static_cast<uint16_t>(incoming - previous);
+  return diff != 0 && diff < 0x8000;
+}
+
 void ThermostatApp::on_controller_heartbeat(uint32_t now_ms) {
   last_controller_heartbeat_ms_ = now_ms;
 }
 
 void ThermostatApp::on_controller_telemetry(
     uint32_t now_ms, const ThermostatControllerTelemetry &telemetry) {
+  if (has_controller_seq_) {
+    if (telemetry.seq == last_controller_seq_) {
+      ack_controller_seq(last_controller_seq_);
+      return;
+    }
+    if (!is_newer_u16(last_controller_seq_, telemetry.seq)) {
+      ack_controller_seq(last_controller_seq_);
+      return;
+    }
+  }
+
+  last_controller_seq_ = telemetry.seq;
+  has_controller_seq_ = true;
+
   has_controller_telemetry_ = true;
   controller_state_ = telemetry.state;
   controller_lockout_ = telemetry.lockout;
@@ -28,6 +47,8 @@ void ThermostatApp::on_controller_telemetry(
     local_fan_mode_ = fan_from_code(telemetry.fan_code);
     local_setpoint_c_ = telemetry.setpoint_c;
   }
+
+  ack_controller_seq(last_controller_seq_);
 }
 
 void ThermostatApp::set_local_mode(FurnaceMode mode, uint32_t now_ms) {
@@ -105,6 +126,10 @@ FanMode ThermostatApp::fan_from_code(uint8_t fan_code) {
 
 void ThermostatApp::mark_local_interaction(uint32_t now_ms) {
   last_local_interaction_ms_ = now_ms;
+}
+
+void ThermostatApp::ack_controller_seq(uint16_t seq) {
+  transport_.publish_controller_ack(seq);
 }
 
 void ThermostatApp::send_command(bool do_sync, bool do_filter_reset) {

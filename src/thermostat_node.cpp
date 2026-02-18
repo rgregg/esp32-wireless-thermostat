@@ -14,7 +14,15 @@ bool ThermostatNode::begin() {
   transport_.set_callbacks(&ThermostatNode::on_heartbeat_static,
                            &ThermostatNode::on_telemetry_static,
                            this);
-  return transport_.begin(transport_config_);
+  const bool ok = transport_.begin(transport_config_);
+  if (ok) {
+#if defined(ARDUINO)
+    app_.request_sync(millis());
+#else
+    app_.request_sync(0);
+#endif
+  }
+  return ok;
 }
 
 void ThermostatNode::tick(uint32_t now_ms) {

@@ -4,10 +4,13 @@
 
 #include <cctype>
 #include <cstring>
+#include <ctime>
+#include <cstdio>
 
 #include <Wire.h>
 #include <lvgl.h>
 #include <WiFi.h>
+#include <WiFiProv.h>
 #include <PubSubClient.h>
 
 #include "thermostat_device_runtime.h"
@@ -41,6 +44,7 @@ constexpr int kTouchI2cScl = 20;
 constexpr int kSensorI2cSda = 18;
 constexpr int kSensorI2cScl = 17;
 constexpr uint32_t kNetworkRetryMs = 5000;
+constexpr uint32_t kProvisionStartDelayMs = 15000;
 constexpr uint32_t kMqttPublishMs = 10000;
 
 #ifndef THERMOSTAT_WIFI_SSID
@@ -83,6 +87,66 @@ constexpr uint32_t kMqttPublishMs = 10000;
 #define THERMOSTAT_MQTT_DISCOVERY_PREFIX "homeassistant"
 #endif
 
+#ifndef THERMOSTAT_MQTT_SHARED_DEVICE_ID
+#define THERMOSTAT_MQTT_SHARED_DEVICE_ID "wireless_thermostat_system"
+#endif
+
+#ifndef THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC
+#define THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC ""
+#endif
+
+#ifndef THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC
+#define THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC ""
+#endif
+
+#ifndef THERMOSTAT_PROV_POP
+#define THERMOSTAT_PROV_POP "thermostat-setup"
+#endif
+
+#ifndef THERMOSTAT_PROV_SERVICE_NAME
+#define THERMOSTAT_PROV_SERVICE_NAME "PROV_ESP32_THERMOSTAT"
+#endif
+
+#ifndef THERMOSTAT_PROV_RESET_PROVISIONED
+#define THERMOSTAT_PROV_RESET_PROVISIONED 0
+#endif
+
+#ifndef THERMOSTAT_DISPLAY_TIMEOUT_S
+#define THERMOSTAT_DISPLAY_TIMEOUT_S 300
+#endif
+
+#ifndef THERMOSTAT_TIME_TZ
+#define THERMOSTAT_TIME_TZ "PST8PDT,M3.2.0,M11.1.0"
+#endif
+
+#ifndef THERMOSTAT_TIME_NTP_1
+#define THERMOSTAT_TIME_NTP_1 "0.pool.ntp.org"
+#endif
+
+#ifndef THERMOSTAT_TIME_NTP_2
+#define THERMOSTAT_TIME_NTP_2 "1.pool.ntp.org"
+#endif
+
+#ifndef THERMOSTAT_TIME_NTP_3
+#define THERMOSTAT_TIME_NTP_3 "2.pool.ntp.org"
+#endif
+
+#ifndef THERMOSTAT_ESPNOW_PEER_MAC
+#define THERMOSTAT_ESPNOW_PEER_MAC ""
+#endif
+
+#ifndef THERMOSTAT_ESPNOW_LMK
+#define THERMOSTAT_ESPNOW_LMK ""
+#endif
+
+#ifndef THERMOSTAT_ESPNOW_CHANNEL
+#define THERMOSTAT_ESPNOW_CHANNEL 6
+#endif
+
+#ifndef THERMOSTAT_FIRMWARE_VERSION
+#define THERMOSTAT_FIRMWARE_VERSION "dev"
+#endif
+
 struct TouchState {
   bool touched = false;
   int16_t x = 0;
@@ -122,6 +186,7 @@ lv_obj_t *g_humidity_label = nullptr;
 lv_obj_t *g_setpoint_label = nullptr;
 lv_obj_t *g_weather_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
+lv_obj_t *g_settings_diag_label = nullptr;
 
 lv_obj_t *g_setpoint_column = nullptr;
 
@@ -130,8 +195,16 @@ uint32_t g_last_runtime_tick_ms = 0;
 uint32_t g_last_sensor_poll_ms = 0;
 uint32_t g_last_ui_refresh_ms = 0;
 uint32_t g_last_wifi_attempt_ms = 0;
+uint32_t g_first_wifi_attempt_ms = 0;
 uint32_t g_last_mqtt_attempt_ms = 0;
 uint32_t g_last_mqtt_publish_ms = 0;
+bool g_wifi_has_attempted_stored_connect = false;
+bool g_wifi_provisioning_started = false;
+float g_outdoor_temp_c = 6.0f;
+std::string g_weather_condition = "Cloudy";
+bool g_have_outdoor_temp = false;
+bool g_have_weather_condition = false;
+uint32_t g_display_timeout_ms = static_cast<uint32_t>(THERMOSTAT_DISPLAY_TIMEOUT_S) * 1000UL;
 
 const char *mode_to_mqtt(FurnaceMode mode) {
   switch (mode) {
@@ -195,6 +268,39 @@ float parse_numeric_prefix(const std::string &text, bool *ok) {
   return value;
 }
 
+bool parse_mac(const char *text, uint8_t out[6]) {
+  if (text == nullptr || strlen(text) < 17) return false;
+  unsigned values[6] = {};
+  if (sscanf(text, "%02x:%02x:%02x:%02x:%02x:%02x", &values[0], &values[1], &values[2],
+             &values[3], &values[4], &values[5]) != 6) {
+    return false;
+  }
+  for (int i = 0; i < 6; ++i) out[i] = static_cast<uint8_t>(values[i] & 0xFFu);
+  return true;
+}
+
+bool parse_lmk_hex(const char *text, uint8_t out[16]) {
+  if (text == nullptr || strlen(text) != 32) return false;
+  for (int i = 0; i < 16; ++i) {
+    unsigned byte = 0;
+    if (sscanf(text + (i * 2), "%02x", &byte) != 1) return false;
+    out[i] = static_cast<uint8_t>(byte & 0xFFu);
+  }
+  return true;
+}
+
+std::string current_time_text() {
+  time_t now = time(nullptr);
+  if (now <= 0) {
+    return "--:--";
+  }
+  struct tm local_tm {};
+  localtime_r(&now, &local_tm);
+  char buf[24];
+  strftime(buf, sizeof(buf), "%I:%M %p", &local_tm);
+  return std::string(buf);
+}
+
 void mqtt_publish_state() {
   if (g_runtime == nullptr || !g_mqtt.connected()) return;
 
@@ -208,6 +314,22 @@ void mqtt_publish_state() {
   char buf[32];
   snprintf(buf, sizeof(buf), "%.1f", g_runtime->local_setpoint_c());
   g_mqtt.publish(topic_for("state/target_temp_c").c_str(), buf, true);
+
+  snprintf(buf, sizeof(buf), "%.2f", g_runtime->local_temperature_compensation_c());
+  g_mqtt.publish(topic_for("state/temp_comp_c").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_display_timeout_ms / 1000UL));
+  g_mqtt.publish(topic_for("state/display_timeout_s").c_str(), buf, true);
+  g_mqtt.publish(topic_for("state/firmware_version").c_str(), THERMOSTAT_FIRMWARE_VERSION, true);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    g_mqtt.publish(topic_for("state/wifi_ip").c_str(), WiFi.localIP().toString().c_str(), true);
+    g_mqtt.publish(topic_for("state/wifi_mac").c_str(), WiFi.macAddress().c_str(), true);
+    g_mqtt.publish(topic_for("state/wifi_ssid").c_str(), WiFi.SSID().c_str(), true);
+    snprintf(buf, sizeof(buf), "%d", WiFi.channel());
+    g_mqtt.publish(topic_for("state/wifi_channel").c_str(), buf, true);
+    snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
+    g_mqtt.publish(topic_for("state/wifi_rssi").c_str(), buf, true);
+  }
 
   bool ok = false;
   const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok);
@@ -230,11 +352,11 @@ void mqtt_publish_discovery() {
   if (!g_mqtt.connected() || g_mqtt_discovery_sent) return;
 
   const String base = THERMOSTAT_MQTT_BASE_TOPIC;
-  const String node = THERMOSTAT_MQTT_NODE_ID;
+  const String node = THERMOSTAT_MQTT_SHARED_DEVICE_ID;
   const String config_topic = String(THERMOSTAT_MQTT_DISCOVERY_PREFIX) + "/climate/" + node +
                               "/config";
 
-  char payload[1200];
+  char payload[1500];
   snprintf(
       payload, sizeof(payload),
       "{\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\",\"mode_cmd_t\":\"%s/cmd/"
@@ -244,10 +366,30 @@ void mqtt_publish_discovery() {
       "\"curr_hum_t\":\"%s/state/current_humidity\",\"modes\":[\"off\",\"heat\",\"cool\"],"
       "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],\"avty_t\":\"%s/state/availability\","
       "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"min_temp\":5,\"max_temp\":35,"
-      "\"temp_step\":0.5,\"temp_unit\":\"C\"}",
+      "\"temp_step\":0.5,\"temp_unit\":\"C\",\"dev\":{\"ids\":[\"%s\"],"
+      "\"name\":\"Wireless Thermostat System\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
       node.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(),
-      base.c_str(), base.c_str(), base.c_str(), base.c_str());
+      base.c_str(), base.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(config_topic.c_str(), payload, true);
+
+  const String timeout_config =
+      String(THERMOSTAT_MQTT_DISCOVERY_PREFIX) + "/number/" + node + "_display_timeout/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Timeout\",\"uniq_id\":\"%s_display_timeout\","
+           "\"cmd_t\":\"%s/cmd/display_timeout_s\",\"stat_t\":\"%s/state/display_timeout_s\","
+           "\"min\":30,\"max\":600,\"step\":5,\"mode\":\"box\",\"unit_of_meas\":\"s\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(timeout_config.c_str(), payload, true);
+
+  const String fw_config =
+      String(THERMOSTAT_MQTT_DISCOVERY_PREFIX) + "/sensor/" + node + "_firmware/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Firmware Version\",\"uniq_id\":\"%s_firmware\",\"stat_t\":\"%s/state/firmware_version\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(fw_config.c_str(), payload, true);
+
   g_mqtt_discovery_sent = true;
 }
 
@@ -294,17 +436,99 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     if (parse_bool_payload(value)) {
       g_runtime->request_filter_reset(now);
     }
+  } else if (topic_str == topic_for("cmd/temp_comp_c")) {
+    g_runtime->set_local_temperature_compensation_c(static_cast<float>(atof(value)));
+  } else if (topic_str == topic_for("cmd/display_timeout_s")) {
+    long seconds = atol(value);
+    if (seconds < 30) seconds = 30;
+    if (seconds > 600) seconds = 600;
+    g_display_timeout_ms = static_cast<uint32_t>(seconds) * 1000UL;
+    g_screen.set_display_timeout_ms(g_display_timeout_ms);
+  } else if (strlen(THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC) > 0 &&
+             topic_str == THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC) {
+    g_outdoor_temp_c = static_cast<float>(atof(value));
+    g_have_outdoor_temp = true;
+    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
+  } else if (strlen(THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC) > 0 &&
+             topic_str == THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC) {
+    g_weather_condition = value;
+    g_have_weather_condition = true;
+    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
   }
 
   mqtt_publish_state();
 }
 
+String improv_service_name() {
+  const String configured(THERMOSTAT_PROV_SERVICE_NAME);
+  if (configured.length() > 0) return configured;
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  if (mac.length() >= 6) {
+    return String("PROV_") + mac.substring(mac.length() - 6);
+  }
+  return "PROV_ESP32_THERMOSTAT";
+}
+
+void start_wifi_provisioning() {
+  if (g_wifi_provisioning_started) return;
+  const String service_name = improv_service_name();
+  const bool reset_provisioned = THERMOSTAT_PROV_RESET_PROVISIONED != 0;
+#if CONFIG_BLUEDROID_ENABLED
+  WiFiProv.beginProvision(WIFI_PROV_SCHEME_BLE, WIFI_PROV_SCHEME_HANDLER_FREE_BTDM,
+                          WIFI_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(), nullptr,
+                          nullptr, reset_provisioned);
+  WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "ble");
+#else
+  WiFiProv.beginProvision(WIFI_PROV_SCHEME_SOFTAP, WIFI_PROV_SCHEME_HANDLER_NONE,
+                          WIFI_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(), nullptr,
+                          nullptr, reset_provisioned);
+  WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "softap");
+#endif
+  g_wifi_provisioning_started = true;
+}
+
+void wifi_event_handler(arduino_event_t *event) {
+  if (event == nullptr) return;
+  switch (event->event_id) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      g_wifi_provisioning_started = false;
+      break;
+    case ARDUINO_EVENT_PROV_START:
+      g_wifi_provisioning_started = true;
+      break;
+    default:
+      break;
+  }
+}
+
 void ensure_wifi_connected(uint32_t now_ms) {
-  if (strlen(THERMOSTAT_WIFI_SSID) == 0) return;
   if (WiFi.status() == WL_CONNECTED) return;
+
+  if (strlen(THERMOSTAT_WIFI_SSID) > 0) {
+    if ((now_ms - g_last_wifi_attempt_ms) < kNetworkRetryMs) return;
+    g_last_wifi_attempt_ms = now_ms;
+    WiFi.begin(THERMOSTAT_WIFI_SSID, THERMOSTAT_WIFI_PASSWORD);
+    return;
+  }
+
+  if (g_wifi_provisioning_started) return;
+  if (!g_wifi_has_attempted_stored_connect) {
+    g_wifi_has_attempted_stored_connect = true;
+    g_first_wifi_attempt_ms = now_ms;
+    g_last_wifi_attempt_ms = now_ms;
+    WiFi.begin();
+    return;
+  }
+
+  if ((now_ms - g_first_wifi_attempt_ms) >= kProvisionStartDelayMs) {
+    start_wifi_provisioning();
+    return;
+  }
+
   if ((now_ms - g_last_wifi_attempt_ms) < kNetworkRetryMs) return;
   g_last_wifi_attempt_ms = now_ms;
-  WiFi.begin(THERMOSTAT_WIFI_SSID, THERMOSTAT_WIFI_PASSWORD);
+  WiFi.begin();
 }
 
 void ensure_mqtt_connected(uint32_t now_ms) {
@@ -331,6 +555,14 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/unit").c_str());
   g_mqtt.subscribe(topic_for("cmd/sync").c_str());
   g_mqtt.subscribe(topic_for("cmd/filter_reset").c_str());
+  g_mqtt.subscribe(topic_for("cmd/temp_comp_c").c_str());
+  g_mqtt.subscribe(topic_for("cmd/display_timeout_s").c_str());
+  if (strlen(THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC) > 0) {
+    g_mqtt.subscribe(THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC);
+  }
+  if (strlen(THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC) > 0) {
+    g_mqtt.subscribe(THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC);
+  }
 
   mqtt_publish_discovery();
   mqtt_publish_state();
@@ -457,9 +689,21 @@ void refresh_ui() {
   lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
   lv_label_set_text(g_weather_label, g_runtime->weather_text().c_str());
 
-  char tbuf[16];
-  snprintf(tbuf, sizeof(tbuf), "%lu", static_cast<unsigned long>(now / 1000UL));
-  lv_label_set_text(g_screen_time_label, tbuf);
+  lv_label_set_text(g_screen_time_label, current_time_text().c_str());
+  if (g_settings_diag_label != nullptr) {
+    char diag[256];
+    String ip_str = WiFi.isConnected() ? WiFi.localIP().toString() : String("N/A");
+    String mac_str = WiFi.macAddress();
+    String ssid_str = WiFi.isConnected() ? WiFi.SSID() : String("N/A");
+    const char *ssid = WiFi.isConnected() ? WiFi.SSID().c_str() : "N/A";
+    const char *ip = ip_str.c_str();
+    const char *mac = mac_str.c_str();
+    ssid = ssid_str.c_str();
+    snprintf(diag, sizeof(diag),
+             "IP: %s\nMAC: %s\nSSID: %s\nCH: %d RSSI: %d\nFW: %s",
+             ip, mac, ssid, WiFi.channel(), WiFi.RSSI(), THERMOSTAT_FIRMWARE_VERSION);
+    lv_label_set_text(g_settings_diag_label, diag);
+  }
 
   g_screen.on_mode_changed(g_runtime->local_mode());
   if (g_setpoint_column != nullptr) {
@@ -651,6 +895,12 @@ void create_ui() {
   lv_obj_add_event_cb(filter_btn, btn_filter_reset_cb, LV_EVENT_CLICKED, nullptr);
   lv_label_set_text(lv_label_create(filter_btn), "Filter Reset");
 
+  g_settings_diag_label = lv_label_create(g_settings_page);
+  lv_obj_set_width(g_settings_diag_label, 760);
+  lv_obj_align(g_settings_diag_label, LV_ALIGN_TOP_LEFT, 20, 180);
+  lv_label_set_long_mode(g_settings_diag_label, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(g_settings_diag_label, "Diagnostics...");
+
   g_screen_time_label = lv_label_create(g_screensaver_page);
   lv_obj_align(g_screen_time_label, LV_ALIGN_CENTER, 0, 0);
 
@@ -733,8 +983,12 @@ void init_sensors() {
 
 void init_network() {
   WiFi.mode(WIFI_STA);
+  WiFi.onEvent(wifi_event_handler);
+  WiFi.setAutoReconnect(true);
   g_mqtt.setServer(THERMOSTAT_MQTT_HOST, THERMOSTAT_MQTT_PORT);
   g_mqtt.setCallback(mqtt_on_message);
+  configTzTime(THERMOSTAT_TIME_TZ, THERMOSTAT_TIME_NTP_1, THERMOSTAT_TIME_NTP_2,
+               THERMOSTAT_TIME_NTP_3);
 }
 
 void poll_sensors(uint32_t now_ms) {
@@ -755,21 +1009,32 @@ void poll_sensors(uint32_t now_ms) {
   }
 
   g_runtime->on_local_sensor_update(t, h);
-  g_runtime->on_outdoor_weather_update(6.0f, "Cloudy");
+  if (!g_have_outdoor_temp && !g_have_weather_condition) {
+    g_runtime->on_outdoor_weather_update(6.0f, "Cloudy");
+  } else {
+    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
+  }
 }
 
 }  // namespace
 
 void thermostat_firmware_setup() {
   ThermostatDeviceRuntimeConfig cfg;
-  cfg.transport.channel = 6;
+  cfg.transport.channel = THERMOSTAT_ESPNOW_CHANNEL;
   cfg.transport.heartbeat_interval_ms = 10000;
   cfg.controller_connection_timeout_ms = 30000;
+  if (parse_mac(THERMOSTAT_ESPNOW_PEER_MAC, cfg.transport.peer_mac)) {
+    uint8_t lmk[16] = {0};
+    if (parse_lmk_hex(THERMOSTAT_ESPNOW_LMK, lmk)) {
+      memcpy(cfg.transport.lmk, lmk, sizeof(lmk));
+      cfg.transport.encrypted = true;
+    }
+  }
 
   static ThermostatDeviceRuntime runtime(cfg);
   g_runtime = &runtime;
 
-  g_screen.set_display_timeout_ms(300000);
+  g_screen.set_display_timeout_ms(g_display_timeout_ms);
   g_screen.on_boot(millis());
 
   init_backlight();

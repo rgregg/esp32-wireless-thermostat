@@ -17,6 +17,7 @@ struct EspNowControllerConfig {
 using CommandWordCallback = void (*)(uint32_t packed_word, void *ctx);
 using HeartbeatCallback = void (*)(uint32_t now_ms, void *ctx);
 using IndoorValueCallback = void (*)(float value, void *ctx);
+using ThermostatAckCallback = void (*)(uint16_t seq, void *ctx);
 
 class EspNowControllerTransport final : public IControllerTransport {
  public:
@@ -29,12 +30,16 @@ class EspNowControllerTransport final : public IControllerTransport {
                      HeartbeatCallback heartbeat_cb,
                      IndoorValueCallback indoor_temp_cb,
                      IndoorValueCallback indoor_humidity_cb,
+                     ThermostatAckCallback ack_cb,
                      void *callback_context);
 
   void publish_telemetry(const ControllerTelemetry &telemetry) override;
+  uint32_t send_ok_count() const { return send_ok_count_; }
+  uint32_t send_fail_count() const { return send_fail_count_; }
 
  private:
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
+  static void on_send_static(const uint8_t *mac_addr, int status);
   void on_recv(const uint8_t *data, int len);
   void send_heartbeat(uint32_t now_ms);
 
@@ -47,9 +52,12 @@ class EspNowControllerTransport final : public IControllerTransport {
   HeartbeatCallback heartbeat_cb_ = nullptr;
   IndoorValueCallback indoor_temp_cb_ = nullptr;
   IndoorValueCallback indoor_humidity_cb_ = nullptr;
+  ThermostatAckCallback ack_cb_ = nullptr;
   void *callback_context_ = nullptr;
 
   static EspNowControllerTransport *instance_;
+  uint32_t send_ok_count_ = 0;
+  uint32_t send_fail_count_ = 0;
 };
 
 }  // namespace thermostat

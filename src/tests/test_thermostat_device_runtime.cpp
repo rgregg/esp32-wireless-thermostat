@@ -22,6 +22,7 @@ TEST_CASE(thermostat_device_runtime_user_inputs_flow_to_display_app) {
   ASSERT_TRUE(runtime.begin());
 
   runtime.set_temperature_unit(thermostat::TemperatureUnit::Celsius);
+  runtime.set_local_temperature_compensation_c(0.8f);
   runtime.on_user_set_mode(FurnaceMode::Cool, 1000);
   runtime.on_user_set_fan_mode(FanMode::Circulate, 1000);
   runtime.on_user_set_setpoint(22.5f, 1000);
@@ -33,6 +34,7 @@ TEST_CASE(thermostat_device_runtime_user_inputs_flow_to_display_app) {
   ASSERT_EQ(runtime.local_mode(), FurnaceMode::Cool);
   ASSERT_EQ(runtime.local_fan_mode(), FanMode::Circulate);
   ASSERT_NEAR(runtime.local_setpoint_c(), 22.5f, 0.05f);
+  ASSERT_NEAR(runtime.local_temperature_compensation_c(), 0.8f, 0.001f);
   ASSERT_TRUE(runtime.status_text(1100).size() > 0);
   ASSERT_TRUE(runtime.weather_text().find("Cloudy") != std::string::npos);
 }
