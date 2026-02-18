@@ -2,9 +2,9 @@
 
 #include <string>
 
-#include "display_model.h"
-#include "thermostat_app.h"
-#include "thermostat_ui_state.h"
+#include "thermostat/display_model.h"
+#include "thermostat/thermostat_app.h"
+#include "thermostat/thermostat_ui_state.h"
 
 namespace thermostat {
 

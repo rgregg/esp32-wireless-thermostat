@@ -54,8 +54,8 @@
 - Build script: `scripts/git_version.py`
 
 ## Files Agents Should Know
-- Controller firmware entry: `src/main.cpp`
-- Thermostat firmware entry: `src/thermostat/esp32s3_thermostat_firmware.cpp`
+- Controller firmware entry: `src/esp32_controller_main.cpp`
+- Thermostat firmware entry: `src/esp32_thermostat_main.cpp`
 - Topic/form parsing helpers: `include/management_paths.h`, `src/management_paths.cpp`
 - Integration tests for routing helpers: `src/tests/test_management_paths.cpp`
 - Deployment notes: `docs/deployment-runbook.md`

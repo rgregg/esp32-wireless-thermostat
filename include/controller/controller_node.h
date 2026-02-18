@@ -2,8 +2,8 @@
 
 #include <stdint.h>
 
-#include "controller_app.h"
-#include "transport/espnow_controller_transport.h"
+#include "controller/controller_app.h"
+#include "controller/transport/espnow_controller_transport.h"
 
 namespace thermostat {
 

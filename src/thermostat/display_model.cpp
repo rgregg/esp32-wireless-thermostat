@@ -1,4 +1,4 @@
-#include "display_model.h"
+#include "thermostat/display_model.h"
 
 #include <algorithm>
 #include <cctype>

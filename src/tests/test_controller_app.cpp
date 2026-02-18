@@ -1,5 +1,5 @@
 #if defined(THERMOSTAT_RUN_TESTS)
-#include "controller_app.h"
+#include "controller/controller_app.h"
 #include "espnow_cmd_word.h"
 #include "test_harness.h"
 

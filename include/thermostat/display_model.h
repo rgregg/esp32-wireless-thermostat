@@ -5,7 +5,7 @@
 #include <string>
 
 #include "thermostat_types.h"
-#include "thermostat_ui_state.h"
+#include "thermostat/thermostat_ui_state.h"
 
 namespace thermostat {
 

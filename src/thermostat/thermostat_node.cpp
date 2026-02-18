@@ -1,4 +1,4 @@
-#include "thermostat_node.h"
+#include "thermostat/thermostat_node.h"
 
 #if defined(ARDUINO)
 #include <Arduino.h>

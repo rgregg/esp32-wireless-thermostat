@@ -1,5 +1,5 @@
 #if defined(THERMOSTAT_RUN_TESTS)
-#include "controller_relay_io.h"
+#include "controller/controller_relay_io.h"
 #include "test_harness.h"
 
 TEST_CASE(controller_relay_io_interlock_waits_before_switch) {

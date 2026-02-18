@@ -1,6 +1,6 @@
 #if defined(THERMOSTAT_RUN_TESTS)
-#include "thermostat_app.h"
-#include "thermostat_display_app.h"
+#include "thermostat/thermostat_app.h"
+#include "thermostat/thermostat_display_app.h"
 #include "test_harness.h"
 
 namespace {

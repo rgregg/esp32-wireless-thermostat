@@ -1,5 +1,5 @@
 #if defined(THERMOSTAT_RUN_TESTS)
-#include "controller_runtime.h"
+#include "controller/controller_runtime.h"
 #include "test_harness.h"
 
 TEST_CASE(controller_runtime_failsafe_lockout) {

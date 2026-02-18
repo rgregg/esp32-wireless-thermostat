@@ -1,6 +1,6 @@
 #if defined(ARDUINO) && defined(THERMOSTAT_ROLE_THERMOSTAT)
 
-#include "esp32s3_thermostat_firmware.h"
+#include "thermostat/esp32s3_thermostat_firmware.h"
 
 #include <cctype>
 #include <cstring>
@@ -18,8 +18,8 @@
 #include <WebServer.h>
 #include <esp_system.h>
 
-#include "thermostat_device_runtime.h"
-#include "thermostat_screen_controller.h"
+#include "thermostat/thermostat_device_runtime.h"
+#include "thermostat/thermostat_screen_controller.h"
 
 #include <Adafruit_AHTX0.h>
 

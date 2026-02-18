@@ -1,7 +1,7 @@
 #if defined(THERMOSTAT_RUN_TESTS)
-#include "display_model.h"
+#include "thermostat/display_model.h"
 #include "test_harness.h"
-#include "thermostat_ui_state.h"
+#include "thermostat/thermostat_ui_state.h"
 
 TEST_CASE(display_model_units_and_weather) {
   thermostat::DisplayModel m;

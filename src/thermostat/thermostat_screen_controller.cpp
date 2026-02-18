@@ -1,4 +1,4 @@
-#include "thermostat_screen_controller.h"
+#include "thermostat/thermostat_screen_controller.h"
 
 namespace thermostat {
 

@@ -1,4 +1,4 @@
-#include "controller_node.h"
+#include "controller/controller_node.h"
 
 namespace thermostat {
 

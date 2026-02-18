@@ -4,8 +4,8 @@
 
 #include <string>
 
-#include "thermostat_display_app.h"
-#include "thermostat_node.h"
+#include "thermostat/thermostat_display_app.h"
+#include "thermostat/thermostat_node.h"
 
 namespace thermostat {
 

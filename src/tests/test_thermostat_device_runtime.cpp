@@ -1,5 +1,5 @@
 #if defined(THERMOSTAT_RUN_TESTS)
-#include "thermostat_device_runtime.h"
+#include "thermostat/thermostat_device_runtime.h"
 #include "test_harness.h"
 
 TEST_CASE(thermostat_device_runtime_status_defaults) {

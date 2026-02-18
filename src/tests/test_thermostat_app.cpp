@@ -1,5 +1,5 @@
 #if defined(THERMOSTAT_RUN_TESTS)
-#include "thermostat_app.h"
+#include "thermostat/thermostat_app.h"
 #include "transport/espnow_packets.h"
 #include "test_harness.h"
 

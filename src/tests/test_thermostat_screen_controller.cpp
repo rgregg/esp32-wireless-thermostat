@@ -1,6 +1,6 @@
 #if defined(THERMOSTAT_RUN_TESTS)
 #include "test_harness.h"
-#include "thermostat_screen_controller.h"
+#include "thermostat/thermostat_screen_controller.h"
 
 TEST_CASE(screen_controller_idle_screensaver_and_resume) {
   thermostat::ThermostatScreenController sc;

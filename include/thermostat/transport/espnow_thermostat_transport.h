@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "thermostat_transport.h"
+#include "thermostat/thermostat_transport.h"
 #include "thermostat_types.h"
 #include "transport/espnow_packets.h"
 

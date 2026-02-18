@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "controller_runtime.h"
+#include "controller/controller_runtime.h"
 
 namespace thermostat {
 

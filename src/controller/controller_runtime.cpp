@@ -1,7 +1,7 @@
-#include "controller_runtime.h"
+#include "controller/controller_runtime.h"
 
 #include "espnow_cmd_word.h"
-#include "thermostat_state.h"
+#include "thermostat/thermostat_state.h"
 
 namespace {
 

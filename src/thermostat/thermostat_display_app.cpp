@@ -1,4 +1,4 @@
-#include "thermostat_display_app.h"
+#include "thermostat/thermostat_display_app.h"
 
 namespace thermostat {
 

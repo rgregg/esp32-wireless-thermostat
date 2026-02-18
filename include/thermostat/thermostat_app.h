@@ -3,9 +3,9 @@
 #include <stdint.h>
 
 #include "espnow_cmd_word.h"
-#include "thermostat_transport.h"
+#include "thermostat/thermostat_transport.h"
 #include "thermostat_types.h"
-#include "transport/espnow_thermostat_transport.h"
+#include "thermostat/transport/espnow_thermostat_transport.h"
 
 namespace thermostat {
 
