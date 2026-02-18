@@ -59,7 +59,7 @@ constexpr uint32_t kMqttPublishMs = 10000;
 #endif
 
 #ifndef THERMOSTAT_MQTT_HOST
-#define THERMOSTAT_MQTT_HOST ""
+#define THERMOSTAT_MQTT_HOST "mqtt.lan"
 #endif
 
 #ifndef THERMOSTAT_MQTT_PORT

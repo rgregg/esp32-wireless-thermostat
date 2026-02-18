@@ -83,7 +83,7 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_MQTT_HOST
-#define THERMOSTAT_CONTROLLER_MQTT_HOST ""
+#define THERMOSTAT_CONTROLLER_MQTT_HOST "mqtt.lan"
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_MQTT_PORT
@@ -154,6 +154,37 @@ String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
 bool g_ctrl_mqtt_reconfigure_required = false;
 bool g_ctrl_wifi_reconnect_required = false;
 bool g_ctrl_cfg_reboot_required = false;
+String g_disp_availability = "unknown";
+
+struct CtrlDisplayCfgCacheEntry {
+  const char *key;
+  String value;
+};
+
+CtrlDisplayCfgCacheEntry g_disp_cfg_cache[] = {
+    {"wifi_ssid", "unknown"},
+    {"wifi_password", "unknown"},
+    {"mqtt_host", "unknown"},
+    {"mqtt_port", "unknown"},
+    {"mqtt_user", "unknown"},
+    {"mqtt_password", "unknown"},
+    {"mqtt_client_id", "unknown"},
+    {"mqtt_base_topic", "unknown"},
+    {"discovery_prefix", "unknown"},
+    {"shared_device_id", "unknown"},
+    {"outdoor_temp_topic", "unknown"},
+    {"weather_condition_topic", "unknown"},
+    {"display_timeout_s", "unknown"},
+    {"temp_comp_c", "unknown"},
+    {"temperature_unit", "unknown"},
+    {"ota_hostname", "unknown"},
+    {"ota_password", "unknown"},
+    {"espnow_channel", "unknown"},
+    {"espnow_peer_mac", "unknown"},
+    {"espnow_lmk", "unknown"},
+    {"controller_timeout_ms", "unknown"},
+    {"reboot_required", "unknown"},
+};
 
 void ctrl_load_runtime_config() {
   if (!g_ctrl_cfg_ready) {
@@ -188,6 +219,35 @@ String display_topic_for(const char *suffix) {
   out += "/";
   out += suffix;
   return out;
+}
+
+void ctrl_set_display_cfg_cache(const String &key, const String &value) {
+  for (size_t i = 0; i < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0])); ++i) {
+    if (key == g_disp_cfg_cache[i].key) {
+      g_disp_cfg_cache[i].value = value;
+      return;
+    }
+  }
+}
+
+String ctrl_get_display_cfg_cache(const char *key) {
+  for (size_t i = 0; i < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0])); ++i) {
+    if (strcmp(key, g_disp_cfg_cache[i].key) == 0) {
+      return g_disp_cfg_cache[i].value;
+    }
+  }
+  return "unknown";
+}
+
+bool ctrl_publish_display_cfg_set(const String &key, const String &value) {
+  if (!g_ctrl_mqtt.connected()) {
+    return false;
+  }
+  String topic = display_topic_for("cfg");
+  topic += "/";
+  topic += key;
+  topic += "/set";
+  return g_ctrl_mqtt.publish(topic.c_str(), value.c_str(), true);
 }
 
 void ctrl_publish_cfg_value(const char *key, const String &value, bool redact) {
@@ -400,7 +460,7 @@ String ctrl_json_escape(const String &in) {
 }
 
 void ctrl_web_handle_config_get() {
-  String body = "{";
+  String body = "{\"controller\":{";
   body += "\"wifi_ssid\":\"" + ctrl_json_escape(g_cfg_ctrl_wifi_ssid) + "\",";
   body += "\"wifi_password\":\"" + String(g_cfg_ctrl_wifi_password.length() > 0 ? "set" : "unset") + "\",";
   body += "\"mqtt_host\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_host) + "\",";
@@ -417,26 +477,47 @@ void ctrl_web_handle_config_get() {
   body += "\"espnow_peer_mac\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_mac) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_ctrl_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
   body += "\"reboot_required\":" + String(g_ctrl_cfg_reboot_required ? "true" : "false");
-  body += "}";
+  body += "},\"display\":{";
+  body += "\"availability\":\"" + ctrl_json_escape(g_disp_availability) + "\",";
+  for (size_t i = 0; i < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0])); ++i) {
+    body += "\"" + String(g_disp_cfg_cache[i].key) + "\":\"" +
+            ctrl_json_escape(g_disp_cfg_cache[i].value) + "\"";
+    if (i + 1 < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0]))) {
+      body += ",";
+    }
+  }
+  body += "}}";
   g_ctrl_web.send(200, "application/json", body);
 }
 
 void ctrl_web_handle_config_post() {
-  int updated = 0;
+  int updated_local = 0;
+  int updated_display = 0;
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
-    if (ctrl_try_update_runtime_config(g_ctrl_web.argName(i), g_ctrl_web.arg(i).c_str())) {
-      ++updated;
+    const String name = g_ctrl_web.argName(i);
+    const String value = g_ctrl_web.arg(i);
+    if (name.startsWith("disp_")) {
+      const String key = name.substring(5);
+      if (ctrl_publish_display_cfg_set(key, value)) {
+        ++updated_display;
+      }
+      continue;
+    }
+    if (ctrl_try_update_runtime_config(name, value.c_str())) {
+      ++updated_local;
     }
   }
-  String body = "updated=" + String(updated) + "\n";
+  String body = "updated_local=" + String(updated_local) +
+                " updated_display=" + String(updated_display) + "\n";
   g_ctrl_web.send(200, "text/plain", body);
 }
 
 void ctrl_web_handle_root() {
   String html;
   html.reserve(4096);
-  html += "<html><body><h1>Controller Config</h1>";
+  html += "<html><body><h1>System Config (Controller + Display)</h1>";
   html += "<p><a href=\"/config\">JSON config</a></p>";
+  html += "<h2>Controller</h2>";
   html += "<form method=\"post\" action=\"/config\">";
   html += "wifi_ssid: <input name=\"wifi_ssid\" value=\"" + g_cfg_ctrl_wifi_ssid + "\"><br>";
   html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
@@ -453,8 +534,36 @@ void ctrl_web_handle_root() {
   html += "espnow_channel: <input name=\"espnow_channel\" value=\"" + String(g_cfg_ctrl_espnow_channel) + "\"><br>";
   html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" value=\"" + g_cfg_ctrl_espnow_peer_mac + "\"><br>";
   html += "espnow_lmk: <input name=\"espnow_lmk\" value=\"\"><br>";
-  html += "<button type=\"submit\">Save</button></form>";
+  html += "<button type=\"submit\">Save Controller</button></form>";
   html += "<p>reboot_required=" + String(g_ctrl_cfg_reboot_required ? "true" : "false") + "</p>";
+
+  html += "<h2>Display (via MQTT)</h2>";
+  html += "<p>availability=" + g_disp_availability + "</p>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "wifi_ssid: <input name=\"disp_wifi_ssid\" value=\"" + ctrl_get_display_cfg_cache("wifi_ssid") + "\"><br>";
+  html += "wifi_password: <input name=\"disp_wifi_password\" value=\"\"><br>";
+  html += "mqtt_host: <input name=\"disp_mqtt_host\" value=\"" + ctrl_get_display_cfg_cache("mqtt_host") + "\"><br>";
+  html += "mqtt_port: <input name=\"disp_mqtt_port\" value=\"" + ctrl_get_display_cfg_cache("mqtt_port") + "\"><br>";
+  html += "mqtt_user: <input name=\"disp_mqtt_user\" value=\"" + ctrl_get_display_cfg_cache("mqtt_user") + "\"><br>";
+  html += "mqtt_password: <input name=\"disp_mqtt_password\" value=\"\"><br>";
+  html += "mqtt_client_id: <input name=\"disp_mqtt_client_id\" value=\"" + ctrl_get_display_cfg_cache("mqtt_client_id") + "\"><br>";
+  html += "mqtt_base_topic: <input name=\"disp_mqtt_base_topic\" value=\"" + ctrl_get_display_cfg_cache("mqtt_base_topic") + "\"><br>";
+  html += "discovery_prefix: <input name=\"disp_discovery_prefix\" value=\"" + ctrl_get_display_cfg_cache("discovery_prefix") + "\"><br>";
+  html += "shared_device_id: <input name=\"disp_shared_device_id\" value=\"" + ctrl_get_display_cfg_cache("shared_device_id") + "\"><br>";
+  html += "display_timeout_s: <input name=\"disp_display_timeout_s\" value=\"" + ctrl_get_display_cfg_cache("display_timeout_s") + "\"><br>";
+  html += "temp_comp_c: <input name=\"disp_temp_comp_c\" value=\"" + ctrl_get_display_cfg_cache("temp_comp_c") + "\"><br>";
+  html += "temperature_unit: <input name=\"disp_temperature_unit\" value=\"" + ctrl_get_display_cfg_cache("temperature_unit") + "\"><br>";
+  html += "outdoor_temp_topic: <input name=\"disp_outdoor_temp_topic\" value=\"" + ctrl_get_display_cfg_cache("outdoor_temp_topic") + "\"><br>";
+  html += "weather_condition_topic: <input name=\"disp_weather_condition_topic\" value=\"" + ctrl_get_display_cfg_cache("weather_condition_topic") + "\"><br>";
+  html += "ota_hostname: <input name=\"disp_ota_hostname\" value=\"" + ctrl_get_display_cfg_cache("ota_hostname") + "\"><br>";
+  html += "ota_password: <input name=\"disp_ota_password\" value=\"\"><br>";
+  html += "espnow_channel: <input name=\"disp_espnow_channel\" value=\"" + ctrl_get_display_cfg_cache("espnow_channel") + "\"><br>";
+  html += "espnow_peer_mac: <input name=\"disp_espnow_peer_mac\" value=\"" + ctrl_get_display_cfg_cache("espnow_peer_mac") + "\"><br>";
+  html += "espnow_lmk: <input name=\"disp_espnow_lmk\" value=\"\"><br>";
+  html += "controller_timeout_ms: <input name=\"disp_controller_timeout_ms\" value=\"" + ctrl_get_display_cfg_cache("controller_timeout_ms") + "\"><br>";
+  html += "<button type=\"submit\">Save Display</button></form>";
+  html += "<p>display_reboot_required=" + ctrl_get_display_cfg_cache("reboot_required") + "</p>";
+  html += "<p>Use the display device IP + /screenshot for remote screen capture.</p>";
   html += "</body></html>";
   g_ctrl_web.send(200, "text/html", html);
 }
@@ -542,6 +651,20 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       const String key = topic_str.substring(key_begin, key_end);
       ctrl_try_update_runtime_config(key, value);
     }
+    return;
+  }
+  const String disp_cfg_prefix = display_topic_for("cfg/");
+  if (topic_str.startsWith(disp_cfg_prefix) && topic_str.endsWith("/state")) {
+    const int key_begin = static_cast<int>(disp_cfg_prefix.length());
+    const int key_end = static_cast<int>(topic_str.length()) - 6;
+    if (key_end > key_begin) {
+      const String key = topic_str.substring(key_begin, key_end);
+      ctrl_set_display_cfg_cache(key, value);
+    }
+    return;
+  }
+  if (topic_str == display_topic_for("state/availability")) {
+    g_disp_availability = value;
     return;
   }
 
@@ -671,6 +794,8 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(display_topic_for("state/mode").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/fan_mode").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/target_temp_c").c_str());
+  g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str());
+  g_ctrl_mqtt.subscribe(display_topic_for("cfg/+/state").c_str());
   ctrl_publish_discovery();
   ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
