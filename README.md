@@ -48,6 +48,7 @@ Primary specification and parity guide:
 
 ## MQTT + Home Assistant
 - Thermostat firmware now publishes/subscribes MQTT topics and sends Home Assistant MQTT discovery for a climate entity.
+- Both firmware roles support network OTA updates via `ArduinoOTA` (no serial required after install).
 - Wi-Fi provisioning behavior:
   - If `THERMOSTAT_WIFI_SSID` is set, firmware uses that static SSID/password.
   - If `THERMOSTAT_WIFI_SSID` is empty, firmware attempts stored credentials, then starts BLE provisioning (`WiFiProv`) after a short timeout.
@@ -65,6 +66,10 @@ Primary specification and parity guide:
   - `THERMOSTAT_PROV_POP` (default `thermostat-setup`)
   - `THERMOSTAT_PROV_SERVICE_NAME` (default `PROV_ESP32_THERMOSTAT`)
   - `THERMOSTAT_PROV_RESET_PROVISIONED` (`0` default, `1` to clear saved credentials at boot)
+  - `THERMOSTAT_OTA_HOSTNAME` (display OTA hostname, default `furnace-display`)
+  - `THERMOSTAT_OTA_PASSWORD` (optional display OTA password)
+  - `THERMOSTAT_CONTROLLER_OTA_HOSTNAME` (controller OTA hostname, default `furnace-controller`)
+  - `THERMOSTAT_CONTROLLER_OTA_PASSWORD` (optional controller OTA password)
 - Command topics:
   - `<base>/cmd/mode` (`off|heat|cool`)
   - `<base>/cmd/fan_mode` (`auto|on|circulate`)

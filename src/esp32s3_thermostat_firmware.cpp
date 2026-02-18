@@ -9,6 +9,7 @@
 
 #include <Wire.h>
 #include <lvgl.h>
+#include <ArduinoOTA.h>
 #include <WiFi.h>
 #include <WiFiProv.h>
 #include <PubSubClient.h>
@@ -147,6 +148,14 @@ constexpr uint32_t kMqttPublishMs = 10000;
 #define THERMOSTAT_FIRMWARE_VERSION "dev"
 #endif
 
+#ifndef THERMOSTAT_OTA_HOSTNAME
+#define THERMOSTAT_OTA_HOSTNAME "furnace-display"
+#endif
+
+#ifndef THERMOSTAT_OTA_PASSWORD
+#define THERMOSTAT_OTA_PASSWORD ""
+#endif
+
 struct TouchState {
   bool touched = false;
   int16_t x = 0;
@@ -205,6 +214,7 @@ std::string g_weather_condition = "Cloudy";
 bool g_have_outdoor_temp = false;
 bool g_have_weather_condition = false;
 uint32_t g_display_timeout_ms = static_cast<uint32_t>(THERMOSTAT_DISPLAY_TIMEOUT_S) * 1000UL;
+bool g_ota_started = false;
 
 const char *mode_to_mqtt(FurnaceMode mode) {
   switch (mode) {
@@ -566,6 +576,19 @@ void ensure_mqtt_connected(uint32_t now_ms) {
 
   mqtt_publish_discovery();
   mqtt_publish_state();
+}
+
+void ensure_ota_ready() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!g_ota_started) {
+    ArduinoOTA.setHostname(THERMOSTAT_OTA_HOSTNAME);
+    if (strlen(THERMOSTAT_OTA_PASSWORD) > 0) {
+      ArduinoOTA.setPassword(THERMOSTAT_OTA_PASSWORD);
+    }
+    ArduinoOTA.begin();
+    g_ota_started = true;
+  }
+  ArduinoOTA.handle();
 }
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
@@ -1065,6 +1088,7 @@ void thermostat_firmware_loop() {
   }
 
   ensure_wifi_connected(now);
+  ensure_ota_ready();
   ensure_mqtt_connected(now);
   g_mqtt.loop();
 

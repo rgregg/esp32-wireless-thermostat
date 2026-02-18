@@ -11,6 +11,7 @@
 
 #if defined(ARDUINO)
 #include <Arduino.h>
+#include <ArduinoOTA.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #endif
@@ -63,6 +64,7 @@ bool g_ctrl_have_shadow = false;
 FurnaceMode g_ctrl_shadow_mode = FurnaceMode::Off;
 FanMode g_ctrl_shadow_fan = FanMode::Automatic;
 float g_ctrl_shadow_setpoint_c = 20.0f;
+bool g_ctrl_ota_started = false;
 
 constexpr uint32_t kCtrlNetworkRetryMs = 5000;
 constexpr uint32_t kCtrlMqttPublishMs = 10000;
@@ -118,6 +120,14 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 
 #ifndef THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL
 #define THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL 6
+#endif
+
+#ifndef THERMOSTAT_CONTROLLER_OTA_HOSTNAME
+#define THERMOSTAT_CONTROLLER_OTA_HOSTNAME "furnace-controller"
+#endif
+
+#ifndef THERMOSTAT_CONTROLLER_OTA_PASSWORD
+#define THERMOSTAT_CONTROLLER_OTA_PASSWORD ""
 #endif
 
 String ctrl_topic_for(const char *suffix) {
@@ -336,14 +346,15 @@ void ctrl_ensure_wifi_connected(uint32_t now_ms) {
   if (WiFi.status() == WL_CONNECTED) {
     return;
   }
-  if (strlen(THERMOSTAT_CONTROLLER_WIFI_SSID) == 0) {
-    return;
-  }
   if ((now_ms - g_ctrl_last_wifi_attempt_ms) < kCtrlNetworkRetryMs) {
     return;
   }
   g_ctrl_last_wifi_attempt_ms = now_ms;
-  WiFi.begin(THERMOSTAT_CONTROLLER_WIFI_SSID, THERMOSTAT_CONTROLLER_WIFI_PASSWORD);
+  if (strlen(THERMOSTAT_CONTROLLER_WIFI_SSID) == 0) {
+    WiFi.begin();
+  } else {
+    WiFi.begin(THERMOSTAT_CONTROLLER_WIFI_SSID, THERMOSTAT_CONTROLLER_WIFI_PASSWORD);
+  }
 }
 
 void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
@@ -381,6 +392,21 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(display_topic_for("state/target_temp_c").c_str());
   ctrl_publish_discovery();
   ctrl_publish_runtime_state();
+}
+
+void ctrl_ensure_ota_ready() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  if (!g_ctrl_ota_started) {
+    ArduinoOTA.setHostname(THERMOSTAT_CONTROLLER_OTA_HOSTNAME);
+    if (strlen(THERMOSTAT_CONTROLLER_OTA_PASSWORD) > 0) {
+      ArduinoOTA.setPassword(THERMOSTAT_CONTROLLER_OTA_PASSWORD);
+    }
+    ArduinoOTA.begin();
+    g_ctrl_ota_started = true;
+  }
+  ArduinoOTA.handle();
 }
 
 void setup() {
@@ -423,6 +449,7 @@ void loop() {
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
     ctrl_ensure_wifi_connected(now);
+    ctrl_ensure_ota_ready();
     ctrl_ensure_mqtt_connected(now);
     g_ctrl_mqtt.loop();
     const bool mqtt_primary_active =
