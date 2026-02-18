@@ -121,11 +121,11 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC
-#define THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC ""
+#define THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC "FF:FF:FF:FF:FF:FF"
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_ESPNOW_LMK
-#define THERMOSTAT_CONTROLLER_ESPNOW_LMK ""
+#define THERMOSTAT_CONTROLLER_ESPNOW_LMK "a1b2c3d4e5f60718293a4b5c6d7e8f90"
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL
@@ -427,6 +427,11 @@ bool ctrl_parse_mac(const char *text, uint8_t out[6]) {
     out[i] = static_cast<uint8_t>(values[i] & 0xFFu);
   }
   return true;
+}
+
+bool ctrl_is_broadcast_mac(const uint8_t mac[6]) {
+  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  return memcmp(mac, kBroadcast, sizeof(kBroadcast)) == 0;
 }
 
 bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
@@ -893,14 +898,16 @@ void setup() {
   controller_cfg.fan_circulate_duration_min = 10;
 
   thermostat::EspNowControllerConfig transport_cfg;
+  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  memcpy(transport_cfg.peer_mac, kBroadcast, sizeof(kBroadcast));
   transport_cfg.channel = g_cfg_ctrl_espnow_channel;
   transport_cfg.heartbeat_interval_ms = 10000;
-  if (ctrl_parse_mac(g_cfg_ctrl_espnow_peer_mac.c_str(), transport_cfg.peer_mac)) {
-    uint8_t lmk[16] = {0};
-    if (ctrl_parse_lmk_hex(g_cfg_ctrl_espnow_lmk.c_str(), lmk)) {
-      memcpy(transport_cfg.lmk, lmk, sizeof(lmk));
-      transport_cfg.encrypted = true;
-    }
+  ctrl_parse_mac(g_cfg_ctrl_espnow_peer_mac.c_str(), transport_cfg.peer_mac);
+  uint8_t lmk[16] = {0};
+  if (ctrl_parse_lmk_hex(g_cfg_ctrl_espnow_lmk.c_str(), lmk) &&
+      !ctrl_is_broadcast_mac(transport_cfg.peer_mac)) {
+    memcpy(transport_cfg.lmk, lmk, sizeof(lmk));
+    transport_cfg.encrypted = true;
   }
 
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);

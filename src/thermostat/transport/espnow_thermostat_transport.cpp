@@ -11,6 +11,13 @@
 
 namespace thermostat {
 
+namespace {
+bool is_broadcast_mac(const uint8_t mac[6]) {
+  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  return memcmp(mac, kBroadcast, sizeof(kBroadcast)) == 0;
+}
+}  // namespace
+
 EspNowThermostatTransport *EspNowThermostatTransport::instance_ = nullptr;
 
 bool EspNowThermostatTransport::begin(const EspNowThermostatConfig &config) {
@@ -135,13 +142,14 @@ void EspNowThermostatTransport::publish_indoor_humidity(float humidity_pct) {
 #endif
 }
 
-void EspNowThermostatTransport::on_recv_static(const void * /*recv_info*/,
+void EspNowThermostatTransport::on_recv_static(const void *recv_info,
                                                const uint8_t *data,
                                                int len) {
   if (instance_ == nullptr) {
     return;
   }
-  instance_->on_recv(data, len);
+  const uint8_t *src_mac = reinterpret_cast<const uint8_t *>(recv_info);
+  instance_->on_recv(src_mac, data, len);
 }
 
 void EspNowThermostatTransport::on_send_static(const uint8_t * /*mac_addr*/, int status) {
@@ -159,8 +167,14 @@ void EspNowThermostatTransport::on_send_static(const uint8_t * /*mac_addr*/, int
 #endif
 }
 
-void EspNowThermostatTransport::on_recv(const uint8_t *data, int len) {
+void EspNowThermostatTransport::on_recv(const uint8_t *src_mac,
+                                        const uint8_t *data,
+                                        int len) {
   if (data == nullptr || len < static_cast<int>(sizeof(PacketHeader))) {
+    return;
+  }
+  if (src_mac != nullptr && !is_broadcast_mac(config_.peer_mac) &&
+      memcmp(src_mac, config_.peer_mac, 6) != 0) {
     return;
   }
 

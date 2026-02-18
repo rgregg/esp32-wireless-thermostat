@@ -137,11 +137,11 @@ constexpr uint32_t kMqttPublishMs = 10000;
 #endif
 
 #ifndef THERMOSTAT_ESPNOW_PEER_MAC
-#define THERMOSTAT_ESPNOW_PEER_MAC ""
+#define THERMOSTAT_ESPNOW_PEER_MAC "FF:FF:FF:FF:FF:FF"
 #endif
 
 #ifndef THERMOSTAT_ESPNOW_LMK
-#define THERMOSTAT_ESPNOW_LMK ""
+#define THERMOSTAT_ESPNOW_LMK "a1b2c3d4e5f60718293a4b5c6d7e8f90"
 #endif
 
 #ifndef THERMOSTAT_ESPNOW_CHANNEL
@@ -500,6 +500,11 @@ bool parse_mac(const char *text, uint8_t out[6]) {
   }
   for (int i = 0; i < 6; ++i) out[i] = static_cast<uint8_t>(values[i] & 0xFFu);
   return true;
+}
+
+bool is_broadcast_mac(const uint8_t mac[6]) {
+  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  return memcmp(mac, kBroadcast, sizeof(kBroadcast)) == 0;
 }
 
 bool parse_lmk_hex(const char *text, uint8_t out[16]) {
@@ -1522,15 +1527,17 @@ void thermostat_firmware_setup() {
   g_reset_reason = reset_reason_text(esp_reset_reason());
 
   ThermostatDeviceRuntimeConfig cfg;
+  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  memcpy(cfg.transport.peer_mac, kBroadcast, sizeof(kBroadcast));
   cfg.transport.channel = g_cfg_espnow_channel;
   cfg.transport.heartbeat_interval_ms = 10000;
   cfg.controller_connection_timeout_ms = g_cfg_controller_timeout_ms;
-  if (parse_mac(g_cfg_espnow_peer_mac.c_str(), cfg.transport.peer_mac)) {
-    uint8_t lmk[16] = {0};
-    if (parse_lmk_hex(g_cfg_espnow_lmk.c_str(), lmk)) {
-      memcpy(cfg.transport.lmk, lmk, sizeof(lmk));
-      cfg.transport.encrypted = true;
-    }
+  parse_mac(g_cfg_espnow_peer_mac.c_str(), cfg.transport.peer_mac);
+  uint8_t lmk[16] = {0};
+  if (parse_lmk_hex(g_cfg_espnow_lmk.c_str(), lmk) &&
+      !is_broadcast_mac(cfg.transport.peer_mac)) {
+    memcpy(cfg.transport.lmk, lmk, sizeof(lmk));
+    cfg.transport.encrypted = true;
   }
 
   static ThermostatDeviceRuntime runtime(cfg);

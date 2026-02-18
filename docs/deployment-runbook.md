@@ -4,6 +4,10 @@
 - MQTT host defaults to `mqtt.lan` on both devices.
 - MQTT username/password default to empty.
 - ESP-NOW default channel is `6` on both devices.
+- ESP-NOW default LMK is set on both devices (same 16-byte key in hex).
+- ESP-NOW peer MAC default is broadcast (`FF:FF:FF:FF:FF:FF`), which keeps multicast fallback.
+  - Note: ESP-NOW encryption requires a unicast peer MAC; with broadcast peer, traffic is unencrypted.
+  - To enforce allowed-device communication and encrypted ESP-NOW traffic, set `espnow_peer_mac` to the other device's MAC on both devices.
 
 ## First Boot
 1. Flash controller and display firmware.
@@ -26,6 +30,5 @@
   - `state/uptime_s`
 
 ## mDNS Hostnames
-- Controller advertises HTTP using OTA hostname (default `furnace-controller`)
-- Display advertises HTTP using OTA hostname (default `furnace-display`)
-
+- Controller advertises HTTP using OTA hostname (default `esp32-furnace-controller`)
+- Display advertises HTTP using OTA hostname (default `esp32-furnace-thermostat`)

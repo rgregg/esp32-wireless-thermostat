@@ -40,7 +40,7 @@ class EspNowControllerTransport final : public IControllerTransport {
  private:
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
   static void on_send_static(const uint8_t *mac_addr, int status);
-  void on_recv(const uint8_t *data, int len);
+  void on_recv(const uint8_t *src_mac, const uint8_t *data, int len);
   void send_heartbeat(uint32_t now_ms);
 
   EspNowControllerConfig config_{};
