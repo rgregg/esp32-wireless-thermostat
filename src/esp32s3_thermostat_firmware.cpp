@@ -10,11 +10,13 @@
 #include <Wire.h>
 #include <lvgl.h>
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiProv.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
+#include <esp_system.h>
 
 #include "thermostat_device_runtime.h"
 #include "thermostat_screen_controller.h"
@@ -75,7 +77,7 @@ constexpr uint32_t kMqttPublishMs = 10000;
 #endif
 
 #ifndef THERMOSTAT_MQTT_CLIENT_ID
-#define THERMOSTAT_MQTT_CLIENT_ID "esp32-wireless-thermostat"
+#define THERMOSTAT_MQTT_CLIENT_ID "esp32-furnace-thermostat"
 #endif
 
 #ifndef THERMOSTAT_MQTT_NODE_ID
@@ -151,7 +153,7 @@ constexpr uint32_t kMqttPublishMs = 10000;
 #endif
 
 #ifndef THERMOSTAT_OTA_HOSTNAME
-#define THERMOSTAT_OTA_HOSTNAME "furnace-display"
+#define THERMOSTAT_OTA_HOSTNAME "esp32-furnace-thermostat"
 #endif
 
 #ifndef THERMOSTAT_OTA_PASSWORD
@@ -184,6 +186,7 @@ PubSubClient g_mqtt(g_wifi_client);
 WebServer g_web(80);
 bool g_mqtt_discovery_sent = false;
 bool g_web_started = false;
+bool g_mdns_started = false;
 
 ThermostatDeviceRuntime *g_runtime = nullptr;
 ThermostatScreenController g_screen;
@@ -245,6 +248,8 @@ bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
 bool g_cfg_reboot_required = false;
 uint16_t *g_screenshot_fb = nullptr;
+uint32_t g_boot_count = 0;
+String g_reset_reason = "unknown";
 
 const char *mode_to_mqtt(FurnaceMode mode) {
   switch (mode) {
@@ -507,6 +512,31 @@ bool parse_lmk_hex(const char *text, uint8_t out[16]) {
   return true;
 }
 
+const char *reset_reason_text(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "power_on";
+    case ESP_RST_SW:
+      return "software";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "interrupt_wdt";
+    case ESP_RST_TASK_WDT:
+      return "task_wdt";
+    case ESP_RST_WDT:
+      return "wdt";
+    case ESP_RST_DEEPSLEEP:
+      return "deep_sleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    default:
+      return "other";
+  }
+}
+
 String json_escape(const String &in) {
   String out;
   out.reserve(in.length() + 8);
@@ -693,6 +723,11 @@ void mqtt_publish_state() {
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_display_timeout_ms / 1000UL));
   g_mqtt.publish(topic_for("state/display_timeout_s").c_str(), buf, true);
   g_mqtt.publish(topic_for("state/firmware_version").c_str(), THERMOSTAT_FIRMWARE_VERSION, true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_boot_count));
+  g_mqtt.publish(topic_for("state/boot_count").c_str(), buf, true);
+  g_mqtt.publish(topic_for("state/reset_reason").c_str(), g_reset_reason.c_str(), true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
+  g_mqtt.publish(topic_for("state/uptime_s").c_str(), buf, true);
 
   if (WiFi.status() == WL_CONNECTED) {
     g_mqtt.publish(topic_for("state/wifi_ip").c_str(), WiFi.localIP().toString().c_str(), true);
@@ -989,6 +1024,16 @@ void ensure_ota_ready() {
     g_ota_started = true;
   }
   ArduinoOTA.handle();
+}
+
+void ensure_mdns_ready() {
+  if (WiFi.status() != WL_CONNECTED || g_mdns_started) return;
+  const char *host =
+      g_cfg_ota_hostname.length() > 0 ? g_cfg_ota_hostname.c_str() : "furnace-display";
+  if (MDNS.begin(host)) {
+    MDNS.addService("http", "tcp", 80);
+    g_mdns_started = true;
+  }
 }
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
@@ -1470,6 +1515,11 @@ void poll_sensors(uint32_t now_ms) {
 void thermostat_firmware_setup() {
   g_cfg_ready = g_cfg.begin("cfg_disp", false);
   load_runtime_config();
+  g_boot_count = g_cfg_ready ? (g_cfg.getUInt("boot_cnt", 0U) + 1U) : 0U;
+  if (g_cfg_ready) {
+    g_cfg.putUInt("boot_cnt", g_boot_count);
+  }
+  g_reset_reason = reset_reason_text(esp_reset_reason());
 
   ThermostatDeviceRuntimeConfig cfg;
   cfg.transport.channel = g_cfg_espnow_channel;
@@ -1520,6 +1570,7 @@ void thermostat_firmware_loop() {
   }
 
   ensure_wifi_connected(now);
+  ensure_mdns_ready();
   ensure_web_ready();
   ensure_ota_ready();
   ensure_mqtt_connected(now);

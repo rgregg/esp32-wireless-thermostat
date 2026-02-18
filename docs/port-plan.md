@@ -29,12 +29,15 @@ Task list verified against:
 - Runtime configuration for both controller and display is now persisted in NVS and writable over MQTT config topics (`cfg/<key>/set`) with retained config-state mirrors.
 - Both devices now expose a simple runtime configuration web server (`/`, `/config`) for editing persisted settings without MQTT tooling.
 - Thermostat display web server now exposes `/screenshot` to fetch the current UI as a BMP image.
+- Controller now hosts a unified management UI that can edit both controller-local and display-remote settings through MQTT config proxying.
 - Thermostat clock now uses SNTP/NTP time configuration and renders local time instead of uptime seconds.
 - Runtime display timeout is now configurable (`cmd/display_timeout_s`, retained `state/display_timeout_s`).
+- Deployment polish includes HTTP mDNS advertisement and boot/reset/uptime telemetry topics on both devices.
 - ESP-NOW deployment config path is implemented via build flags for peer MAC, channel, and LMK on both controller and thermostat.
 - ESP-NOW send result diagnostics counters are implemented in both transport adapters.
 - Hardware-in-loop checklist and smoke automation script are now included.
 - Management stack decision is documented: MQTT/provisioning is the intentional replacement for ESPHome management stack parity.
+- Deployment runbook is documented (`docs/deployment-runbook.md`).
 - Core host and target builds/tests are passing.
 
 ## Remaining Work (P0)
@@ -50,8 +53,8 @@ Task list verified against:
 Passing now:
 - `pio run -e native`
 - `pio run -e native-tests`
-- `pio run -e esp32dev-controller`
-- `pio run -e esp32s3-display`
+- `pio run -e esp32-furnace-controller`
+- `pio run -e esp32-furnace-thermostat`
 - `./.pio/build/native-tests/program`
 
 Native tests currently validate:
@@ -60,3 +63,4 @@ Native tests currently validate:
 - controller app auto HVAC behavior from indoor temperature
 - thermostat app debounce and command publication
 - display app/model formatting, conversion, weather mapping, and status text
+- management topic/form path routing helpers used by unified web + MQTT config plumbing

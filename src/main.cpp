@@ -7,15 +7,18 @@
 #include "controller_node.h"
 #include "esp32s3_thermostat_firmware.h"
 #include "espnow_cmd_word.h"
+#include "management_paths.h"
 #include "thermostat_device_runtime.h"
 
 #if defined(ARDUINO)
 #include <Arduino.h>
 #include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
+#include <esp_system.h>
 #endif
 
 namespace {
@@ -69,6 +72,9 @@ FanMode g_ctrl_shadow_fan = FanMode::Automatic;
 float g_ctrl_shadow_setpoint_c = 20.0f;
 bool g_ctrl_ota_started = false;
 bool g_ctrl_web_started = false;
+bool g_ctrl_mdns_started = false;
+uint32_t g_ctrl_boot_count = 0;
+String g_ctrl_reset_reason = "unknown";
 
 constexpr uint32_t kCtrlNetworkRetryMs = 5000;
 constexpr uint32_t kCtrlMqttPublishMs = 10000;
@@ -99,7 +105,7 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID
-#define THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID "esp32-wireless-thermostat-controller"
+#define THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID "esp32-furnace-controller"
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_MQTT_BASE_TOPIC
@@ -127,11 +133,15 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_OTA_HOSTNAME
-#define THERMOSTAT_CONTROLLER_OTA_HOSTNAME "furnace-controller"
+#define THERMOSTAT_CONTROLLER_OTA_HOSTNAME "esp32-furnace-controller"
 #endif
 
 #ifndef THERMOSTAT_CONTROLLER_OTA_PASSWORD
 #define THERMOSTAT_CONTROLLER_OTA_PASSWORD ""
+#endif
+
+#ifndef THERMOSTAT_FIRMWARE_VERSION
+#define THERMOSTAT_FIRMWARE_VERSION "dev"
 #endif
 
 Preferences g_ctrl_cfg;
@@ -379,6 +389,31 @@ bool ctrl_parse_bool_payload(const char *value) {
   return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0;
 }
 
+const char *ctrl_reset_reason_text(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "power_on";
+    case ESP_RST_SW:
+      return "software";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "interrupt_wdt";
+    case ESP_RST_TASK_WDT:
+      return "task_wdt";
+    case ESP_RST_WDT:
+      return "wdt";
+    case ESP_RST_DEEPSLEEP:
+      return "deep_sleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    default:
+      return "other";
+  }
+}
+
 bool ctrl_parse_mac(const char *text, uint8_t out[6]) {
   if (text == nullptr || strlen(text) < 17) {
     return false;
@@ -418,6 +453,8 @@ void ctrl_publish_discovery() {
   const String switch_topic = String("homeassistant/switch/") + dev_id + "_lockout/config";
   const String filter_topic = String("homeassistant/sensor/") + dev_id + "_filter_runtime/config";
   const String state_topic = String("homeassistant/sensor/") + dev_id + "_furnace_state/config";
+  const String fw_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_firmware/config";
 
   char payload[768];
   snprintf(payload, sizeof(payload),
@@ -442,6 +479,13 @@ void ctrl_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(state_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Firmware Version\",\"uniq_id\":\"%s_controller_firmware\","
+           "\"stat_t\":\"%s/state/firmware_version\",\"entity_category\":\"diagnostic\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(fw_topic.c_str(), payload, true);
 
   g_ctrl_mqtt_discovery_sent = true;
 }
@@ -496,9 +540,10 @@ void ctrl_web_handle_config_post() {
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
     const String value = g_ctrl_web.arg(i);
-    if (name.startsWith("disp_")) {
-      const String key = name.substring(5);
-      if (ctrl_publish_display_cfg_set(key, value)) {
+    std::string key_std;
+    if (thermostat::management_paths::parse_prefixed_form_key(name.c_str(), "disp_",
+                                                               &key_std)) {
+      if (ctrl_publish_display_cfg_set(key_std.c_str(), value)) {
         ++updated_display;
       }
       continue;
@@ -607,6 +652,14 @@ void ctrl_publish_runtime_state() {
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_runtime_hours").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(rt.furnace_state()));
   g_ctrl_mqtt.publish(ctrl_topic_for("state/furnace_state").c_str(), buf, true);
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/firmware_version").c_str(),
+                      THERMOSTAT_FIRMWARE_VERSION, true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_boot_count));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/boot_count").c_str(), buf, true);
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/reset_reason").c_str(), g_ctrl_reset_reason.c_str(),
+                      true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/uptime_s").c_str(), buf, true);
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
 }
@@ -643,24 +696,16 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   value[copy_len] = '\0';
 
   const String topic_str(topic);
-  const String cfg_prefix = ctrl_topic_for("cfg/");
-  if (topic_str.startsWith(cfg_prefix) && topic_str.endsWith("/set")) {
-    const int key_begin = static_cast<int>(cfg_prefix.length());
-    const int key_end = static_cast<int>(topic_str.length()) - 4;
-    if (key_end > key_begin) {
-      const String key = topic_str.substring(key_begin, key_end);
-      ctrl_try_update_runtime_config(key, value);
-    }
+  std::string cfg_key;
+  if (thermostat::management_paths::parse_cfg_set_topic(g_cfg_ctrl_mqtt_base_topic.c_str(),
+                                                        topic_str.c_str(), &cfg_key)) {
+    ctrl_try_update_runtime_config(cfg_key.c_str(), value);
     return;
   }
-  const String disp_cfg_prefix = display_topic_for("cfg/");
-  if (topic_str.startsWith(disp_cfg_prefix) && topic_str.endsWith("/state")) {
-    const int key_begin = static_cast<int>(disp_cfg_prefix.length());
-    const int key_end = static_cast<int>(topic_str.length()) - 6;
-    if (key_end > key_begin) {
-      const String key = topic_str.substring(key_begin, key_end);
-      ctrl_set_display_cfg_cache(key, value);
-    }
+  std::string disp_cfg_key;
+  if (thermostat::management_paths::parse_cfg_state_topic(
+          g_cfg_display_mqtt_base_topic.c_str(), topic_str.c_str(), &disp_cfg_key)) {
+    ctrl_set_display_cfg_cache(disp_cfg_key.c_str(), value);
     return;
   }
   if (topic_str == display_topic_for("state/availability")) {
@@ -816,6 +861,18 @@ void ctrl_ensure_ota_ready() {
   ArduinoOTA.handle();
 }
 
+void ctrl_ensure_mdns_ready() {
+  if (WiFi.status() != WL_CONNECTED || g_ctrl_mdns_started) {
+    return;
+  }
+  const char *host = g_cfg_ctrl_ota_hostname.length() > 0 ? g_cfg_ctrl_ota_hostname.c_str()
+                                                           : "furnace-controller";
+  if (MDNS.begin(host)) {
+    MDNS.addService("http", "tcp", 80);
+    g_ctrl_mdns_started = true;
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   while (!Serial) {
@@ -823,6 +880,12 @@ void setup() {
   }
   g_ctrl_cfg_ready = g_ctrl_cfg.begin("cfg_ctrl", false);
   ctrl_load_runtime_config();
+  g_ctrl_boot_count =
+      g_ctrl_cfg_ready ? (g_ctrl_cfg.getUInt("boot_cnt", 0U) + 1U) : 0U;
+  if (g_ctrl_cfg_ready) {
+    g_ctrl_cfg.putUInt("boot_cnt", g_ctrl_boot_count);
+  }
+  g_ctrl_reset_reason = ctrl_reset_reason_text(esp_reset_reason());
 
   thermostat::ControllerConfig controller_cfg;
   controller_cfg.failsafe_timeout_ms = 300000;
@@ -858,6 +921,7 @@ void loop() {
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
     ctrl_ensure_wifi_connected(now);
+    ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
     ctrl_ensure_ota_ready();
     ctrl_ensure_mqtt_connected(now);

@@ -15,8 +15,8 @@ DISP_BASE="${PREFIX}/furnace-display"
 echo "== Build checks =="
 pio run -e native-tests >/dev/null
 ./.pio/build/native-tests/program >/dev/null
-pio run -e esp32dev-controller >/dev/null
-pio run -e esp32s3-display >/dev/null
+pio run -e esp32-furnace-controller >/dev/null
+pio run -e esp32-furnace-thermostat >/dev/null
 echo "Build/test checks passed"
 
 echo "== MQTT lockout smoke =="

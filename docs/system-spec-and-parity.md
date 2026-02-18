@@ -81,7 +81,7 @@ Status legend:
 | ID | Requirement | Status | Current implementation notes |
 |---|---|---|---|
 | V-01 | Native tests validate codec, controller runtime/app, thermostat app, display model, screen logic. | Implemented | `native-tests` currently runs 15 tests and passes. |
-| V-02 | Build matrix must pass for host + controller + display targets. | Implemented | `native`, `native-tests`, `esp32dev-controller`, `esp32s3-display` pass. |
+| V-02 | Build matrix must pass for host + controller + display targets. | Implemented | `native`, `native-tests`, `esp32-furnace-controller`, `esp32-furnace-thermostat` pass. |
 | V-03 | Hardware-in-loop verification for controller relays/display touch/panel/sensors. | Missing | Not yet automated or fully documented; pending physical validation. |
 
 ## Parity Summary

@@ -35,15 +35,15 @@ Primary specification and parity guide:
 - Host test build:
   - `pio run -e native-tests`
 - ESP32 controller firmware:
-  - `pio run -e esp32dev-controller`
+  - `pio run -e esp32-furnace-controller`
 - ESP32-S3 display firmware:
-  - `pio run -e esp32s3-display`
+  - `pio run -e esp32-furnace-thermostat`
 
 ## Run Tests
 - `./.pio/build/native-tests/program`
 
 ## Current Validation Status
-- `native`, `native-tests`, `esp32dev-controller`, and `esp32s3-display` builds passing.
+- `native`, `native-tests`, `esp32-furnace-controller`, and `esp32-furnace-thermostat` builds passing.
 - Native runtime tests passing for codec, controller runtime/app, thermostat app, and display-model behavior.
 
 ## MQTT + Home Assistant
