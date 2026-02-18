@@ -12,6 +12,7 @@
 #if defined(ARDUINO)
 #include <Arduino.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #endif
@@ -130,18 +131,182 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 #define THERMOSTAT_CONTROLLER_OTA_PASSWORD ""
 #endif
 
+Preferences g_ctrl_cfg;
+bool g_ctrl_cfg_ready = false;
+String g_cfg_ctrl_wifi_ssid = THERMOSTAT_CONTROLLER_WIFI_SSID;
+String g_cfg_ctrl_wifi_password = THERMOSTAT_CONTROLLER_WIFI_PASSWORD;
+String g_cfg_ctrl_mqtt_host = THERMOSTAT_CONTROLLER_MQTT_HOST;
+uint16_t g_cfg_ctrl_mqtt_port = THERMOSTAT_CONTROLLER_MQTT_PORT;
+String g_cfg_ctrl_mqtt_user = THERMOSTAT_CONTROLLER_MQTT_USER;
+String g_cfg_ctrl_mqtt_password = THERMOSTAT_CONTROLLER_MQTT_PASSWORD;
+String g_cfg_ctrl_mqtt_client_id = THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID;
+String g_cfg_ctrl_mqtt_base_topic = THERMOSTAT_CONTROLLER_MQTT_BASE_TOPIC;
+String g_cfg_display_mqtt_base_topic = THERMOSTAT_THERMOSTAT_MQTT_BASE_TOPIC;
+String g_cfg_shared_device_id = THERMOSTAT_MQTT_SHARED_DEVICE_ID;
+String g_cfg_ctrl_ota_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
+String g_cfg_ctrl_ota_password = THERMOSTAT_CONTROLLER_OTA_PASSWORD;
+uint8_t g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
+String g_cfg_ctrl_espnow_peer_mac = THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC;
+String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
+bool g_ctrl_mqtt_reconfigure_required = false;
+bool g_ctrl_wifi_reconnect_required = false;
+bool g_ctrl_cfg_reboot_required = false;
+
+void ctrl_load_runtime_config() {
+  if (!g_ctrl_cfg_ready) {
+    return;
+  }
+  g_cfg_ctrl_wifi_ssid = g_ctrl_cfg.getString("wifi_ssid", g_cfg_ctrl_wifi_ssid);
+  g_cfg_ctrl_wifi_password = g_ctrl_cfg.getString("wifi_pwd", g_cfg_ctrl_wifi_password);
+  g_cfg_ctrl_mqtt_host = g_ctrl_cfg.getString("mqtt_host", g_cfg_ctrl_mqtt_host);
+  g_cfg_ctrl_mqtt_port = static_cast<uint16_t>(g_ctrl_cfg.getUInt("mqtt_port", g_cfg_ctrl_mqtt_port));
+  g_cfg_ctrl_mqtt_user = g_ctrl_cfg.getString("mqtt_user", g_cfg_ctrl_mqtt_user);
+  g_cfg_ctrl_mqtt_password = g_ctrl_cfg.getString("mqtt_pwd", g_cfg_ctrl_mqtt_password);
+  g_cfg_ctrl_mqtt_client_id = g_ctrl_cfg.getString("mqtt_cid", g_cfg_ctrl_mqtt_client_id);
+  g_cfg_ctrl_mqtt_base_topic = g_ctrl_cfg.getString("mqtt_base", g_cfg_ctrl_mqtt_base_topic);
+  g_cfg_display_mqtt_base_topic = g_ctrl_cfg.getString("disp_base", g_cfg_display_mqtt_base_topic);
+  g_cfg_shared_device_id = g_ctrl_cfg.getString("shared_id", g_cfg_shared_device_id);
+  g_cfg_ctrl_ota_hostname = g_ctrl_cfg.getString("ota_host", g_cfg_ctrl_ota_hostname);
+  g_cfg_ctrl_ota_password = g_ctrl_cfg.getString("ota_pwd", g_cfg_ctrl_ota_password);
+  g_cfg_ctrl_espnow_channel = static_cast<uint8_t>(g_ctrl_cfg.getUChar("esp_ch", g_cfg_ctrl_espnow_channel));
+  g_cfg_ctrl_espnow_peer_mac = g_ctrl_cfg.getString("esp_peer", g_cfg_ctrl_espnow_peer_mac);
+  g_cfg_ctrl_espnow_lmk = g_ctrl_cfg.getString("esp_lmk", g_cfg_ctrl_espnow_lmk);
+}
+
 String ctrl_topic_for(const char *suffix) {
-  String out(THERMOSTAT_CONTROLLER_MQTT_BASE_TOPIC);
+  String out(g_cfg_ctrl_mqtt_base_topic);
   out += "/";
   out += suffix;
   return out;
 }
 
 String display_topic_for(const char *suffix) {
-  String out(THERMOSTAT_THERMOSTAT_MQTT_BASE_TOPIC);
+  String out(g_cfg_display_mqtt_base_topic);
   out += "/";
   out += suffix;
   return out;
+}
+
+void ctrl_publish_cfg_value(const char *key, const String &value, bool redact) {
+  if (!g_ctrl_mqtt.connected()) {
+    return;
+  }
+  String topic = ctrl_topic_for("cfg");
+  topic += "/";
+  topic += key;
+  topic += "/state";
+  const char *payload = value.c_str();
+  if (redact) {
+    payload = value.length() > 0 ? "set" : "unset";
+  }
+  g_ctrl_mqtt.publish(topic.c_str(), payload, true);
+}
+
+void ctrl_publish_all_cfg_state() {
+  ctrl_publish_cfg_value("wifi_ssid", g_cfg_ctrl_wifi_ssid, false);
+  ctrl_publish_cfg_value("wifi_password", g_cfg_ctrl_wifi_password, true);
+  ctrl_publish_cfg_value("mqtt_host", g_cfg_ctrl_mqtt_host, false);
+  ctrl_publish_cfg_value("mqtt_port", String(g_cfg_ctrl_mqtt_port), false);
+  ctrl_publish_cfg_value("mqtt_user", g_cfg_ctrl_mqtt_user, false);
+  ctrl_publish_cfg_value("mqtt_password", g_cfg_ctrl_mqtt_password, true);
+  ctrl_publish_cfg_value("mqtt_client_id", g_cfg_ctrl_mqtt_client_id, false);
+  ctrl_publish_cfg_value("mqtt_base_topic", g_cfg_ctrl_mqtt_base_topic, false);
+  ctrl_publish_cfg_value("display_mqtt_base_topic", g_cfg_display_mqtt_base_topic, false);
+  ctrl_publish_cfg_value("shared_device_id", g_cfg_shared_device_id, false);
+  ctrl_publish_cfg_value("ota_hostname", g_cfg_ctrl_ota_hostname, false);
+  ctrl_publish_cfg_value("ota_password", g_cfg_ctrl_ota_password, true);
+  ctrl_publish_cfg_value("espnow_channel", String(g_cfg_ctrl_espnow_channel), false);
+  ctrl_publish_cfg_value("espnow_peer_mac", g_cfg_ctrl_espnow_peer_mac, false);
+  ctrl_publish_cfg_value("espnow_lmk", g_cfg_ctrl_espnow_lmk, true);
+  ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0", false);
+}
+
+bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
+  if (!g_ctrl_cfg_ready || raw_value == nullptr) {
+    return false;
+  }
+  const String value(raw_value);
+  bool known = true;
+  if (key == "wifi_ssid") {
+    g_cfg_ctrl_wifi_ssid = value;
+    g_ctrl_cfg.putString("wifi_ssid", value);
+    g_ctrl_wifi_reconnect_required = true;
+  } else if (key == "wifi_password") {
+    g_cfg_ctrl_wifi_password = value;
+    g_ctrl_cfg.putString("wifi_pwd", value);
+    g_ctrl_wifi_reconnect_required = true;
+  } else if (key == "mqtt_host") {
+    g_cfg_ctrl_mqtt_host = value;
+    g_ctrl_cfg.putString("mqtt_host", value);
+    g_ctrl_mqtt_reconfigure_required = true;
+  } else if (key == "mqtt_port") {
+    const long parsed = atol(raw_value);
+    if (parsed < 1 || parsed > 65535) {
+      return false;
+    }
+    g_cfg_ctrl_mqtt_port = static_cast<uint16_t>(parsed);
+    g_ctrl_cfg.putUInt("mqtt_port", g_cfg_ctrl_mqtt_port);
+    g_ctrl_mqtt_reconfigure_required = true;
+  } else if (key == "mqtt_user") {
+    g_cfg_ctrl_mqtt_user = value;
+    g_ctrl_cfg.putString("mqtt_user", value);
+    g_ctrl_mqtt_reconfigure_required = true;
+  } else if (key == "mqtt_password") {
+    g_cfg_ctrl_mqtt_password = value;
+    g_ctrl_cfg.putString("mqtt_pwd", value);
+    g_ctrl_mqtt_reconfigure_required = true;
+  } else if (key == "mqtt_client_id") {
+    g_cfg_ctrl_mqtt_client_id = value;
+    g_ctrl_cfg.putString("mqtt_cid", value);
+    g_ctrl_mqtt_reconfigure_required = true;
+  } else if (key == "mqtt_base_topic") {
+    g_cfg_ctrl_mqtt_base_topic = value;
+    g_ctrl_cfg.putString("mqtt_base", value);
+    g_ctrl_mqtt_reconfigure_required = true;
+    g_ctrl_mqtt_discovery_sent = false;
+  } else if (key == "display_mqtt_base_topic") {
+    g_cfg_display_mqtt_base_topic = value;
+    g_ctrl_cfg.putString("disp_base", value);
+    g_ctrl_mqtt_reconfigure_required = true;
+  } else if (key == "shared_device_id") {
+    g_cfg_shared_device_id = value;
+    g_ctrl_cfg.putString("shared_id", value);
+    g_ctrl_mqtt_discovery_sent = false;
+  } else if (key == "ota_hostname") {
+    g_cfg_ctrl_ota_hostname = value;
+    g_ctrl_cfg.putString("ota_host", value);
+  } else if (key == "ota_password") {
+    g_cfg_ctrl_ota_password = value;
+    g_ctrl_cfg.putString("ota_pwd", value);
+  } else if (key == "espnow_channel") {
+    const long parsed = atol(raw_value);
+    if (parsed < 1 || parsed > 14) {
+      return false;
+    }
+    g_cfg_ctrl_espnow_channel = static_cast<uint8_t>(parsed);
+    g_ctrl_cfg.putUChar("esp_ch", g_cfg_ctrl_espnow_channel);
+    g_ctrl_cfg_reboot_required = true;
+  } else if (key == "espnow_peer_mac") {
+    g_cfg_ctrl_espnow_peer_mac = value;
+    g_ctrl_cfg.putString("esp_peer", value);
+    g_ctrl_cfg_reboot_required = true;
+  } else if (key == "espnow_lmk") {
+    g_cfg_ctrl_espnow_lmk = value;
+    g_ctrl_cfg.putString("esp_lmk", value);
+    g_ctrl_cfg_reboot_required = true;
+  } else {
+    known = false;
+  }
+
+  if (!known) {
+    return false;
+  }
+  if (g_ctrl_mqtt.connected()) {
+    ctrl_publish_cfg_value(key.c_str(), value,
+                           key == "wifi_password" || key == "mqtt_password" ||
+                               key == "ota_password" || key == "espnow_lmk");
+  }
+  return true;
 }
 
 bool ctrl_parse_bool_payload(const char *value) {
@@ -185,8 +350,8 @@ void ctrl_publish_discovery() {
     return;
   }
 
-  const String base = THERMOSTAT_CONTROLLER_MQTT_BASE_TOPIC;
-  const String dev_id = THERMOSTAT_MQTT_SHARED_DEVICE_ID;
+  const String base = g_cfg_ctrl_mqtt_base_topic;
+  const String dev_id = g_cfg_shared_device_id;
   const String switch_topic = String("homeassistant/switch/") + dev_id + "_lockout/config";
   const String filter_topic = String("homeassistant/sensor/") + dev_id + "_filter_runtime/config";
   const String state_topic = String("homeassistant/sensor/") + dev_id + "_furnace_state/config";
@@ -269,16 +434,31 @@ void ctrl_apply_mqtt_shadow(bool do_sync, bool do_filter_reset) {
 }
 
 void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
-  if (g_controller == nullptr || topic == nullptr || payload == nullptr) {
+  if (topic == nullptr || payload == nullptr) {
     return;
   }
 
-  char value[32];
+  char value[128];
   const size_t copy_len = (length < sizeof(value) - 1) ? length : sizeof(value) - 1;
   memcpy(value, payload, copy_len);
   value[copy_len] = '\0';
 
   const String topic_str(topic);
+  const String cfg_prefix = ctrl_topic_for("cfg/");
+  if (topic_str.startsWith(cfg_prefix) && topic_str.endsWith("/set")) {
+    const int key_begin = static_cast<int>(cfg_prefix.length());
+    const int key_end = static_cast<int>(topic_str.length()) - 4;
+    if (key_end > key_begin) {
+      const String key = topic_str.substring(key_begin, key_end);
+      ctrl_try_update_runtime_config(key, value);
+    }
+    return;
+  }
+
+  if (g_controller == nullptr) {
+    return;
+  }
+
   if (topic_str == ctrl_topic_for("cmd/lockout")) {
     g_controller->app().set_hvac_lockout(ctrl_parse_bool_payload(value));
     ctrl_publish_runtime_state();
@@ -343,6 +523,11 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 }
 
 void ctrl_ensure_wifi_connected(uint32_t now_ms) {
+  if (g_ctrl_wifi_reconnect_required) {
+    g_ctrl_wifi_reconnect_required = false;
+    WiFi.disconnect();
+    g_ctrl_last_wifi_attempt_ms = 0;
+  }
   if (WiFi.status() == WL_CONNECTED) {
     return;
   }
@@ -350,16 +535,21 @@ void ctrl_ensure_wifi_connected(uint32_t now_ms) {
     return;
   }
   g_ctrl_last_wifi_attempt_ms = now_ms;
-  if (strlen(THERMOSTAT_CONTROLLER_WIFI_SSID) == 0) {
+  if (g_cfg_ctrl_wifi_ssid.length() == 0) {
     WiFi.begin();
   } else {
-    WiFi.begin(THERMOSTAT_CONTROLLER_WIFI_SSID, THERMOSTAT_CONTROLLER_WIFI_PASSWORD);
+    WiFi.begin(g_cfg_ctrl_wifi_ssid.c_str(), g_cfg_ctrl_wifi_password.c_str());
   }
 }
 
 void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
-  if (strlen(THERMOSTAT_CONTROLLER_MQTT_HOST) == 0) {
+  if (g_cfg_ctrl_mqtt_host.length() == 0) {
     return;
+  }
+  if (g_ctrl_mqtt_reconfigure_required) {
+    g_ctrl_mqtt_reconfigure_required = false;
+    g_ctrl_mqtt_discovery_sent = false;
+    g_ctrl_mqtt.disconnect();
   }
   if (WiFi.status() != WL_CONNECTED || g_ctrl_mqtt.connected()) {
     return;
@@ -368,14 +558,14 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     return;
   }
   g_ctrl_last_mqtt_attempt_ms = now_ms;
+  g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
 
   bool ok = false;
-  if (strlen(THERMOSTAT_CONTROLLER_MQTT_USER) == 0) {
-    ok = g_ctrl_mqtt.connect(THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID);
+  if (g_cfg_ctrl_mqtt_user.length() == 0) {
+    ok = g_ctrl_mqtt.connect(g_cfg_ctrl_mqtt_client_id.c_str());
   } else {
-    ok = g_ctrl_mqtt.connect(THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID,
-                             THERMOSTAT_CONTROLLER_MQTT_USER,
-                             THERMOSTAT_CONTROLLER_MQTT_PASSWORD);
+    ok = g_ctrl_mqtt.connect(g_cfg_ctrl_mqtt_client_id.c_str(), g_cfg_ctrl_mqtt_user.c_str(),
+                             g_cfg_ctrl_mqtt_password.c_str());
   }
   if (!ok) {
     return;
@@ -387,10 +577,12 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/target_temp_c").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/sync").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/mode").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/fan_mode").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/target_temp_c").c_str());
   ctrl_publish_discovery();
+  ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
 }
 
@@ -399,9 +591,9 @@ void ctrl_ensure_ota_ready() {
     return;
   }
   if (!g_ctrl_ota_started) {
-    ArduinoOTA.setHostname(THERMOSTAT_CONTROLLER_OTA_HOSTNAME);
-    if (strlen(THERMOSTAT_CONTROLLER_OTA_PASSWORD) > 0) {
-      ArduinoOTA.setPassword(THERMOSTAT_CONTROLLER_OTA_PASSWORD);
+    ArduinoOTA.setHostname(g_cfg_ctrl_ota_hostname.c_str());
+    if (g_cfg_ctrl_ota_password.length() > 0) {
+      ArduinoOTA.setPassword(g_cfg_ctrl_ota_password.c_str());
     }
     ArduinoOTA.begin();
     g_ctrl_ota_started = true;
@@ -414,6 +606,8 @@ void setup() {
   while (!Serial) {
     delay(10);
   }
+  g_ctrl_cfg_ready = g_ctrl_cfg.begin("cfg_ctrl", false);
+  ctrl_load_runtime_config();
 
   thermostat::ControllerConfig controller_cfg;
   controller_cfg.failsafe_timeout_ms = 300000;
@@ -421,11 +615,11 @@ void setup() {
   controller_cfg.fan_circulate_duration_min = 10;
 
   thermostat::EspNowControllerConfig transport_cfg;
-  transport_cfg.channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
+  transport_cfg.channel = g_cfg_ctrl_espnow_channel;
   transport_cfg.heartbeat_interval_ms = 10000;
-  if (ctrl_parse_mac(THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC, transport_cfg.peer_mac)) {
+  if (ctrl_parse_mac(g_cfg_ctrl_espnow_peer_mac.c_str(), transport_cfg.peer_mac)) {
     uint8_t lmk[16] = {0};
-    if (ctrl_parse_lmk_hex(THERMOSTAT_CONTROLLER_ESPNOW_LMK, lmk)) {
+    if (ctrl_parse_lmk_hex(g_cfg_ctrl_espnow_lmk.c_str(), lmk)) {
       memcpy(transport_cfg.lmk, lmk, sizeof(lmk));
       transport_cfg.encrypted = true;
     }
@@ -434,7 +628,7 @@ void setup() {
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);
   g_controller = &node;
   WiFi.mode(WIFI_STA);
-  g_ctrl_mqtt.setServer(THERMOSTAT_CONTROLLER_MQTT_HOST, THERMOSTAT_CONTROLLER_MQTT_PORT);
+  g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 
   const bool ok = g_controller->begin();
