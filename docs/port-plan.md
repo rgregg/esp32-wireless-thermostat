@@ -27,6 +27,8 @@ Task list verified against:
 - Controller and thermostat MQTT discovery now share one logical Home Assistant device identity (`wireless_thermostat_system`).
 - Thermostat settings/diagnostics MQTT coverage is expanded (display timeout, firmware version, WiFi diagnostics).
 - Runtime configuration for both controller and display is now persisted in NVS and writable over MQTT config topics (`cfg/<key>/set`) with retained config-state mirrors.
+- Both devices now expose a simple runtime configuration web server (`/`, `/config`) for editing persisted settings without MQTT tooling.
+- Thermostat display web server now exposes `/screenshot` to fetch the current UI as a BMP image.
 - Thermostat clock now uses SNTP/NTP time configuration and renders local time instead of uptime seconds.
 - Runtime display timeout is now configurable (`cmd/display_timeout_s`, retained `state/display_timeout_s`).
 - ESP-NOW deployment config path is implemented via build flags for peer MAC, channel, and LMK on both controller and thermostat.
@@ -39,7 +41,7 @@ Task list verified against:
 - None.
 
 ## Remaining Work (P1)
-- Add a minimal on-device web server on both devices for runtime configuration/editing when MQTT is unavailable. Keep compile-time defaults as bootstrap only, and persist all runtime-edited values to NVS.
+- None.
 
 ## Remaining Work (P2 / Optional Hardening)
 - None.

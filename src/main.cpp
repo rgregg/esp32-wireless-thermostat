@@ -15,6 +15,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <WebServer.h>
 #endif
 
 namespace {
@@ -53,6 +54,7 @@ thermostat::ControllerNode *g_controller = nullptr;
 thermostat::ControllerRelayIo g_relay_io;
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
+WebServer g_ctrl_web(80);
 uint32_t g_ctrl_last_wifi_attempt_ms = 0;
 uint32_t g_ctrl_last_mqtt_attempt_ms = 0;
 uint32_t g_ctrl_last_mqtt_publish_ms = 0;
@@ -66,6 +68,7 @@ FurnaceMode g_ctrl_shadow_mode = FurnaceMode::Off;
 FanMode g_ctrl_shadow_fan = FanMode::Automatic;
 float g_ctrl_shadow_setpoint_c = 20.0f;
 bool g_ctrl_ota_started = false;
+bool g_ctrl_web_started = false;
 
 constexpr uint32_t kCtrlNetworkRetryMs = 5000;
 constexpr uint32_t kCtrlMqttPublishMs = 10000;
@@ -383,6 +386,93 @@ void ctrl_publish_discovery() {
   g_ctrl_mqtt_discovery_sent = true;
 }
 
+String ctrl_json_escape(const String &in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); ++i) {
+    const char c = in[i];
+    if (c == '"' || c == '\\') {
+      out += '\\';
+    }
+    out += c;
+  }
+  return out;
+}
+
+void ctrl_web_handle_config_get() {
+  String body = "{";
+  body += "\"wifi_ssid\":\"" + ctrl_json_escape(g_cfg_ctrl_wifi_ssid) + "\",";
+  body += "\"wifi_password\":\"" + String(g_cfg_ctrl_wifi_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"mqtt_host\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_host) + "\",";
+  body += "\"mqtt_port\":" + String(g_cfg_ctrl_mqtt_port) + ",";
+  body += "\"mqtt_user\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_user) + "\",";
+  body += "\"mqtt_password\":\"" + String(g_cfg_ctrl_mqtt_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"mqtt_client_id\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_client_id) + "\",";
+  body += "\"mqtt_base_topic\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_base_topic) + "\",";
+  body += "\"display_mqtt_base_topic\":\"" + ctrl_json_escape(g_cfg_display_mqtt_base_topic) + "\",";
+  body += "\"shared_device_id\":\"" + ctrl_json_escape(g_cfg_shared_device_id) + "\",";
+  body += "\"ota_hostname\":\"" + ctrl_json_escape(g_cfg_ctrl_ota_hostname) + "\",";
+  body += "\"ota_password\":\"" + String(g_cfg_ctrl_ota_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"espnow_channel\":" + String(g_cfg_ctrl_espnow_channel) + ",";
+  body += "\"espnow_peer_mac\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_mac) + "\",";
+  body += "\"espnow_lmk\":\"" + String(g_cfg_ctrl_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"reboot_required\":" + String(g_ctrl_cfg_reboot_required ? "true" : "false");
+  body += "}";
+  g_ctrl_web.send(200, "application/json", body);
+}
+
+void ctrl_web_handle_config_post() {
+  int updated = 0;
+  for (int i = 0; i < g_ctrl_web.args(); ++i) {
+    if (ctrl_try_update_runtime_config(g_ctrl_web.argName(i), g_ctrl_web.arg(i).c_str())) {
+      ++updated;
+    }
+  }
+  String body = "updated=" + String(updated) + "\n";
+  g_ctrl_web.send(200, "text/plain", body);
+}
+
+void ctrl_web_handle_root() {
+  String html;
+  html.reserve(4096);
+  html += "<html><body><h1>Controller Config</h1>";
+  html += "<p><a href=\"/config\">JSON config</a></p>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "wifi_ssid: <input name=\"wifi_ssid\" value=\"" + g_cfg_ctrl_wifi_ssid + "\"><br>";
+  html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
+  html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + g_cfg_ctrl_mqtt_host + "\"><br>";
+  html += "mqtt_port: <input name=\"mqtt_port\" value=\"" + String(g_cfg_ctrl_mqtt_port) + "\"><br>";
+  html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + g_cfg_ctrl_mqtt_user + "\"><br>";
+  html += "mqtt_password: <input name=\"mqtt_password\" value=\"\"><br>";
+  html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + g_cfg_ctrl_mqtt_client_id + "\"><br>";
+  html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + g_cfg_ctrl_mqtt_base_topic + "\"><br>";
+  html += "display_mqtt_base_topic: <input name=\"display_mqtt_base_topic\" value=\"" + g_cfg_display_mqtt_base_topic + "\"><br>";
+  html += "shared_device_id: <input name=\"shared_device_id\" value=\"" + g_cfg_shared_device_id + "\"><br>";
+  html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + g_cfg_ctrl_ota_hostname + "\"><br>";
+  html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
+  html += "espnow_channel: <input name=\"espnow_channel\" value=\"" + String(g_cfg_ctrl_espnow_channel) + "\"><br>";
+  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" value=\"" + g_cfg_ctrl_espnow_peer_mac + "\"><br>";
+  html += "espnow_lmk: <input name=\"espnow_lmk\" value=\"\"><br>";
+  html += "<button type=\"submit\">Save</button></form>";
+  html += "<p>reboot_required=" + String(g_ctrl_cfg_reboot_required ? "true" : "false") + "</p>";
+  html += "</body></html>";
+  g_ctrl_web.send(200, "text/html", html);
+}
+
+void ctrl_ensure_web_ready() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  if (!g_ctrl_web_started) {
+    g_ctrl_web.on("/", HTTP_GET, ctrl_web_handle_root);
+    g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
+    g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
+    g_ctrl_web.begin();
+    g_ctrl_web_started = true;
+  }
+  g_ctrl_web.handleClient();
+}
+
 void ctrl_publish_runtime_state() {
   if (g_controller == nullptr || !g_ctrl_mqtt.connected()) {
     return;
@@ -643,6 +733,7 @@ void loop() {
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
     ctrl_ensure_wifi_connected(now);
+    ctrl_ensure_web_ready();
     ctrl_ensure_ota_ready();
     ctrl_ensure_mqtt_connected(now);
     g_ctrl_mqtt.loop();

@@ -14,6 +14,7 @@
 #include <WiFi.h>
 #include <WiFiProv.h>
 #include <PubSubClient.h>
+#include <WebServer.h>
 
 #include "thermostat_device_runtime.h"
 #include "thermostat_screen_controller.h"
@@ -180,7 +181,9 @@ Preferences g_cfg;
 bool g_cfg_ready = false;
 WiFiClient g_wifi_client;
 PubSubClient g_mqtt(g_wifi_client);
+WebServer g_web(80);
 bool g_mqtt_discovery_sent = false;
+bool g_web_started = false;
 
 ThermostatDeviceRuntime *g_runtime = nullptr;
 ThermostatScreenController g_screen;
@@ -241,6 +244,7 @@ uint32_t g_cfg_controller_timeout_ms = 30000;
 bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
 bool g_cfg_reboot_required = false;
+uint16_t *g_screenshot_fb = nullptr;
 
 const char *mode_to_mqtt(FurnaceMode mode) {
   switch (mode) {
@@ -501,6 +505,161 @@ bool parse_lmk_hex(const char *text, uint8_t out[16]) {
     out[i] = static_cast<uint8_t>(byte & 0xFFu);
   }
   return true;
+}
+
+String json_escape(const String &in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); ++i) {
+    const char c = in[i];
+    if (c == '"' || c == '\\') {
+      out += '\\';
+    }
+    out += c;
+  }
+  return out;
+}
+
+void web_handle_config_get() {
+  String body = "{";
+  body += "\"wifi_ssid\":\"" + json_escape(g_cfg_wifi_ssid) + "\",";
+  body += "\"wifi_password\":\"" + String(g_cfg_wifi_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"mqtt_host\":\"" + json_escape(g_cfg_mqtt_host) + "\",";
+  body += "\"mqtt_port\":" + String(g_cfg_mqtt_port) + ",";
+  body += "\"mqtt_user\":\"" + json_escape(g_cfg_mqtt_user) + "\",";
+  body += "\"mqtt_password\":\"" + String(g_cfg_mqtt_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"mqtt_client_id\":\"" + json_escape(g_cfg_mqtt_client_id) + "\",";
+  body += "\"mqtt_base_topic\":\"" + json_escape(g_cfg_mqtt_base_topic) + "\",";
+  body += "\"discovery_prefix\":\"" + json_escape(g_cfg_discovery_prefix) + "\",";
+  body += "\"shared_device_id\":\"" + json_escape(g_cfg_shared_device_id) + "\",";
+  body += "\"outdoor_temp_topic\":\"" + json_escape(g_cfg_mqtt_outdoor_temp_topic) + "\",";
+  body += "\"weather_condition_topic\":\"" + json_escape(g_cfg_mqtt_weather_condition_topic) + "\",";
+  body += "\"display_timeout_s\":" + String(g_display_timeout_ms / 1000UL) + ",";
+  body += "\"temp_comp_c\":" + String(g_cfg_temp_comp_c, 2) + ",";
+  body += "\"temperature_unit\":\"" + String(g_cfg_temp_unit_f ? "f" : "c") + "\",";
+  body += "\"ota_hostname\":\"" + json_escape(g_cfg_ota_hostname) + "\",";
+  body += "\"ota_password\":\"" + String(g_cfg_ota_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"espnow_channel\":" + String(g_cfg_espnow_channel) + ",";
+  body += "\"espnow_peer_mac\":\"" + json_escape(g_cfg_espnow_peer_mac) + "\",";
+  body += "\"espnow_lmk\":\"" + String(g_cfg_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"controller_timeout_ms\":" + String(g_cfg_controller_timeout_ms) + ",";
+  body += "\"reboot_required\":" + String(g_cfg_reboot_required ? "true" : "false");
+  body += "}";
+  g_web.send(200, "application/json", body);
+}
+
+void web_handle_config_post() {
+  int updated = 0;
+  for (int i = 0; i < g_web.args(); ++i) {
+    if (try_update_runtime_config(g_web.argName(i), g_web.arg(i).c_str())) {
+      ++updated;
+    }
+  }
+  g_web.send(200, "text/plain", "updated=" + String(updated) + "\n");
+}
+
+void write_u16_le(uint8_t *out, uint16_t value) {
+  out[0] = static_cast<uint8_t>(value & 0xFFu);
+  out[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+}
+
+void write_u32_le(uint8_t *out, uint32_t value) {
+  out[0] = static_cast<uint8_t>(value & 0xFFu);
+  out[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+  out[2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
+  out[3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+}
+
+void web_handle_screenshot() {
+  if (g_screenshot_fb == nullptr) {
+    g_web.send(503, "text/plain", "screenshot buffer unavailable");
+    return;
+  }
+  const uint32_t row_size = ((kDisplayWidth * 3U) + 3U) & ~3U;
+  const uint32_t image_size = row_size * kDisplayHeight;
+  const uint32_t file_size = 54U + image_size;
+
+  g_web.setContentLength(file_size);
+  g_web.send(200, "image/bmp", "");
+  WiFiClient client = g_web.client();
+
+  uint8_t header[54] = {0};
+  header[0] = 'B';
+  header[1] = 'M';
+  write_u32_le(&header[2], file_size);
+  write_u32_le(&header[10], 54U);
+  write_u32_le(&header[14], 40U);
+  write_u32_le(&header[18], static_cast<uint32_t>(kDisplayWidth));
+  write_u32_le(&header[22], static_cast<uint32_t>(kDisplayHeight));
+  write_u16_le(&header[26], 1U);
+  write_u16_le(&header[28], 24U);
+  write_u32_le(&header[34], image_size);
+  client.write(header, sizeof(header));
+
+  static uint8_t row[((kDisplayWidth * 3U) + 3U) & ~3U];
+  for (int y = kDisplayHeight - 1; y >= 0; --y) {
+    uint32_t idx = 0;
+    for (int x = 0; x < kDisplayWidth; ++x) {
+      const uint16_t px = g_screenshot_fb[(y * kDisplayWidth) + x];
+      const uint8_t r = static_cast<uint8_t>(((px >> 11) & 0x1F) * 255 / 31);
+      const uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x3F) * 255 / 63);
+      const uint8_t b = static_cast<uint8_t>((px & 0x1F) * 255 / 31);
+      row[idx++] = b;
+      row[idx++] = g;
+      row[idx++] = r;
+    }
+    while (idx < row_size) {
+      row[idx++] = 0;
+    }
+    client.write(row, row_size);
+  }
+}
+
+void web_handle_root() {
+  String html;
+  html.reserve(4096);
+  html += "<html><body><h1>Thermostat Display Config</h1>";
+  html += "<p><a href=\"/config\">JSON config</a> | <a href=\"/screenshot\">Screenshot</a></p>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "wifi_ssid: <input name=\"wifi_ssid\" value=\"" + g_cfg_wifi_ssid + "\"><br>";
+  html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
+  html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + g_cfg_mqtt_host + "\"><br>";
+  html += "mqtt_port: <input name=\"mqtt_port\" value=\"" + String(g_cfg_mqtt_port) + "\"><br>";
+  html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + g_cfg_mqtt_user + "\"><br>";
+  html += "mqtt_password: <input name=\"mqtt_password\" value=\"\"><br>";
+  html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + g_cfg_mqtt_client_id + "\"><br>";
+  html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + g_cfg_mqtt_base_topic + "\"><br>";
+  html += "discovery_prefix: <input name=\"discovery_prefix\" value=\"" + g_cfg_discovery_prefix + "\"><br>";
+  html += "shared_device_id: <input name=\"shared_device_id\" value=\"" + g_cfg_shared_device_id + "\"><br>";
+  html += "display_timeout_s: <input name=\"display_timeout_s\" value=\"" + String(g_display_timeout_ms / 1000UL) + "\"><br>";
+  html += "temp_comp_c: <input name=\"temp_comp_c\" value=\"" + String(g_cfg_temp_comp_c, 2) + "\"><br>";
+  html += "temperature_unit (c/f): <input name=\"temperature_unit\" value=\"" + String(g_cfg_temp_unit_f ? "f" : "c") + "\"><br>";
+  html += "outdoor_temp_topic: <input name=\"outdoor_temp_topic\" value=\"" + g_cfg_mqtt_outdoor_temp_topic + "\"><br>";
+  html += "weather_condition_topic: <input name=\"weather_condition_topic\" value=\"" + g_cfg_mqtt_weather_condition_topic + "\"><br>";
+  html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + g_cfg_ota_hostname + "\"><br>";
+  html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
+  html += "espnow_channel: <input name=\"espnow_channel\" value=\"" + String(g_cfg_espnow_channel) + "\"><br>";
+  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" value=\"" + g_cfg_espnow_peer_mac + "\"><br>";
+  html += "espnow_lmk: <input name=\"espnow_lmk\" value=\"\"><br>";
+  html += "controller_timeout_ms: <input name=\"controller_timeout_ms\" value=\"" + String(g_cfg_controller_timeout_ms) + "\"><br>";
+  html += "<button type=\"submit\">Save</button></form>";
+  html += "<p>reboot_required=" + String(g_cfg_reboot_required ? "true" : "false") + "</p>";
+  html += "<p><img src=\"/screenshot\" style=\"max-width:95vw;border:1px solid #ccc\"></p>";
+  html += "</body></html>";
+  g_web.send(200, "text/html", html);
+}
+
+void ensure_web_ready() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!g_web_started) {
+    g_web.on("/", HTTP_GET, web_handle_root);
+    g_web.on("/config", HTTP_GET, web_handle_config_get);
+    g_web.on("/config", HTTP_POST, web_handle_config_post);
+    g_web.on("/screenshot", HTTP_GET, web_handle_screenshot);
+    g_web.begin();
+    g_web_started = true;
+  }
+  g_web.handleClient();
 }
 
 std::string current_time_text() {
@@ -833,6 +992,19 @@ void ensure_ota_ready() {
 }
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
+  if (g_screenshot_fb != nullptr && area != nullptr && color_p != nullptr) {
+    const int width = (area->x2 - area->x1 + 1);
+    const int height = (area->y2 - area->y1 + 1);
+    for (int y = 0; y < height; ++y) {
+      const int dst_y = area->y1 + y;
+      if (dst_y < 0 || dst_y >= kDisplayHeight) continue;
+      const int dst_x = area->x1;
+      if (dst_x < 0 || dst_x >= kDisplayWidth) continue;
+      const int copy_w = (dst_x + width <= kDisplayWidth) ? width : (kDisplayWidth - dst_x);
+      memcpy(&g_screenshot_fb[(dst_y * kDisplayWidth) + dst_x],
+             &color_p[y * width], static_cast<size_t>(copy_w) * sizeof(uint16_t));
+    }
+  }
   if (g_panel != nullptr) {
     esp_lcd_panel_draw_bitmap(g_panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1,
                               color_p);
@@ -1172,6 +1344,19 @@ void create_ui() {
 }
 
 void init_display_and_lvgl() {
+  if (g_screenshot_fb == nullptr) {
+    g_screenshot_fb = static_cast<uint16_t *>(
+        heap_caps_malloc(static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (g_screenshot_fb == nullptr) {
+      g_screenshot_fb = static_cast<uint16_t *>(
+          malloc(static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t)));
+    }
+    if (g_screenshot_fb != nullptr) {
+      memset(g_screenshot_fb, 0, static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t));
+    }
+  }
+
   esp_lcd_rgb_panel_config_t panel_config = {};
   panel_config.clk_src = LCD_CLK_SRC_PLL160M;
   panel_config.timings.pclk_hz = 14000000;
@@ -1335,6 +1520,7 @@ void thermostat_firmware_loop() {
   }
 
   ensure_wifi_connected(now);
+  ensure_web_ready();
   ensure_ota_ready();
   ensure_mqtt_connected(now);
   g_mqtt.loop();
