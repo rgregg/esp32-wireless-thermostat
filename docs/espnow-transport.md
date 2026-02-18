@@ -18,11 +18,11 @@ Protocol version: `1`.
 
 Controller-side adapter:
 - `./include/transport/espnow_controller_transport.h`
-- `./src/transport/espnow_controller_transport.cpp`
+- `./src/controller/transport/espnow_controller_transport.cpp`
 
 Thermostat-side adapter:
 - `./include/transport/espnow_thermostat_transport.h`
-- `./src/transport/espnow_thermostat_transport.cpp`
+- `./src/thermostat/transport/espnow_thermostat_transport.cpp`
 
 ## Current Behavior
 
