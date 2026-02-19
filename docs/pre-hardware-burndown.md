@@ -20,11 +20,11 @@ Goal: maximize confidence before physical hardware iteration starts.
 ## Board
 
 ### P0
-- [ ] CI pipeline for required build/test matrix (status: To Do)
+- [ ] CI pipeline for required build/test matrix (status: In Progress)
   - Acceptance:
     - Runs the 4 required commands on every push/PR.
     - Fails fast and reports which env/test failed.
-  - Evidence: workflow file + passing run link/screenshot in PR.
+  - Evidence: workflow file at `.github/workflows/ci.yml` + passing run link/screenshot in PR.
 
 - [ ] Management/config integration tests (status: To Do)
   - Acceptance:
@@ -72,7 +72,7 @@ Goal: maximize confidence before physical hardware iteration starts.
   - Evidence: repeatable test harness + tests.
 
 ## Current Sprint (Pre-Hardware Sprint 1)
-- [ ] Land CI workflow for required matrix.
+- [x] Land CI workflow for required matrix.
 - [ ] Land first config integration test batch.
 - [ ] Land first ESP-NOW robustness test batch.
 - [ ] Update deployment runbook with config contract table.
