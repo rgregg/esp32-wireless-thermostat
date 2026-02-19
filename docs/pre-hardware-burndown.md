@@ -33,12 +33,12 @@ Goal: maximize confidence before physical hardware iteration starts.
     - Covers redaction behavior for password/secret fields in `/config` and state topics.
   - Evidence: expanded host tests in `src/tests/test_management_paths.cpp` and passing `native-tests`.
 
-- [ ] ESP-NOW protocol robustness tests (status: To Do)
+- [ ] ESP-NOW protocol robustness tests (status: In Progress)
   - Acceptance:
     - Invalid packet length/type/version is safely rejected.
     - Sequence stale/duplicate/replay edge cases are covered.
     - Peer MAC filtering behavior is covered for unicast and broadcast fallback modes.
-  - Evidence: dedicated tests + passing `native-tests`.
+  - Evidence: dedicated tests in `src/tests/test_codec.cpp` and `src/tests/test_espnow_packets.cpp` + passing `native-tests`.
 
 - [ ] Config contract freeze (status: To Do)
   - Acceptance:
@@ -74,5 +74,5 @@ Goal: maximize confidence before physical hardware iteration starts.
 ## Current Sprint (Pre-Hardware Sprint 1)
 - [x] Land CI workflow for required matrix.
 - [x] Land first config integration test batch.
-- [ ] Land first ESP-NOW robustness test batch.
+- [x] Land first ESP-NOW robustness test batch.
 - [ ] Update deployment runbook with config contract table.
