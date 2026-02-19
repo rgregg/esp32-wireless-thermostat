@@ -27,7 +27,7 @@ Use this checklist after flashing both devices.
 - [ ] Display timeout setting changes idle timing behavior.
 - [ ] Clock shows real local time (not uptime counter).
 - [ ] Settings diagnostics show IP/MAC/SSID/channel/RSSI/firmware.
-- [ ] Weather/outdoor values update from configured MQTT topics.
+- [ ] Weather/outdoor values update from PirateWeather API using configured API key + ZIP.
 
 ## Transport Checks
 - [ ] ESP-NOW path works when MQTT is unavailable.

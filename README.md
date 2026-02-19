@@ -23,11 +23,13 @@ PlatformIO port of the ESPHome furnace controller + thermostat display project.
 
 ## Repository Layout
 - `docs/`: migration audit and implementation docs.
+- `enclosures/`: 3D printable CAD files for controller and thermostat housings.
 - `include/`: public headers for runtime, transport, and app layers.
 - `src/`: implementation code and native tests.
 
 Primary specification and parity guide:
 - `docs/system-spec-and-parity.md`
+- `docs/hardware-requirements.md`
 
 ## Build
 - Host compile:

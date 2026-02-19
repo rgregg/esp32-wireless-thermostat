@@ -146,8 +146,8 @@ CtrlDisplayCfgCacheEntry g_disp_cfg_cache[] = {
     {"mqtt_base_topic", "unknown"},
     {"discovery_prefix", "unknown"},
     {"shared_device_id", "unknown"},
-    {"outdoor_temp_topic", "unknown"},
-    {"weather_condition_topic", "unknown"},
+    {"pirateweather_api_key", "unknown"},
+    {"pirateweather_zip", "unknown"},
     {"display_timeout_s", "unknown"},
     {"temp_comp_c", "unknown"},
     {"temperature_unit", "unknown"},
@@ -528,54 +528,109 @@ void ctrl_web_handle_config_post() {
 
 void ctrl_web_handle_root() {
   String html;
-  html.reserve(4096);
+  html.reserve(12288);
   html += "<html><body><h1>System Config (Controller + Display)</h1>";
   html += "<p><a href=\"/config\">JSON config</a></p>";
   html += "<h2>Controller</h2>";
+  html += "<fieldset><legend>Networking Settings</legend>";
   html += "<form method=\"post\" action=\"/config\">";
-  html += "wifi_ssid: <input name=\"wifi_ssid\" value=\"" + g_cfg_ctrl_wifi_ssid + "\"><br>";
+  html += "wifi_ssid: <input name=\"wifi_ssid\" maxlength=\"64\" value=\"" + g_cfg_ctrl_wifi_ssid + "\"><br>";
   html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
   html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + g_cfg_ctrl_mqtt_host + "\"><br>";
-  html += "mqtt_port: <input name=\"mqtt_port\" value=\"" + String(g_cfg_ctrl_mqtt_port) + "\"><br>";
+  html += "mqtt_port: <input name=\"mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" value=\"" +
+          String(g_cfg_ctrl_mqtt_port) + "\"><br>";
   html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + g_cfg_ctrl_mqtt_user + "\"><br>";
   html += "mqtt_password: <input name=\"mqtt_password\" value=\"\"><br>";
   html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + g_cfg_ctrl_mqtt_client_id + "\"><br>";
   html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + g_cfg_ctrl_mqtt_base_topic + "\"><br>";
-  html += "display_mqtt_base_topic: <input name=\"display_mqtt_base_topic\" value=\"" + g_cfg_display_mqtt_base_topic + "\"><br>";
-  html += "shared_device_id: <input name=\"shared_device_id\" value=\"" + g_cfg_shared_device_id + "\"><br>";
+  html += "display_mqtt_base_topic: <input name=\"display_mqtt_base_topic\" value=\"" +
+          g_cfg_display_mqtt_base_topic + "\"><br>";
+  html += "espnow_channel: <input name=\"espnow_channel\" type=\"number\" min=\"1\" max=\"14\" step=\"1\" value=\"" +
+          String(g_cfg_ctrl_espnow_channel) + "\"><br>";
+  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" + g_cfg_ctrl_espnow_peer_mac +
+          "\"><br>";
+  html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
+  html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
+
+  html += "<fieldset><legend>Hardware Settings</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
   html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + g_cfg_ctrl_ota_hostname + "\"><br>";
   html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
-  html += "espnow_channel: <input name=\"espnow_channel\" value=\"" + String(g_cfg_ctrl_espnow_channel) + "\"><br>";
-  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" value=\"" + g_cfg_ctrl_espnow_peer_mac + "\"><br>";
-  html += "espnow_lmk: <input name=\"espnow_lmk\" value=\"\"><br>";
-  html += "<button type=\"submit\">Save Controller</button></form>";
+  html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
+
+  html += "<fieldset><legend>Display Settings</legend>";
+  html += "<p>Controller has no local display settings.</p>";
+  html += "</fieldset>";
+
+  html += "<fieldset><legend>Weather</legend>";
+  html += "<p>Controller has no local weather settings.</p>";
+  html += "</fieldset>";
+
+  html += "<fieldset><legend>Miscellaneous</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "shared_device_id: <input name=\"shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" + g_cfg_shared_device_id +
+          "\"><br>";
+  html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
+
   html += "<p>reboot_required=" + String(g_ctrl_cfg_reboot_required ? "true" : "false") + "</p>";
 
   html += "<h2>Display (via MQTT)</h2>";
   html += "<p>availability=" + g_disp_availability + "</p>";
+  html += "<fieldset><legend>Networking Settings</legend>";
   html += "<form method=\"post\" action=\"/config\">";
-  html += "wifi_ssid: <input name=\"disp_wifi_ssid\" value=\"" + ctrl_get_display_cfg_cache("wifi_ssid") + "\"><br>";
+  html += "wifi_ssid: <input name=\"disp_wifi_ssid\" maxlength=\"64\" value=\"" +
+          ctrl_get_display_cfg_cache("wifi_ssid") + "\"><br>";
   html += "wifi_password: <input name=\"disp_wifi_password\" value=\"\"><br>";
   html += "mqtt_host: <input name=\"disp_mqtt_host\" value=\"" + ctrl_get_display_cfg_cache("mqtt_host") + "\"><br>";
-  html += "mqtt_port: <input name=\"disp_mqtt_port\" value=\"" + ctrl_get_display_cfg_cache("mqtt_port") + "\"><br>";
+  html += "mqtt_port: <input name=\"disp_mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" value=\"" +
+          ctrl_get_display_cfg_cache("mqtt_port") + "\"><br>";
   html += "mqtt_user: <input name=\"disp_mqtt_user\" value=\"" + ctrl_get_display_cfg_cache("mqtt_user") + "\"><br>";
   html += "mqtt_password: <input name=\"disp_mqtt_password\" value=\"\"><br>";
-  html += "mqtt_client_id: <input name=\"disp_mqtt_client_id\" value=\"" + ctrl_get_display_cfg_cache("mqtt_client_id") + "\"><br>";
-  html += "mqtt_base_topic: <input name=\"disp_mqtt_base_topic\" value=\"" + ctrl_get_display_cfg_cache("mqtt_base_topic") + "\"><br>";
-  html += "discovery_prefix: <input name=\"disp_discovery_prefix\" value=\"" + ctrl_get_display_cfg_cache("discovery_prefix") + "\"><br>";
-  html += "shared_device_id: <input name=\"disp_shared_device_id\" value=\"" + ctrl_get_display_cfg_cache("shared_device_id") + "\"><br>";
-  html += "display_timeout_s: <input name=\"disp_display_timeout_s\" value=\"" + ctrl_get_display_cfg_cache("display_timeout_s") + "\"><br>";
-  html += "temp_comp_c: <input name=\"disp_temp_comp_c\" value=\"" + ctrl_get_display_cfg_cache("temp_comp_c") + "\"><br>";
-  html += "temperature_unit: <input name=\"disp_temperature_unit\" value=\"" + ctrl_get_display_cfg_cache("temperature_unit") + "\"><br>";
-  html += "outdoor_temp_topic: <input name=\"disp_outdoor_temp_topic\" value=\"" + ctrl_get_display_cfg_cache("outdoor_temp_topic") + "\"><br>";
-  html += "weather_condition_topic: <input name=\"disp_weather_condition_topic\" value=\"" + ctrl_get_display_cfg_cache("weather_condition_topic") + "\"><br>";
-  html += "ota_hostname: <input name=\"disp_ota_hostname\" value=\"" + ctrl_get_display_cfg_cache("ota_hostname") + "\"><br>";
+  html += "mqtt_client_id: <input name=\"disp_mqtt_client_id\" value=\"" +
+          ctrl_get_display_cfg_cache("mqtt_client_id") + "\"><br>";
+  html += "mqtt_base_topic: <input name=\"disp_mqtt_base_topic\" value=\"" +
+          ctrl_get_display_cfg_cache("mqtt_base_topic") + "\"><br>";
+  html += "espnow_channel: <input name=\"disp_espnow_channel\" type=\"number\" min=\"1\" max=\"14\" step=\"1\" value=\"" +
+          ctrl_get_display_cfg_cache("espnow_channel") + "\"><br>";
+  html += "espnow_peer_mac: <input name=\"disp_espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
+          ctrl_get_display_cfg_cache("espnow_peer_mac") + "\"><br>";
+  html += "espnow_lmk: <input name=\"disp_espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
+  html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
+
+  html += "<fieldset><legend>Hardware Settings</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "temp_comp_c: <input name=\"disp_temp_comp_c\" type=\"number\" min=\"-10\" max=\"10\" step=\"0.01\" value=\"" +
+          ctrl_get_display_cfg_cache("temp_comp_c") + "\"><br>";
+  html += "controller_timeout_ms: <input name=\"disp_controller_timeout_ms\" type=\"number\" min=\"1000\" max=\"600000\" step=\"1\" value=\"" +
+          ctrl_get_display_cfg_cache("controller_timeout_ms") + "\"><br>";
+  html += "ota_hostname: <input name=\"disp_ota_hostname\" value=\"" +
+          ctrl_get_display_cfg_cache("ota_hostname") + "\"><br>";
   html += "ota_password: <input name=\"disp_ota_password\" value=\"\"><br>";
-  html += "espnow_channel: <input name=\"disp_espnow_channel\" value=\"" + ctrl_get_display_cfg_cache("espnow_channel") + "\"><br>";
-  html += "espnow_peer_mac: <input name=\"disp_espnow_peer_mac\" value=\"" + ctrl_get_display_cfg_cache("espnow_peer_mac") + "\"><br>";
-  html += "espnow_lmk: <input name=\"disp_espnow_lmk\" value=\"\"><br>";
-  html += "controller_timeout_ms: <input name=\"disp_controller_timeout_ms\" value=\"" + ctrl_get_display_cfg_cache("controller_timeout_ms") + "\"><br>";
-  html += "<button type=\"submit\">Save Display</button></form>";
+  html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
+
+  html += "<fieldset><legend>Display Settings</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "display_timeout_s: <input name=\"disp_display_timeout_s\" type=\"number\" min=\"30\" max=\"600\" step=\"1\" value=\"" +
+          ctrl_get_display_cfg_cache("display_timeout_s") + "\"><br>";
+  html += "temperature_unit: <input name=\"disp_temperature_unit\" pattern=\"^(c|f|celsius|fahrenheit)$\" title=\"Use c, f, celsius, or fahrenheit\" value=\"" +
+          ctrl_get_display_cfg_cache("temperature_unit") + "\"><br>";
+  html += "<button type=\"submit\">Save Display</button></form></fieldset>";
+
+  html += "<fieldset><legend>Weather</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "pirateweather_api_key: <input name=\"disp_pirateweather_api_key\" value=\"\"><br>";
+  html += "pirateweather_zip: <input name=\"disp_pirateweather_zip\" pattern=\"^[0-9]{5}(-[0-9]{4})?$\" title=\"US ZIP format: 12345 or 12345-6789\" value=\"" +
+          ctrl_get_display_cfg_cache("pirateweather_zip") + "\"><br>";
+  html += "<button type=\"submit\">Save Weather</button></form></fieldset>";
+
+  html += "<fieldset><legend>Miscellaneous</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "discovery_prefix: <input name=\"disp_discovery_prefix\" value=\"" +
+          ctrl_get_display_cfg_cache("discovery_prefix") + "\"><br>";
+  html += "shared_device_id: <input name=\"disp_shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" +
+          ctrl_get_display_cfg_cache("shared_device_id") + "\"><br>";
+  html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
+
   html += "<p>display_reboot_required=" + ctrl_get_display_cfg_cache("reboot_required") + "</p>";
   html += "<p>Use the display device IP + /screenshot for remote screen capture.</p>";
   html += "</body></html>";

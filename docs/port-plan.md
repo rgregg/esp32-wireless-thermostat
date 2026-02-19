@@ -16,7 +16,7 @@ Task list verified against:
 - Thermostat/runtime core: command publishing, local interaction debounce, telemetry ingestion, transport heartbeat connectivity.
 - Thermostat boot-time sync request is now sent at transport startup.
 - Thermostat local temperature compensation is implemented in runtime/app and applied before publishing indoor temperature.
-- Outdoor weather/outdoor-temperature stub is now replaceable by real MQTT-fed topics (with stub only as fallback when feeds are absent).
+- Outdoor weather/outdoor-temperature stub is now replaceable by PirateWeather API polling (with stub only as fallback when API config/data are absent).
 - ESP-NOW transport on both roles: heartbeat, command word, controller telemetry, indoor temperature, indoor humidity.
 - ESP32-S3 display bring-up: RGB panel, GT911 touch, AHT20 read loop, LVGL wiring, screensaver/backlight behavior.
 - Controller relay GPIO output layer is implemented with safe defaults plus interlock-delay transitions (GPIO32/33/25/26).
@@ -41,13 +41,17 @@ Task list verified against:
 - Core host and target builds/tests are passing.
 
 ## Remaining Work (P0)
-- None.
+- See `docs/pre-hardware-burndown.md` (active P0 board).
 
 ## Remaining Work (P1)
-- None.
+- See `docs/pre-hardware-burndown.md` (active P1 board).
 
 ## Remaining Work (P2 / Optional Hardening)
-- None.
+- See `docs/pre-hardware-burndown.md` (active P2 board).
+
+## Active Tracking
+- Pre-hardware readiness is tracked in `docs/pre-hardware-burndown.md`.
+- Treat that checklist as the source of truth until hardware iteration begins.
 
 ## Validation
 Passing now:

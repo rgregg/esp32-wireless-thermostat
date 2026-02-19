@@ -16,6 +16,8 @@
 #include <WiFiProv.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <esp_system.h>
 
 #include "thermostat/thermostat_device_runtime.h"
@@ -51,6 +53,8 @@ constexpr int kSensorI2cScl = 17;
 constexpr uint32_t kNetworkRetryMs = 5000;
 constexpr uint32_t kProvisionStartDelayMs = 15000;
 constexpr uint32_t kMqttPublishMs = 10000;
+constexpr uint32_t kWeatherPollMs = 15UL * 60UL * 1000UL;
+constexpr uint32_t kHttpTimeoutMs = 8000;
 
 #ifndef THERMOSTAT_WIFI_SSID
 #define THERMOSTAT_WIFI_SSID ""
@@ -96,12 +100,12 @@ constexpr uint32_t kMqttPublishMs = 10000;
 #define THERMOSTAT_MQTT_SHARED_DEVICE_ID "wireless_thermostat_system"
 #endif
 
-#ifndef THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC
-#define THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC ""
+#ifndef THERMOSTAT_PIRATEWEATHER_API_KEY
+#define THERMOSTAT_PIRATEWEATHER_API_KEY ""
 #endif
 
-#ifndef THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC
-#define THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC ""
+#ifndef THERMOSTAT_PIRATEWEATHER_ZIP
+#define THERMOSTAT_PIRATEWEATHER_ZIP ""
 #endif
 
 #ifndef THERMOSTAT_PROV_POP
@@ -220,8 +224,8 @@ bool g_wifi_has_attempted_stored_connect = false;
 bool g_wifi_provisioning_started = false;
 float g_outdoor_temp_c = 6.0f;
 std::string g_weather_condition = "Cloudy";
-bool g_have_outdoor_temp = false;
-bool g_have_weather_condition = false;
+bool g_have_weather_data = false;
+uint32_t g_last_weather_poll_ms = 0;
 uint32_t g_display_timeout_ms = static_cast<uint32_t>(THERMOSTAT_DISPLAY_TIMEOUT_S) * 1000UL;
 bool g_ota_started = false;
 float g_cfg_temp_comp_c = 0.0f;
@@ -236,8 +240,8 @@ String g_cfg_mqtt_client_id = THERMOSTAT_MQTT_CLIENT_ID;
 String g_cfg_mqtt_base_topic = THERMOSTAT_MQTT_BASE_TOPIC;
 String g_cfg_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
 String g_cfg_shared_device_id = THERMOSTAT_MQTT_SHARED_DEVICE_ID;
-String g_cfg_mqtt_outdoor_temp_topic = THERMOSTAT_MQTT_OUTDOOR_TEMP_TOPIC;
-String g_cfg_mqtt_weather_condition_topic = THERMOSTAT_MQTT_WEATHER_CONDITION_TOPIC;
+String g_cfg_pirateweather_api_key = THERMOSTAT_PIRATEWEATHER_API_KEY;
+String g_cfg_pirateweather_zip = THERMOSTAT_PIRATEWEATHER_ZIP;
 String g_cfg_ota_hostname = THERMOSTAT_OTA_HOSTNAME;
 String g_cfg_ota_password = THERMOSTAT_OTA_PASSWORD;
 uint8_t g_cfg_espnow_channel = THERMOSTAT_ESPNOW_CHANNEL;
@@ -287,9 +291,8 @@ void load_runtime_config() {
   g_cfg_mqtt_base_topic = g_cfg.getString("mqtt_base", g_cfg_mqtt_base_topic);
   g_cfg_discovery_prefix = g_cfg.getString("disc_pref", g_cfg_discovery_prefix);
   g_cfg_shared_device_id = g_cfg.getString("shared_id", g_cfg_shared_device_id);
-  g_cfg_mqtt_outdoor_temp_topic = g_cfg.getString("outdoor_t", g_cfg_mqtt_outdoor_temp_topic);
-  g_cfg_mqtt_weather_condition_topic =
-      g_cfg.getString("weather_t", g_cfg_mqtt_weather_condition_topic);
+  g_cfg_pirateweather_api_key = g_cfg.getString("pw_key", g_cfg_pirateweather_api_key);
+  g_cfg_pirateweather_zip = g_cfg.getString("pw_zip", g_cfg_pirateweather_zip);
   g_cfg_ota_hostname = g_cfg.getString("ota_host", g_cfg_ota_hostname);
   g_cfg_ota_password = g_cfg.getString("ota_pwd", g_cfg_ota_password);
   g_cfg_espnow_channel = static_cast<uint8_t>(g_cfg.getUChar("esp_ch", g_cfg_espnow_channel));
@@ -333,8 +336,8 @@ void publish_all_cfg_state() {
   publish_cfg_value("mqtt_base_topic", g_cfg_mqtt_base_topic, false);
   publish_cfg_value("discovery_prefix", g_cfg_discovery_prefix, false);
   publish_cfg_value("shared_device_id", g_cfg_shared_device_id, false);
-  publish_cfg_value("outdoor_temp_topic", g_cfg_mqtt_outdoor_temp_topic, false);
-  publish_cfg_value("weather_condition_topic", g_cfg_mqtt_weather_condition_topic, false);
+  publish_cfg_value("pirateweather_api_key", g_cfg_pirateweather_api_key, true);
+  publish_cfg_value("pirateweather_zip", g_cfg_pirateweather_zip, false);
   publish_cfg_value("display_timeout_s", String(g_display_timeout_ms / 1000UL), false);
   publish_cfg_value("temp_comp_c", String(g_cfg_temp_comp_c, 2), false);
   publish_cfg_value("temperature_unit", g_cfg_temp_unit_f ? "f" : "c", false);
@@ -394,14 +397,16 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_shared_device_id = value;
     g_cfg.putString("shared_id", value);
     g_mqtt_discovery_sent = false;
-  } else if (key == "outdoor_temp_topic") {
-    g_cfg_mqtt_outdoor_temp_topic = value;
-    g_cfg.putString("outdoor_t", value);
-    g_cfg_mqtt_reconfigure_required = true;
-  } else if (key == "weather_condition_topic") {
-    g_cfg_mqtt_weather_condition_topic = value;
-    g_cfg.putString("weather_t", value);
-    g_cfg_mqtt_reconfigure_required = true;
+  } else if (key == "pirateweather_api_key") {
+    g_cfg_pirateweather_api_key = value;
+    g_cfg.putString("pw_key", value);
+    g_have_weather_data = false;
+    g_last_weather_poll_ms = 0;
+  } else if (key == "pirateweather_zip") {
+    g_cfg_pirateweather_zip = value;
+    g_cfg.putString("pw_zip", value);
+    g_have_weather_data = false;
+    g_last_weather_poll_ms = 0;
   } else if (key == "display_timeout_s") {
     long seconds = atol(raw_value);
     if (seconds < 30) seconds = 30;
@@ -491,6 +496,201 @@ float parse_numeric_prefix(const std::string &text, bool *ok) {
   return value;
 }
 
+String normalize_zip(const String &raw_zip) {
+  String out;
+  out.reserve(5);
+  for (size_t i = 0; i < raw_zip.length(); ++i) {
+    const char c = raw_zip[i];
+    if (c == '-') {
+      break;
+    }
+    if (std::isdigit(static_cast<unsigned char>(c))) {
+      if (out.length() < 5) {
+        out += c;
+      }
+    }
+  }
+  return out.length() == 5 ? out : String("");
+}
+
+bool json_extract_string(const String &json, const char *key, String *out, int from_index = 0) {
+  if (out == nullptr || key == nullptr) return false;
+  const String token = "\"" + String(key) + "\"";
+  const int key_index = json.indexOf(token, from_index);
+  if (key_index < 0) return false;
+  const int colon_index = json.indexOf(':', key_index + token.length());
+  if (colon_index < 0) return false;
+  int value_start = colon_index + 1;
+  while (value_start < static_cast<int>(json.length()) &&
+         std::isspace(static_cast<unsigned char>(json[value_start]))) {
+    ++value_start;
+  }
+  if (value_start >= static_cast<int>(json.length()) || json[value_start] != '"') return false;
+  ++value_start;
+
+  String value;
+  bool escaped = false;
+  for (int i = value_start; i < static_cast<int>(json.length()); ++i) {
+    const char c = json[i];
+    if (c == '"' && !escaped) {
+      *out = value;
+      return true;
+    }
+    if (escaped) {
+      escaped = false;
+    } else if (c == '\\') {
+      escaped = true;
+      continue;
+    }
+    value += c;
+  }
+  return false;
+}
+
+bool json_extract_float(const String &json, const char *key, float *out, int from_index = 0) {
+  if (out == nullptr || key == nullptr) return false;
+  const String token = "\"" + String(key) + "\"";
+  const int key_index = json.indexOf(token, from_index);
+  if (key_index < 0) return false;
+  const int colon_index = json.indexOf(':', key_index + token.length());
+  if (colon_index < 0) return false;
+  int value_start = colon_index + 1;
+  while (value_start < static_cast<int>(json.length()) &&
+         std::isspace(static_cast<unsigned char>(json[value_start]))) {
+    ++value_start;
+  }
+  if (value_start >= static_cast<int>(json.length())) return false;
+
+  bool quoted = json[value_start] == '"';
+  if (quoted) ++value_start;
+  int value_end = value_start;
+  while (value_end < static_cast<int>(json.length())) {
+    const char c = json[value_end];
+    if (quoted) {
+      if (c == '"') break;
+    } else if (c == ',' || c == '}' || std::isspace(static_cast<unsigned char>(c))) {
+      break;
+    }
+    ++value_end;
+  }
+  if (value_end <= value_start) return false;
+  *out = static_cast<float>(atof(json.substring(value_start, value_end).c_str()));
+  return true;
+}
+
+String map_pirateweather_icon(const String &icon) {
+  if (icon == "clear-day") return "Sunny";
+  if (icon == "clear-night") return "Night";
+  if (icon == "partly-cloudy-day") return "Partly Cloudy";
+  if (icon == "partly-cloudy-night") return "Night Cloudy";
+  if (icon == "cloudy") return "Cloudy";
+  if (icon == "fog") return "Fog";
+  if (icon == "rain") return "Rain";
+  if (icon == "snow") return "Snow";
+  if (icon == "sleet") return "Sleet";
+  if (icon == "wind") return "Windy";
+  if (icon == "hail") return "Hail";
+  if (icon == "thunderstorm") return "Lightning";
+  return icon.length() > 0 ? icon : String("Unknown");
+}
+
+bool fetch_zip_coordinates(const String &zip, float *lat_out, float *lon_out) {
+  if (lat_out == nullptr || lon_out == nullptr || zip.length() == 0) return false;
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  const String url = "https://api.zippopotam.us/us/" + zip;
+  if (!http.begin(client, url)) return false;
+  http.setTimeout(kHttpTimeoutMs);
+  const int status = http.GET();
+  if (status != 200) {
+    http.end();
+    return false;
+  }
+  const String body = http.getString();
+  http.end();
+  float lat = 0.0f;
+  float lon = 0.0f;
+  if (!json_extract_float(body, "latitude", &lat) || !json_extract_float(body, "longitude", &lon)) {
+    return false;
+  }
+  *lat_out = lat;
+  *lon_out = lon;
+  return true;
+}
+
+bool fetch_pirateweather_current(float lat, float lon, float *temp_c_out, String *condition_out) {
+  if (temp_c_out == nullptr || condition_out == nullptr || g_cfg_pirateweather_api_key.length() == 0) {
+    return false;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  char coord[40];
+  snprintf(coord, sizeof(coord), "%.5f,%.5f", static_cast<double>(lat), static_cast<double>(lon));
+  const String url = "https://api.pirateweather.net/forecast/" + g_cfg_pirateweather_api_key +
+                     "/" + String(coord) + "?units=si&exclude=minutely,hourly,daily,alerts";
+  if (!http.begin(client, url)) return false;
+  http.setTimeout(kHttpTimeoutMs);
+  const int status = http.GET();
+  if (status != 200) {
+    http.end();
+    return false;
+  }
+  const String body = http.getString();
+  http.end();
+  const int current_idx = body.indexOf("\"currently\"");
+  if (current_idx < 0) return false;
+
+  float temp_c = 0.0f;
+  String icon;
+  if (!json_extract_float(body, "temperature", &temp_c, current_idx)) return false;
+  if (!json_extract_string(body, "icon", &icon, current_idx)) {
+    icon = "Unknown";
+  }
+
+  *temp_c_out = temp_c;
+  *condition_out = map_pirateweather_icon(icon);
+  return true;
+}
+
+void poll_weather(uint32_t now_ms) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (g_cfg_pirateweather_api_key.length() == 0 || g_cfg_pirateweather_zip.length() == 0) {
+    g_have_weather_data = false;
+    return;
+  }
+  if (g_last_weather_poll_ms != 0 && (now_ms - g_last_weather_poll_ms) < kWeatherPollMs) return;
+  g_last_weather_poll_ms = now_ms;
+
+  const String zip = normalize_zip(g_cfg_pirateweather_zip);
+  if (zip.length() == 0) {
+    g_have_weather_data = false;
+    return;
+  }
+
+  float lat = 0.0f;
+  float lon = 0.0f;
+  if (!fetch_zip_coordinates(zip, &lat, &lon)) {
+    g_have_weather_data = false;
+    return;
+  }
+
+  float outdoor_temp_c = 0.0f;
+  String condition;
+  if (!fetch_pirateweather_current(lat, lon, &outdoor_temp_c, &condition)) {
+    g_have_weather_data = false;
+    return;
+  }
+
+  g_outdoor_temp_c = outdoor_temp_c;
+  g_weather_condition = condition.c_str();
+  g_have_weather_data = true;
+  if (g_runtime != nullptr) {
+    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
+  }
+}
+
 bool parse_mac(const char *text, uint8_t out[6]) {
   if (text == nullptr || strlen(text) < 17) return false;
   unsigned values[6] = {};
@@ -567,8 +767,9 @@ void web_handle_config_get() {
   body += "\"mqtt_base_topic\":\"" + json_escape(g_cfg_mqtt_base_topic) + "\",";
   body += "\"discovery_prefix\":\"" + json_escape(g_cfg_discovery_prefix) + "\",";
   body += "\"shared_device_id\":\"" + json_escape(g_cfg_shared_device_id) + "\",";
-  body += "\"outdoor_temp_topic\":\"" + json_escape(g_cfg_mqtt_outdoor_temp_topic) + "\",";
-  body += "\"weather_condition_topic\":\"" + json_escape(g_cfg_mqtt_weather_condition_topic) + "\",";
+  body += "\"pirateweather_api_key\":\"" +
+          String(g_cfg_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"pirateweather_zip\":\"" + json_escape(g_cfg_pirateweather_zip) + "\",";
   body += "\"display_timeout_s\":" + String(g_display_timeout_ms / 1000UL) + ",";
   body += "\"temp_comp_c\":" + String(g_cfg_temp_comp_c, 2) + ",";
   body += "\"temperature_unit\":\"" + String(g_cfg_temp_unit_f ? "f" : "c") + "\",";
@@ -652,32 +853,62 @@ void web_handle_screenshot() {
 
 void web_handle_root() {
   String html;
-  html.reserve(4096);
+  html.reserve(8192);
   html += "<html><body><h1>Thermostat Display Config</h1>";
   html += "<p><a href=\"/config\">JSON config</a> | <a href=\"/screenshot\">Screenshot</a></p>";
+
+  html += "<fieldset><legend>Networking Settings</legend>";
   html += "<form method=\"post\" action=\"/config\">";
-  html += "wifi_ssid: <input name=\"wifi_ssid\" value=\"" + g_cfg_wifi_ssid + "\"><br>";
+  html += "wifi_ssid: <input name=\"wifi_ssid\" maxlength=\"64\" value=\"" + g_cfg_wifi_ssid +
+          "\"><br>";
   html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
   html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + g_cfg_mqtt_host + "\"><br>";
-  html += "mqtt_port: <input name=\"mqtt_port\" value=\"" + String(g_cfg_mqtt_port) + "\"><br>";
+  html += "mqtt_port: <input name=\"mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" value=\"" +
+          String(g_cfg_mqtt_port) + "\"><br>";
   html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + g_cfg_mqtt_user + "\"><br>";
   html += "mqtt_password: <input name=\"mqtt_password\" value=\"\"><br>";
   html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + g_cfg_mqtt_client_id + "\"><br>";
   html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + g_cfg_mqtt_base_topic + "\"><br>";
-  html += "discovery_prefix: <input name=\"discovery_prefix\" value=\"" + g_cfg_discovery_prefix + "\"><br>";
-  html += "shared_device_id: <input name=\"shared_device_id\" value=\"" + g_cfg_shared_device_id + "\"><br>";
-  html += "display_timeout_s: <input name=\"display_timeout_s\" value=\"" + String(g_display_timeout_ms / 1000UL) + "\"><br>";
-  html += "temp_comp_c: <input name=\"temp_comp_c\" value=\"" + String(g_cfg_temp_comp_c, 2) + "\"><br>";
-  html += "temperature_unit (c/f): <input name=\"temperature_unit\" value=\"" + String(g_cfg_temp_unit_f ? "f" : "c") + "\"><br>";
-  html += "outdoor_temp_topic: <input name=\"outdoor_temp_topic\" value=\"" + g_cfg_mqtt_outdoor_temp_topic + "\"><br>";
-  html += "weather_condition_topic: <input name=\"weather_condition_topic\" value=\"" + g_cfg_mqtt_weather_condition_topic + "\"><br>";
+  html += "espnow_channel: <input name=\"espnow_channel\" type=\"number\" min=\"1\" max=\"14\" step=\"1\" value=\"" +
+          String(g_cfg_espnow_channel) + "\"><br>";
+  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
+          g_cfg_espnow_peer_mac + "\"><br>";
+  html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
+  html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
+
+  html += "<fieldset><legend>Hardware Settings</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "temp_comp_c: <input name=\"temp_comp_c\" type=\"number\" min=\"-10\" max=\"10\" step=\"0.01\" value=\"" +
+          String(g_cfg_temp_comp_c, 2) + "\"><br>";
+  html += "controller_timeout_ms: <input name=\"controller_timeout_ms\" type=\"number\" min=\"1000\" max=\"600000\" step=\"1\" value=\"" +
+          String(g_cfg_controller_timeout_ms) + "\"><br>";
   html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + g_cfg_ota_hostname + "\"><br>";
   html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
-  html += "espnow_channel: <input name=\"espnow_channel\" value=\"" + String(g_cfg_espnow_channel) + "\"><br>";
-  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" value=\"" + g_cfg_espnow_peer_mac + "\"><br>";
-  html += "espnow_lmk: <input name=\"espnow_lmk\" value=\"\"><br>";
-  html += "controller_timeout_ms: <input name=\"controller_timeout_ms\" value=\"" + String(g_cfg_controller_timeout_ms) + "\"><br>";
-  html += "<button type=\"submit\">Save</button></form>";
+  html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
+
+  html += "<fieldset><legend>Display Settings</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "display_timeout_s: <input name=\"display_timeout_s\" type=\"number\" min=\"30\" max=\"600\" step=\"1\" value=\"" +
+          String(g_display_timeout_ms / 1000UL) + "\"><br>";
+  html += "temperature_unit (c/f): <input name=\"temperature_unit\" pattern=\"^(c|f|celsius|fahrenheit)$\" title=\"Use c, f, celsius, or fahrenheit\" value=\"" +
+          String(g_cfg_temp_unit_f ? "f" : "c") + "\"><br>";
+  html += "<button type=\"submit\">Save Display</button></form></fieldset>";
+
+  html += "<fieldset><legend>Weather</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "pirateweather_api_key: <input name=\"pirateweather_api_key\" value=\"\"><br>";
+  html += "pirateweather_zip: <input name=\"pirateweather_zip\" pattern=\"^[0-9]{5}(-[0-9]{4})?$\" title=\"US ZIP format: 12345 or 12345-6789\" value=\"" +
+          g_cfg_pirateweather_zip + "\"><br>";
+  html += "<button type=\"submit\">Save Weather</button></form></fieldset>";
+
+  html += "<fieldset><legend>Miscellaneous</legend>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "discovery_prefix: <input name=\"discovery_prefix\" value=\"" + g_cfg_discovery_prefix +
+          "\"><br>";
+  html += "shared_device_id: <input name=\"shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" + g_cfg_shared_device_id +
+          "\"><br>";
+  html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
+
   html += "<p>reboot_required=" + String(g_cfg_reboot_required ? "true" : "false") + "</p>";
   html += "<p><img src=\"/screenshot\" style=\"max-width:95vw;border:1px solid #ccc\"></p>";
   html += "</body></html>";
@@ -881,16 +1112,6 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       g_cfg.putUInt("disp_to_s", static_cast<uint32_t>(seconds));
     }
     g_screen.set_display_timeout_ms(g_display_timeout_ms);
-  } else if (g_cfg_mqtt_outdoor_temp_topic.length() > 0 &&
-             topic_str == g_cfg_mqtt_outdoor_temp_topic) {
-    g_outdoor_temp_c = static_cast<float>(atof(value));
-    g_have_outdoor_temp = true;
-    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
-  } else if (g_cfg_mqtt_weather_condition_topic.length() > 0 &&
-             topic_str == g_cfg_mqtt_weather_condition_topic) {
-    g_weather_condition = value;
-    g_have_weather_condition = true;
-    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
   }
 
   mqtt_publish_state();
@@ -1006,12 +1227,6 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/temp_comp_c").c_str());
   g_mqtt.subscribe(topic_for("cmd/display_timeout_s").c_str());
   g_mqtt.subscribe(topic_for("cfg/+/set").c_str());
-  if (g_cfg_mqtt_outdoor_temp_topic.length() > 0) {
-    g_mqtt.subscribe(g_cfg_mqtt_outdoor_temp_topic.c_str());
-  }
-  if (g_cfg_mqtt_weather_condition_topic.length() > 0) {
-    g_mqtt.subscribe(g_cfg_mqtt_weather_condition_topic.c_str());
-  }
 
   mqtt_publish_discovery();
   publish_all_cfg_state();
@@ -1173,7 +1388,7 @@ void refresh_ui() {
   lv_label_set_text(g_indoor_label, g_runtime->indoor_temp_text().c_str());
   lv_label_set_text(g_humidity_label, g_runtime->indoor_humidity_text().c_str());
   lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
-  lv_label_set_text(g_weather_label, g_runtime->weather_text().c_str());
+  lv_label_set_text(g_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
 
   lv_label_set_text(g_screen_time_label, current_time_text().c_str());
   if (g_settings_diag_label != nullptr) {
@@ -1508,9 +1723,7 @@ void poll_sensors(uint32_t now_ms) {
   }
 
   g_runtime->on_local_sensor_update(t, h);
-  if (!g_have_outdoor_temp && !g_have_weather_condition) {
-    g_runtime->on_outdoor_weather_update(6.0f, "Cloudy");
-  } else {
+  if (g_have_weather_data) {
     g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
   }
 }
@@ -1582,6 +1795,7 @@ void thermostat_firmware_loop() {
   ensure_ota_ready();
   ensure_mqtt_connected(now);
   g_mqtt.loop();
+  poll_weather(now);
 
   if (g_mqtt.connected() && (now - g_last_mqtt_publish_ms) >= kMqttPublishMs) {
     g_last_mqtt_publish_ms = now;

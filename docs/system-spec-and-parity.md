@@ -93,6 +93,6 @@ Status legend:
 ## Highest-Priority Remaining Gaps
 
 1. Implement controller physical relay GPIO output layer with safe boot defaults and timed interlock behavior.
-2. Replace display weather stub with real HA-fed or MQTT-fed weather/outdoor integration source.
+2. Replace display weather stub with real PirateWeather weather/outdoor integration source.
 3. Close remaining LVGL settings/diagnostic parity items (IP/MAC/SSID/channel/RSSI/firmware surface).
 4. Add hardware validation checklist and pass/fail log for both controller and display boards.

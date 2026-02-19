@@ -21,6 +21,16 @@
 - Display local fallback config: `http://<display-ip>/config`
 - Display screenshot: `http://<display-ip>/screenshot`
 
+## Weather Provider (Display)
+- Weather is sourced from PirateWeather API polling on the display firmware.
+- Configure both of these display runtime config keys:
+  - `pirateweather_api_key`
+  - `pirateweather_zip` (US ZIP code)
+- You can set display config either from:
+  - Controller unified UI: `http://<controller-ip>/` (Display section, proxied over MQTT config topics)
+  - Display local UI: `http://<display-ip>/`
+- If API config is missing or fetches fail, display falls back to stub weather (`Cloudy`, `6.0C`).
+
 ## Discovery and Telemetry
 - Controller base topic default: `thermostat/furnace-controller`
 - Display base topic default: `thermostat/furnace-display`
