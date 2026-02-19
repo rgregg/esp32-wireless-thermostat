@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <stdlib.h>
 
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
@@ -353,6 +355,20 @@ bool ctrl_parse_bool_payload(const char *value) {
   return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0;
 }
 
+bool ctrl_parse_u32_payload(const char *value, uint32_t *out) {
+  if (value == nullptr || out == nullptr || value[0] == '\0') {
+    return false;
+  }
+  errno = 0;
+  char *end = nullptr;
+  const unsigned long parsed = strtoul(value, &end, 0);
+  if (errno != 0 || end == value || (end != nullptr && *end != '\0')) {
+    return false;
+  }
+  *out = static_cast<uint32_t>(parsed);
+  return true;
+}
+
 const char *ctrl_reset_reason_text(esp_reset_reason_t reason) {
   switch (reason) {
     case ESP_RST_POWERON:
@@ -688,6 +704,29 @@ void ctrl_publish_runtime_state() {
   g_ctrl_last_lockout = lockout;
 }
 
+bool ctrl_apply_packed_command(uint32_t packed_word, bool from_mqtt) {
+  if (g_controller == nullptr) {
+    return false;
+  }
+
+  const thermostat::CommandApplyResult result =
+      g_controller->app().on_command_word(packed_word);
+  if (!result.accepted) {
+    return false;
+  }
+
+  const auto snap = g_controller->app().runtime().snapshot();
+  g_ctrl_shadow_mode = snap.mode;
+  g_ctrl_shadow_fan = snap.fan_mode;
+  g_ctrl_shadow_setpoint_c = g_controller->app().runtime().target_temperature_c();
+  g_ctrl_have_shadow = true;
+  if (from_mqtt) {
+    g_ctrl_last_mqtt_command_ms = millis();
+  }
+  ctrl_publish_runtime_state();
+  return true;
+}
+
 void ctrl_apply_mqtt_shadow(bool do_sync, bool do_filter_reset) {
   if (g_controller == nullptr || !g_ctrl_have_shadow) {
     return;
@@ -704,9 +743,7 @@ void ctrl_apply_mqtt_shadow(bool do_sync, bool do_filter_reset) {
   cmd.seq = g_ctrl_mqtt_seq;
   cmd.sync_request = do_sync;
   cmd.filter_reset = do_filter_reset;
-  g_controller->app().on_command_word(espnow_cmd::encode(cmd));
-  g_ctrl_last_mqtt_command_ms = millis();
-  ctrl_publish_runtime_state();
+  ctrl_apply_packed_command(espnow_cmd::encode(cmd), true);
 }
 
 void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
@@ -746,6 +783,13 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_publish_runtime_state();
     return;
   }
+  if (topic_str == ctrl_topic_for("cmd/packed_word")) {
+    uint32_t packed = 0;
+    if (ctrl_parse_u32_payload(value, &packed)) {
+      ctrl_apply_packed_command(packed, true);
+    }
+    return;
+  }
 
   // Direct controller command topics
   if (topic_str == ctrl_topic_for("cmd/mode")) {
@@ -779,27 +823,12 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
 
-  // Thermostat state mirror topics (MQTT-primary path)
-  if (topic_str == display_topic_for("state/mode")) {
-    if (strcmp(value, "heat") == 0) g_ctrl_shadow_mode = FurnaceMode::Heat;
-    else if (strcmp(value, "cool") == 0) g_ctrl_shadow_mode = FurnaceMode::Cool;
-    else g_ctrl_shadow_mode = FurnaceMode::Off;
-    g_ctrl_have_shadow = true;
-    ctrl_apply_mqtt_shadow(false, false);
-    return;
-  }
-  if (topic_str == display_topic_for("state/fan_mode")) {
-    if (strcmp(value, "on") == 0 || strcmp(value, "always on") == 0) g_ctrl_shadow_fan = FanMode::AlwaysOn;
-    else if (strcmp(value, "circulate") == 0) g_ctrl_shadow_fan = FanMode::Circulate;
-    else g_ctrl_shadow_fan = FanMode::Automatic;
-    g_ctrl_have_shadow = true;
-    ctrl_apply_mqtt_shadow(false, false);
-    return;
-  }
-  if (topic_str == display_topic_for("state/target_temp_c")) {
-    g_ctrl_shadow_setpoint_c = static_cast<float>(atof(value));
-    g_ctrl_have_shadow = true;
-    ctrl_apply_mqtt_shadow(false, false);
+  // Thermostat mirrored packed command path (MQTT-primary path).
+  if (topic_str == display_topic_for("state/packed_command")) {
+    uint32_t packed = 0;
+    if (ctrl_parse_u32_payload(value, &packed)) {
+      ctrl_apply_packed_command(packed, true);
+    }
     return;
   }
 }
@@ -857,12 +886,11 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/mode").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/fan_mode").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/target_temp_c").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/packed_word").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/sync").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str());
-  g_ctrl_mqtt.subscribe(display_topic_for("state/mode").c_str());
-  g_ctrl_mqtt.subscribe(display_topic_for("state/fan_mode").c_str());
-  g_ctrl_mqtt.subscribe(display_topic_for("state/target_temp_c").c_str());
+  g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("cfg/+/state").c_str());
   ctrl_publish_discovery();

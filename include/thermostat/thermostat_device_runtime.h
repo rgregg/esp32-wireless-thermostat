@@ -39,6 +39,9 @@ class ThermostatDeviceRuntime {
   FurnaceMode local_mode() const;
   FanMode local_fan_mode() const;
   float local_setpoint_c() const;
+  bool has_last_packed_command() const;
+  uint32_t last_packed_command() const;
+  uint16_t last_command_seq() const;
 
   std::string status_text(uint32_t now_ms) const;
   std::string setpoint_text() const;

@@ -36,6 +36,9 @@
 - Thermostat base: `thermostat/furnace-display`
 - Commands: `<base>/cmd/...`
 - State: `<base>/state/...`
+- Protocol-aligned command path:
+  - Controller accepts packed command words on: `<controller-base>/cmd/packed_word`
+  - Thermostat publishes mirrored packed command words on: `<thermostat-base>/state/packed_command`
 - Runtime config set/state:
   - `<base>/cfg/<key>/set`
   - `<base>/cfg/<key>/state`

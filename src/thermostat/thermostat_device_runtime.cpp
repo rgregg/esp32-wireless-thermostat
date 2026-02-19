@@ -71,6 +71,18 @@ float ThermostatDeviceRuntime::local_setpoint_c() const {
   return display_.local_setpoint_c();
 }
 
+bool ThermostatDeviceRuntime::has_last_packed_command() const {
+  return node_.app().has_last_packed_command();
+}
+
+uint32_t ThermostatDeviceRuntime::last_packed_command() const {
+  return node_.app().last_packed_command();
+}
+
+uint16_t ThermostatDeviceRuntime::last_command_seq() const {
+  return node_.app().last_command_seq();
+}
+
 std::string ThermostatDeviceRuntime::status_text(uint32_t now_ms) const {
   return display_.status_text(now_ms, config_.controller_connection_timeout_ms);
 }

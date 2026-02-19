@@ -34,6 +34,10 @@
 ## Discovery and Telemetry
 - Controller base topic default: `thermostat/furnace-controller`
 - Display base topic default: `thermostat/furnace-display`
+- Protocol-aligned command transport over MQTT:
+  - Thermostat publishes packed command word mirror: `thermostat/furnace-display/state/packed_command`
+  - Controller can accept packed command word directly: `thermostat/furnace-controller/cmd/packed_word`
+  - Home Assistant granular topics remain supported (`cmd/mode`, `cmd/fan_mode`, `cmd/target_temp_c`, etc.)
 - Health telemetry:
   - `state/boot_count`
   - `state/reset_reason`

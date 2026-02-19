@@ -32,6 +32,9 @@ TEST_CASE(thermostat_app_command_and_debounce) {
 
   app.set_local_setpoint_c(22.5f, 1000);
   ASSERT_TRUE(tx.cmd_count == 1);
+  ASSERT_TRUE(app.has_last_packed_command());
+  ASSERT_EQ(app.last_packed_command(), tx.last_cmd);
+  ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(1));
 
   thermostat::ThermostatControllerTelemetry telem;
   telem.seq = 1;
@@ -49,6 +52,10 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   ASSERT_NEAR(app.local_setpoint_c(), 18.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 2);
   ASSERT_EQ(tx.ack_count, 2);
+
+  app.request_sync(7100);
+  ASSERT_TRUE(app.last_packed_command() == tx.last_cmd);
+  ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(2));
 
   app.publish_indoor_temperature_c(21.2f);
   app.publish_indoor_humidity(44.0f);

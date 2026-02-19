@@ -16,6 +16,7 @@ class ThermostatNode {
   void tick(uint32_t now_ms);
 
   ThermostatApp &app() { return app_; }
+  const ThermostatApp &app() const { return app_; }
   EspNowThermostatTransport &transport() { return transport_; }
 
  private:

@@ -33,6 +33,9 @@ class ThermostatApp {
   void publish_indoor_humidity(float humidity_pct);
 
   bool controller_connected(uint32_t now_ms, uint32_t timeout_ms) const;
+  bool has_last_packed_command() const { return has_last_packed_command_; }
+  uint32_t last_packed_command() const { return last_packed_command_; }
+  uint16_t last_command_seq() const { return last_command_seq_; }
 
   FurnaceMode local_mode() const { return local_mode_; }
   FanMode local_fan_mode() const { return local_fan_mode_; }
@@ -58,6 +61,9 @@ class ThermostatApp {
   ThermostatAppConfig config_;
 
   uint16_t seq_local_ = 0;
+  bool has_last_packed_command_ = false;
+  uint32_t last_packed_command_ = 0;
+  uint16_t last_command_seq_ = 0;
   FurnaceMode local_mode_ = FurnaceMode::Off;
   FanMode local_fan_mode_ = FanMode::Automatic;
   float local_setpoint_c_ = 20.0f;

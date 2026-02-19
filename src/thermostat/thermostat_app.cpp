@@ -150,7 +150,10 @@ void ThermostatApp::send_command(bool do_sync, bool do_filter_reset) {
   cmd.sync_request = do_sync;
   cmd.filter_reset = do_filter_reset;
 
-  transport_.publish_command_word(espnow_cmd::encode(cmd));
+  last_packed_command_ = espnow_cmd::encode(cmd);
+  last_command_seq_ = cmd.seq;
+  has_last_packed_command_ = true;
+  transport_.publish_command_word(last_packed_command_);
 }
 
 }  // namespace thermostat

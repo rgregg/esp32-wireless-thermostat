@@ -953,6 +953,13 @@ void mqtt_publish_state() {
   char buf[32];
   snprintf(buf, sizeof(buf), "%.1f", g_runtime->local_setpoint_c());
   g_mqtt.publish(topic_for("state/target_temp_c").c_str(), buf, true);
+  if (g_runtime->has_last_packed_command()) {
+    snprintf(buf, sizeof(buf), "%lu",
+             static_cast<unsigned long>(g_runtime->last_packed_command()));
+    g_mqtt.publish(topic_for("state/packed_command").c_str(), buf, true);
+    snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_runtime->last_command_seq()));
+    g_mqtt.publish(topic_for("state/command_seq").c_str(), buf, true);
+  }
 
   snprintf(buf, sizeof(buf), "%.2f", g_runtime->local_temperature_compensation_c());
   g_mqtt.publish(topic_for("state/temp_comp_c").c_str(), buf, true);
