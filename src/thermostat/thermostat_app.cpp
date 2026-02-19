@@ -1,5 +1,7 @@
 #include "thermostat/thermostat_app.h"
 
+#include "command_builder.h"
+
 namespace thermostat {
 
 ThermostatApp::ThermostatApp(IThermostatTransport &transport,
@@ -133,22 +135,9 @@ void ThermostatApp::ack_controller_seq(uint16_t seq) {
 }
 
 void ThermostatApp::send_command(bool do_sync, bool do_filter_reset) {
-  CommandWord cmd;
-  cmd.mode = local_mode_;
-  cmd.fan = local_fan_mode_;
-  int setpoint_decic = static_cast<int>(local_setpoint_c_ * 10.0f + 0.5f);
-  if (setpoint_decic < 0) {
-    setpoint_decic = 0;
-  }
-  if (setpoint_decic > 400) {
-    setpoint_decic = 400;
-  }
-  cmd.setpoint_decic = static_cast<uint16_t>(setpoint_decic);
-
   seq_local_ = espnow_cmd::next_seq(seq_local_);
-  cmd.seq = seq_local_;
-  cmd.sync_request = do_sync;
-  cmd.filter_reset = do_filter_reset;
+  const CommandWord cmd = build_command_word(local_mode_, local_fan_mode_, local_setpoint_c_,
+                                             seq_local_, do_sync, do_filter_reset);
 
   last_packed_command_ = espnow_cmd::encode(cmd);
   last_command_seq_ = cmd.seq;

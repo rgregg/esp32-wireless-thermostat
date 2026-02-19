@@ -1,4 +1,5 @@
 #if defined(THERMOSTAT_RUN_TESTS)
+#include "command_builder.h"
 #include "thermostat/thermostat_app.h"
 #include "transport/espnow_packets.h"
 #include "test_harness.h"
@@ -35,6 +36,8 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   ASSERT_TRUE(app.has_last_packed_command());
   ASSERT_EQ(app.last_packed_command(), tx.last_cmd);
   ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(1));
+  ASSERT_EQ(tx.last_cmd, thermostat::build_packed_command(FurnaceMode::Off, FanMode::Automatic,
+                                                          22.5f, 1, false, false));
 
   thermostat::ThermostatControllerTelemetry telem;
   telem.seq = 1;
@@ -56,6 +59,8 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   app.request_sync(7100);
   ASSERT_TRUE(app.last_packed_command() == tx.last_cmd);
   ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(2));
+  ASSERT_EQ(tx.last_cmd, thermostat::build_packed_command(FurnaceMode::Cool, FanMode::AlwaysOn,
+                                                          18.0f, 2, true, false));
 
   app.publish_indoor_temperature_c(21.2f);
   app.publish_indoor_humidity(44.0f);

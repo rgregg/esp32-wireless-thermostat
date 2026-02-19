@@ -21,6 +21,52 @@
 - Display local fallback config: `http://<display-ip>/config`
 - Display screenshot: `http://<display-ip>/screenshot`
 
+## Runtime Config Contract
+
+### Controller keys (`thermostat/furnace-controller/cfg/<key>/set`)
+| Key | Type | Default | Accepted values/range | Reboot required |
+| --- | --- | --- | --- | --- |
+| `wifi_ssid` | string | `""` | any | no |
+| `wifi_password` | string (secret) | `""` | any | no |
+| `mqtt_host` | string | `mqtt.lan` | any hostname/IP | no |
+| `mqtt_port` | integer | `1883` | `1..65535` | no |
+| `mqtt_user` | string | `""` | any | no |
+| `mqtt_password` | string (secret) | `""` | any | no |
+| `mqtt_client_id` | string | `esp32-furnace-controller` | any | no |
+| `mqtt_base_topic` | string | `thermostat/furnace-controller` | any | no |
+| `display_mqtt_base_topic` | string | `thermostat/furnace-display` | any | no |
+| `shared_device_id` | string | `wireless_thermostat_system` | any | no |
+| `ota_hostname` | string | `esp32-furnace-controller` | any | no |
+| `ota_password` | string (secret) | `""` | any | no |
+| `espnow_channel` | integer | `6` | `1..14` | yes |
+| `espnow_peer_mac` | string | `FF:FF:FF:FF:FF:FF` | MAC format expected | yes |
+| `espnow_lmk` | string (secret) | `a1b2c3d4e5f60718293a4b5c6d7e8f90` | 32 hex chars expected | yes |
+
+### Thermostat keys (`thermostat/furnace-display/cfg/<key>/set`)
+| Key | Type | Default | Accepted values/range | Reboot required |
+| --- | --- | --- | --- | --- |
+| `wifi_ssid` | string | `""` | any | no |
+| `wifi_password` | string (secret) | `""` | any | no |
+| `mqtt_host` | string | `mqtt.lan` | any hostname/IP | no |
+| `mqtt_port` | integer | `1883` | `1..65535` | no |
+| `mqtt_user` | string | `""` | any | no |
+| `mqtt_password` | string (secret) | `""` | any | no |
+| `mqtt_client_id` | string | `esp32-furnace-thermostat` | any | no |
+| `mqtt_base_topic` | string | `thermostat/furnace-display` | any | no |
+| `discovery_prefix` | string | `homeassistant` | any | no |
+| `shared_device_id` | string | `wireless_thermostat_system` | any | no |
+| `pirateweather_api_key` | string (secret) | `""` | any | no |
+| `pirateweather_zip` | string | `""` | ZIP string | no |
+| `display_timeout_s` | integer | `300` | clamped to `30..600` | no |
+| `temp_comp_c` | float | `0.0` | any float | no |
+| `temperature_unit` | string | `c` | `c`,`f`,`celsius`,`fahrenheit` | no |
+| `ota_hostname` | string | `esp32-furnace-thermostat` | any | no |
+| `ota_password` | string (secret) | `""` | any | no |
+| `espnow_channel` | integer | `6` | `1..14` | yes |
+| `espnow_peer_mac` | string | `FF:FF:FF:FF:FF:FF` | MAC format expected | yes |
+| `espnow_lmk` | string (secret) | `a1b2c3d4e5f60718293a4b5c6d7e8f90` | 32 hex chars expected | yes |
+| `controller_timeout_ms` | integer | `30000` | `1000..600000` | yes |
+
 ## Weather Provider (Display)
 - Weather is sourced from PirateWeather API polling on the display firmware.
 - Configure both of these display runtime config keys:

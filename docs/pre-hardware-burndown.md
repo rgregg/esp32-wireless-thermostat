@@ -40,11 +40,11 @@ Goal: maximize confidence before physical hardware iteration starts.
     - Peer MAC filtering behavior is covered for unicast and broadcast fallback modes.
   - Evidence: dedicated tests in `src/tests/test_codec.cpp` and `src/tests/test_espnow_packets.cpp` + passing `native-tests`.
 
-- [ ] Config contract freeze (status: To Do)
+- [ ] Config contract freeze (status: In Progress)
   - Acceptance:
     - Every runtime config key documented with: key name, type, default, range, reboot-required.
     - Controller and thermostat keys separated clearly.
-  - Evidence: section added in `docs/deployment-runbook.md`.
+  - Evidence: runtime config contract section added in `docs/deployment-runbook.md`.
 
 ### P1
 - [ ] Release artifact script and verification (status: To Do)

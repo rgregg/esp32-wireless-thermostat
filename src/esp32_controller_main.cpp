@@ -6,6 +6,7 @@
 
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
+#include "command_builder.h"
 #include "espnow_cmd_word.h"
 #include "management_paths.h"
 
@@ -731,18 +732,11 @@ void ctrl_apply_mqtt_shadow(bool do_sync, bool do_filter_reset) {
   if (g_controller == nullptr || !g_ctrl_have_shadow) {
     return;
   }
-  CommandWord cmd;
-  cmd.mode = g_ctrl_shadow_mode;
-  cmd.fan = g_ctrl_shadow_fan;
-  int setpoint_decic = static_cast<int>(g_ctrl_shadow_setpoint_c * 10.0f + 0.5f);
-  if (setpoint_decic < 0) setpoint_decic = 0;
-  if (setpoint_decic > 400) setpoint_decic = 400;
-  cmd.setpoint_decic = static_cast<uint16_t>(setpoint_decic);
   g_ctrl_mqtt_seq = static_cast<uint16_t>((g_ctrl_mqtt_seq + 1) & 0x1FFu);
   if (g_ctrl_mqtt_seq == 0) g_ctrl_mqtt_seq = 1;
-  cmd.seq = g_ctrl_mqtt_seq;
-  cmd.sync_request = do_sync;
-  cmd.filter_reset = do_filter_reset;
+  const CommandWord cmd = thermostat::build_command_word(
+      g_ctrl_shadow_mode, g_ctrl_shadow_fan, g_ctrl_shadow_setpoint_c, g_ctrl_mqtt_seq, do_sync,
+      do_filter_reset);
   ctrl_apply_packed_command(espnow_cmd::encode(cmd), true);
 }
 
