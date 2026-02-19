@@ -18,6 +18,15 @@ TEST_CASE(management_paths_parse_cfg_topics) {
       "thermostat/furnace-display", "thermostat/furnace-display/cfg/set", &key));
   ASSERT_TRUE(!thermostat::management_paths::parse_cfg_state_topic(
       "thermostat/furnace-display", "thermostat/furnace-controller/cfg/mqtt_host/state", &key));
+  ASSERT_TRUE(!thermostat::management_paths::parse_cfg_set_topic(
+      "thermostat/furnace-display",
+      "thermostat/furnace-display/cfg/../mqtt_password/set", &key));
+  ASSERT_TRUE(!thermostat::management_paths::parse_cfg_set_topic(
+      "thermostat/furnace-display",
+      "thermostat/furnace-display/cfg/mqtt password/set", &key));
+  ASSERT_TRUE(!thermostat::management_paths::parse_cfg_state_topic(
+      "thermostat/furnace-display",
+      "thermostat/furnace-display/cfg/ota$password/state", &key));
 }
 
 TEST_CASE(management_paths_parse_form_keys) {
@@ -25,9 +34,15 @@ TEST_CASE(management_paths_parse_form_keys) {
   ASSERT_TRUE(thermostat::management_paths::parse_prefixed_form_key(
       "disp_display_timeout_s", "disp_", &key));
   ASSERT_EQ(key, std::string("display_timeout_s"));
+  ASSERT_TRUE(thermostat::management_paths::parse_prefixed_form_key(
+      "disp_espnow-peer-mac", "disp_", &key));
+  ASSERT_EQ(key, std::string("espnow-peer-mac"));
   ASSERT_TRUE(!thermostat::management_paths::parse_prefixed_form_key(
       "display_timeout_s", "disp_", &key));
+  ASSERT_TRUE(!thermostat::management_paths::parse_prefixed_form_key(
+      "disp_../wifi_password", "disp_", &key));
+  ASSERT_TRUE(!thermostat::management_paths::parse_prefixed_form_key(
+      "disp_mqtt host", "disp_", &key));
 }
 
 #endif
-

@@ -26,12 +26,12 @@ Goal: maximize confidence before physical hardware iteration starts.
     - Fails fast and reports which env/test failed.
   - Evidence: workflow file at `.github/workflows/ci.yml` + passing run link/screenshot in PR.
 
-- [ ] Management/config integration tests (status: To Do)
+- [ ] Management/config integration tests (status: In Progress)
   - Acceptance:
     - Covers MQTT config set/state routing for controller and thermostat topics.
     - Covers controller proxy updates for display config over MQTT.
     - Covers redaction behavior for password/secret fields in `/config` and state topics.
-  - Evidence: new host tests in `src/tests/*` and passing `native-tests`.
+  - Evidence: expanded host tests in `src/tests/test_management_paths.cpp` and passing `native-tests`.
 
 - [ ] ESP-NOW protocol robustness tests (status: To Do)
   - Acceptance:
@@ -73,6 +73,6 @@ Goal: maximize confidence before physical hardware iteration starts.
 
 ## Current Sprint (Pre-Hardware Sprint 1)
 - [x] Land CI workflow for required matrix.
-- [ ] Land first config integration test batch.
+- [x] Land first config integration test batch.
 - [ ] Land first ESP-NOW robustness test batch.
 - [ ] Update deployment runbook with config contract table.
