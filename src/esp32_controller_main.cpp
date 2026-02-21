@@ -442,6 +442,24 @@ void ctrl_publish_discovery() {
   const String state_topic = String("homeassistant/sensor/") + dev_id + "_furnace_state/config";
   const String fw_topic =
       String("homeassistant/sensor/") + dev_id + "_controller_firmware/config";
+  const String rssi_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_wifi_rssi/config";
+  const String heap_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_free_heap/config";
+  const String last_mqtt_cmd_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_last_mqtt_command/config";
+  const String last_espnow_rx_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_last_espnow_rx/config";
+  const String espnow_ok_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_espnow_send_ok/config";
+  const String espnow_fail_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_espnow_send_fail/config";
+  const String err_mqtt_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_error_mqtt/config";
+  const String err_ota_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_error_ota/config";
+  const String err_espnow_topic =
+      String("homeassistant/sensor/") + dev_id + "_controller_error_espnow/config";
 
   char payload[768];
   snprintf(payload, sizeof(payload),
@@ -473,6 +491,70 @@ void ctrl_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(fw_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller WiFi RSSI\",\"uniq_id\":\"%s_controller_wifi_rssi\","
+           "\"stat_t\":\"%s/state/wifi_rssi\",\"unit_of_meas\":\"dBm\","
+           "\"dev_cla\":\"signal_strength\",\"stat_cla\":\"measurement\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(rssi_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Free Heap\",\"uniq_id\":\"%s_controller_free_heap\","
+           "\"stat_t\":\"%s/state/free_heap_bytes\",\"unit_of_meas\":\"B\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(heap_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Last MQTT Command\",\"uniq_id\":\"%s_controller_last_mqtt_command\","
+           "\"stat_t\":\"%s/state/last_mqtt_command_ms\",\"unit_of_meas\":\"ms\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(last_mqtt_cmd_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Last ESP-NOW RX\",\"uniq_id\":\"%s_controller_last_espnow_rx\","
+           "\"stat_t\":\"%s/state/last_espnow_rx_ms\",\"unit_of_meas\":\"ms\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(last_espnow_rx_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller ESP-NOW Send OK\",\"uniq_id\":\"%s_controller_espnow_send_ok\","
+           "\"stat_t\":\"%s/state/espnow_send_ok_count\",\"icon\":\"mdi:counter\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(espnow_ok_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller ESP-NOW Send Fail\",\"uniq_id\":\"%s_controller_espnow_send_fail\","
+           "\"stat_t\":\"%s/state/espnow_send_fail_count\",\"icon\":\"mdi:counter\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(espnow_fail_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller MQTT Error\",\"uniq_id\":\"%s_controller_error_mqtt\","
+           "\"stat_t\":\"%s/state/error_mqtt\",\"entity_category\":\"diagnostic\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(err_mqtt_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller OTA Error\",\"uniq_id\":\"%s_controller_error_ota\","
+           "\"stat_t\":\"%s/state/error_ota\",\"entity_category\":\"diagnostic\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(err_ota_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller ESP-NOW Error\",\"uniq_id\":\"%s_controller_error_espnow\","
+           "\"stat_t\":\"%s/state/error_espnow\",\"entity_category\":\"diagnostic\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(err_espnow_topic.c_str(), payload, true);
 
   g_ctrl_mqtt_discovery_sent = true;
 }

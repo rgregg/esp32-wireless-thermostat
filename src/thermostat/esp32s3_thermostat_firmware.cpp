@@ -1063,6 +1063,88 @@ void mqtt_publish_discovery() {
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(fw_config.c_str(), payload, true);
 
+  const String rssi_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_wifi_rssi/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display WiFi RSSI\",\"uniq_id\":\"%s_display_wifi_rssi\","
+           "\"stat_t\":\"%s/state/wifi_rssi\",\"unit_of_meas\":\"dBm\","
+           "\"dev_cla\":\"signal_strength\",\"stat_cla\":\"measurement\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(rssi_config.c_str(), payload, true);
+
+  const String heap_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_free_heap/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Free Heap\",\"uniq_id\":\"%s_display_free_heap\","
+           "\"stat_t\":\"%s/state/free_heap_bytes\",\"unit_of_meas\":\"B\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(heap_config.c_str(), payload, true);
+
+  const String last_mqtt_cmd_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_last_mqtt_command/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Last MQTT Command\",\"uniq_id\":\"%s_display_last_mqtt_command\","
+           "\"stat_t\":\"%s/state/last_mqtt_command_ms\",\"unit_of_meas\":\"ms\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(last_mqtt_cmd_config.c_str(), payload, true);
+
+  const String last_espnow_rx_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_last_espnow_rx/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Last ESP-NOW RX\",\"uniq_id\":\"%s_display_last_espnow_rx\","
+           "\"stat_t\":\"%s/state/last_espnow_rx_ms\",\"unit_of_meas\":\"ms\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(last_espnow_rx_config.c_str(), payload, true);
+
+  const String espnow_ok_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_espnow_send_ok/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display ESP-NOW Send OK\",\"uniq_id\":\"%s_display_espnow_send_ok\","
+           "\"stat_t\":\"%s/state/espnow_send_ok_count\",\"icon\":\"mdi:counter\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(espnow_ok_config.c_str(), payload, true);
+
+  const String espnow_fail_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_espnow_send_fail/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display ESP-NOW Send Fail\",\"uniq_id\":\"%s_display_espnow_send_fail\","
+           "\"stat_t\":\"%s/state/espnow_send_fail_count\",\"icon\":\"mdi:counter\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(espnow_fail_config.c_str(), payload, true);
+
+  const String err_mqtt_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_error_mqtt/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display MQTT Error\",\"uniq_id\":\"%s_display_error_mqtt\","
+           "\"stat_t\":\"%s/state/error_mqtt\",\"entity_category\":\"diagnostic\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(err_mqtt_config.c_str(), payload, true);
+
+  const String err_ota_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_error_ota/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display OTA Error\",\"uniq_id\":\"%s_display_error_ota\","
+           "\"stat_t\":\"%s/state/error_ota\",\"entity_category\":\"diagnostic\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(err_ota_config.c_str(), payload, true);
+
+  const String err_espnow_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_error_espnow/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display ESP-NOW Error\",\"uniq_id\":\"%s_display_error_espnow\","
+           "\"stat_t\":\"%s/state/error_espnow\",\"entity_category\":\"diagnostic\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(err_espnow_config.c_str(), payload, true);
+
   g_mqtt_discovery_sent = true;
 }
 

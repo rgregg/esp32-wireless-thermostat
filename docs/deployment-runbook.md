@@ -109,6 +109,10 @@
   - `state/error_mqtt` (`none` or `connect_state_<code>`)
   - `state/error_ota` (`none` or `ota_error_<code>`)
   - `state/error_espnow` (`none`, `send_failed`, or `begin_failed`)
+- Home Assistant discovery now includes diagnostic sensors for both controller and display:
+  - WiFi RSSI, free heap, last MQTT command timestamp, last ESP-NOW RX timestamp
+  - ESP-NOW send OK/fail counters
+  - MQTT/OTA/ESP-NOW last error reason
 
 ## mDNS Hostnames
 - Controller advertises HTTP using OTA hostname (default `esp32-furnace-controller`)
