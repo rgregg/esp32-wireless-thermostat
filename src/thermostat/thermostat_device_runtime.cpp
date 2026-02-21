@@ -83,6 +83,18 @@ uint16_t ThermostatDeviceRuntime::last_command_seq() const {
   return node_.app().last_command_seq();
 }
 
+uint32_t ThermostatDeviceRuntime::last_controller_heartbeat_ms() const {
+  return node_.app().last_controller_heartbeat_ms();
+}
+
+uint32_t ThermostatDeviceRuntime::espnow_send_ok_count() const {
+  return node_.transport().send_ok_count();
+}
+
+uint32_t ThermostatDeviceRuntime::espnow_send_fail_count() const {
+  return node_.transport().send_fail_count();
+}
+
 std::string ThermostatDeviceRuntime::status_text(uint32_t now_ms) const {
   return display_.status_text(now_ms, config_.controller_connection_timeout_ms);
 }

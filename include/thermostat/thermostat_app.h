@@ -33,6 +33,7 @@ class ThermostatApp {
   void publish_indoor_humidity(float humidity_pct);
 
   bool controller_connected(uint32_t now_ms, uint32_t timeout_ms) const;
+  uint32_t last_controller_heartbeat_ms() const { return last_controller_heartbeat_ms_; }
   bool has_last_packed_command() const { return has_last_packed_command_; }
   uint32_t last_packed_command() const { return last_packed_command_; }
   uint16_t last_command_seq() const { return last_command_seq_; }

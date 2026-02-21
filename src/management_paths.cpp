@@ -66,5 +66,16 @@ bool parse_prefixed_form_key(const std::string &name, const std::string &prefix,
   return is_valid_cfg_key(*key_out);
 }
 
+bool is_secret_cfg_key(const std::string &key) {
+  static const char *kSecretKeys[] = {"wifi_password", "mqtt_password", "ota_password",
+                                      "espnow_lmk", "pirateweather_api_key"};
+  for (const char *secret_key : kSecretKeys) {
+    if (key == secret_key) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace management_paths
 }  // namespace thermostat

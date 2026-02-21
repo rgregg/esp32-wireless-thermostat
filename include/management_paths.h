@@ -11,6 +11,7 @@ bool parse_cfg_state_topic(const std::string &base_topic, const std::string &top
                            std::string *key_out);
 bool parse_prefixed_form_key(const std::string &name, const std::string &prefix,
                              std::string *key_out);
+bool is_secret_cfg_key(const std::string &key);
 
 }  // namespace management_paths
 }  // namespace thermostat

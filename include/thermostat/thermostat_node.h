@@ -18,6 +18,7 @@ class ThermostatNode {
   ThermostatApp &app() { return app_; }
   const ThermostatApp &app() const { return app_; }
   EspNowThermostatTransport &transport() { return transport_; }
+  const EspNowThermostatTransport &transport() const { return transport_; }
 
  private:
   static void on_heartbeat_static(uint32_t now_ms, void *ctx);

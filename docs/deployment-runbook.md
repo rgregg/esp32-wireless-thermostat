@@ -20,6 +20,17 @@
 - Controller local config: `http://<controller-ip>/config`
 - Display local fallback config: `http://<display-ip>/config`
 - Display screenshot: `http://<display-ip>/screenshot`
+- MQTT path smoke verifier (with broker + both devices online):
+  - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan`
+
+## Release Artifacts
+- Build both firmware binaries with one command:
+  - `scripts/build_release_artifacts.sh`
+- Artifacts are written to `dist/releases/<git-describe-version>/`.
+- Naming format:
+  - `esp32-furnace-controller-<version>.bin`
+  - `esp32-furnace-thermostat-<version>.bin`
+- Build metadata is recorded in `build-info.txt`, and `SHA256SUMS` is generated when `shasum` is available.
 
 ## Runtime Config Contract
 
@@ -88,7 +99,58 @@
   - `state/boot_count`
   - `state/reset_reason`
   - `state/uptime_s`
+  - `state/wifi_rssi`
+  - `state/free_heap_bytes`
+  - `state/last_mqtt_command_ms`
+  - `state/last_espnow_rx_ms`
+  - `state/espnow_send_ok_count`
+  - `state/espnow_send_fail_count`
+- Error reason telemetry:
+  - `state/error_mqtt` (`none` or `connect_state_<code>`)
+  - `state/error_ota` (`none` or `ota_error_<code>`)
+  - `state/error_espnow` (`none`, `send_failed`, or `begin_failed`)
 
 ## mDNS Hostnames
 - Controller advertises HTTP using OTA hostname (default `esp32-furnace-controller`)
 - Display advertises HTTP using OTA hostname (default `esp32-furnace-thermostat`)
+
+## OTA Rollout + Rollback
+
+### Rollout Order
+1. Verify both devices are online and healthy before update:
+   - Controller `state/uptime_s` is advancing.
+   - Display `state/uptime_s` is advancing.
+   - Thermostat publishes `state/packed_command` and controller applies commands.
+2. Update thermostat (display) first via OTA.
+3. Wait for display to reconnect to WiFi + MQTT and resume telemetry.
+4. Update controller second via OTA.
+5. Re-run MQTT smoke verification:
+   - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan`
+
+### Health Checks After Each Node Update
+- Device responds on HTTP root and `/config`.
+- Device reconnects to MQTT and republishes retained runtime state.
+- For thermostat, `/screenshot` endpoint returns current UI frame.
+
+### Rollback Triggers
+- Node does not reconnect to WiFi/MQTT within 3 minutes.
+- Runtime state topics stop updating after reconnect.
+- Command path regression (packed or granular topics stop applying).
+- Web management endpoints become unavailable.
+
+### Rollback Procedure
+1. Re-flash previous known-good firmware for the failed node using OTA if reachable.
+2. If OTA is unavailable, use serial recovery on bench hardware, then redeploy.
+3. After rollback, verify:
+   - retained cfg state is intact
+   - command path works (`mqtt_path_smoke.py`)
+   - Home Assistant entities report expected state
+
+### One Node Unreachable Recovery
+- If thermostat is unreachable:
+  - keep controller on known-good build
+  - recover thermostat first (OTA if possible, serial otherwise)
+  - run MQTT smoke and screenshot checks before controller changes
+- If controller is unreachable:
+  - recover controller first (it hosts unified management UI)
+  - confirm display reconnects and cfg proxy state repopulates

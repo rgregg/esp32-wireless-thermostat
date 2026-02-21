@@ -3,3 +3,5 @@
 .DS_Store
 compile_commands.json
 platformio_override.ini
+dist/
+__pycache__/

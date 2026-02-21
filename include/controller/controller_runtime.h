@@ -58,6 +58,7 @@ class ControllerRuntime {
   bool heat_demand() const { return relay_.heat; }
   bool cool_demand() const { return relay_.cool; }
   bool fan_demand() const { return relay_.fan; }
+  uint32_t heartbeat_last_seen_ms() const { return heartbeat_last_seen_ms_; }
 
   uint32_t filter_runtime_seconds() const { return filter_runtime_seconds_; }
   float filter_runtime_hours() const {

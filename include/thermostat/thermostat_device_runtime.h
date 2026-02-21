@@ -42,6 +42,9 @@ class ThermostatDeviceRuntime {
   bool has_last_packed_command() const;
   uint32_t last_packed_command() const;
   uint16_t last_command_seq() const;
+  uint32_t last_controller_heartbeat_ms() const;
+  uint32_t espnow_send_ok_count() const;
+  uint32_t espnow_send_fail_count() const;
 
   std::string status_text(uint32_t now_ms) const;
   std::string setpoint_text() const;

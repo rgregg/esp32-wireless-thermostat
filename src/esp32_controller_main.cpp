@@ -31,6 +31,9 @@ uint32_t g_ctrl_last_mqtt_publish_ms = 0;
 bool g_ctrl_last_lockout = false;
 bool g_ctrl_have_lockout = false;
 uint32_t g_ctrl_last_mqtt_command_ms = 0;
+String g_ctrl_last_mqtt_error = "none";
+String g_ctrl_last_ota_error = "none";
+String g_ctrl_last_espnow_error = "none";
 uint16_t g_ctrl_mqtt_seq = 0;
 bool g_ctrl_mqtt_discovery_sent = false;
 bool g_ctrl_have_shadow = false;
@@ -227,7 +230,7 @@ bool ctrl_publish_display_cfg_set(const String &key, const String &value) {
   return g_ctrl_mqtt.publish(topic.c_str(), value.c_str(), true);
 }
 
-void ctrl_publish_cfg_value(const char *key, const String &value, bool redact) {
+void ctrl_publish_cfg_value(const char *key, const String &value) {
   if (!g_ctrl_mqtt.connected()) {
     return;
   }
@@ -236,29 +239,29 @@ void ctrl_publish_cfg_value(const char *key, const String &value, bool redact) {
   topic += key;
   topic += "/state";
   const char *payload = value.c_str();
-  if (redact) {
+  if (thermostat::management_paths::is_secret_cfg_key(key)) {
     payload = value.length() > 0 ? "set" : "unset";
   }
   g_ctrl_mqtt.publish(topic.c_str(), payload, true);
 }
 
 void ctrl_publish_all_cfg_state() {
-  ctrl_publish_cfg_value("wifi_ssid", g_cfg_ctrl_wifi_ssid, false);
-  ctrl_publish_cfg_value("wifi_password", g_cfg_ctrl_wifi_password, true);
-  ctrl_publish_cfg_value("mqtt_host", g_cfg_ctrl_mqtt_host, false);
-  ctrl_publish_cfg_value("mqtt_port", String(g_cfg_ctrl_mqtt_port), false);
-  ctrl_publish_cfg_value("mqtt_user", g_cfg_ctrl_mqtt_user, false);
-  ctrl_publish_cfg_value("mqtt_password", g_cfg_ctrl_mqtt_password, true);
-  ctrl_publish_cfg_value("mqtt_client_id", g_cfg_ctrl_mqtt_client_id, false);
-  ctrl_publish_cfg_value("mqtt_base_topic", g_cfg_ctrl_mqtt_base_topic, false);
-  ctrl_publish_cfg_value("display_mqtt_base_topic", g_cfg_display_mqtt_base_topic, false);
-  ctrl_publish_cfg_value("shared_device_id", g_cfg_shared_device_id, false);
-  ctrl_publish_cfg_value("ota_hostname", g_cfg_ctrl_ota_hostname, false);
-  ctrl_publish_cfg_value("ota_password", g_cfg_ctrl_ota_password, true);
-  ctrl_publish_cfg_value("espnow_channel", String(g_cfg_ctrl_espnow_channel), false);
-  ctrl_publish_cfg_value("espnow_peer_mac", g_cfg_ctrl_espnow_peer_mac, false);
-  ctrl_publish_cfg_value("espnow_lmk", g_cfg_ctrl_espnow_lmk, true);
-  ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0", false);
+  ctrl_publish_cfg_value("wifi_ssid", g_cfg_ctrl_wifi_ssid);
+  ctrl_publish_cfg_value("wifi_password", g_cfg_ctrl_wifi_password);
+  ctrl_publish_cfg_value("mqtt_host", g_cfg_ctrl_mqtt_host);
+  ctrl_publish_cfg_value("mqtt_port", String(g_cfg_ctrl_mqtt_port));
+  ctrl_publish_cfg_value("mqtt_user", g_cfg_ctrl_mqtt_user);
+  ctrl_publish_cfg_value("mqtt_password", g_cfg_ctrl_mqtt_password);
+  ctrl_publish_cfg_value("mqtt_client_id", g_cfg_ctrl_mqtt_client_id);
+  ctrl_publish_cfg_value("mqtt_base_topic", g_cfg_ctrl_mqtt_base_topic);
+  ctrl_publish_cfg_value("display_mqtt_base_topic", g_cfg_display_mqtt_base_topic);
+  ctrl_publish_cfg_value("shared_device_id", g_cfg_shared_device_id);
+  ctrl_publish_cfg_value("ota_hostname", g_cfg_ctrl_ota_hostname);
+  ctrl_publish_cfg_value("ota_password", g_cfg_ctrl_ota_password);
+  ctrl_publish_cfg_value("espnow_channel", String(g_cfg_ctrl_espnow_channel));
+  ctrl_publish_cfg_value("espnow_peer_mac", g_cfg_ctrl_espnow_peer_mac);
+  ctrl_publish_cfg_value("espnow_lmk", g_cfg_ctrl_espnow_lmk);
+  ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0");
 }
 
 bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
@@ -342,9 +345,7 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     return false;
   }
   if (g_ctrl_mqtt.connected()) {
-    ctrl_publish_cfg_value(key.c_str(), value,
-                           key == "wifi_password" || key == "mqtt_password" ||
-                               key == "ota_password" || key == "espnow_lmk");
+    ctrl_publish_cfg_value(key.c_str(), value);
   }
   return true;
 }
@@ -701,6 +702,34 @@ void ctrl_publish_runtime_state() {
                       true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
   g_ctrl_mqtt.publish(ctrl_topic_for("state/uptime_s").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(rt.heartbeat_last_seen_ms()));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_controller->transport().send_ok_count()));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/espnow_send_ok_count").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_controller->transport().send_fail_count()));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
+  if (g_ctrl_last_espnow_error != "begin_failed") {
+    g_ctrl_last_espnow_error =
+        g_controller->transport().send_fail_count() > 0 ? "send_failed" : "none";
+  }
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(esp_get_free_heap_size()));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/free_heap_bytes").c_str(), buf, true);
+  if (WiFi.status() == WL_CONNECTED) {
+    snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/wifi_rssi").c_str(), buf, true);
+  }
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/error_mqtt").c_str(), g_ctrl_last_mqtt_error.c_str(),
+                      true);
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/error_ota").c_str(), g_ctrl_last_ota_error.c_str(),
+                      true);
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/error_espnow").c_str(),
+                      g_ctrl_last_espnow_error.c_str(), true);
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
 }
@@ -766,6 +795,10 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   if (topic_str == display_topic_for("state/availability")) {
     g_disp_availability = value;
     return;
+  }
+
+  if (topic_str.startsWith(ctrl_topic_for("cmd/"))) {
+    g_ctrl_last_mqtt_command_ms = millis();
   }
 
   if (g_controller == nullptr) {
@@ -873,8 +906,10 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
                              g_cfg_ctrl_mqtt_password.c_str());
   }
   if (!ok) {
+    g_ctrl_last_mqtt_error = String("connect_state_") + String(g_ctrl_mqtt.state());
     return;
   }
+  g_ctrl_last_mqtt_error = "none";
 
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/lockout").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/mode").c_str());
@@ -901,6 +936,10 @@ void ctrl_ensure_ota_ready() {
     if (g_cfg_ctrl_ota_password.length() > 0) {
       ArduinoOTA.setPassword(g_cfg_ctrl_ota_password.c_str());
     }
+    ArduinoOTA.onError([](ota_error_t error) {
+      g_ctrl_last_ota_error = String("ota_error_") + String(static_cast<unsigned>(error));
+    });
+    ArduinoOTA.onEnd([]() { g_ctrl_last_ota_error = "none"; });
     ArduinoOTA.begin();
     g_ctrl_ota_started = true;
   }
@@ -958,6 +997,7 @@ void setup() {
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 
   const bool ok = g_controller->begin();
+  g_ctrl_last_espnow_error = ok ? "none" : "begin_failed";
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
 }

@@ -20,50 +20,50 @@ Goal: maximize confidence before physical hardware iteration starts.
 ## Board
 
 ### P0
-- [ ] CI pipeline for required build/test matrix (status: In Progress)
+- [x] CI pipeline for required build/test matrix (status: Done)
   - Acceptance:
     - Runs the 4 required commands on every push/PR.
     - Fails fast and reports which env/test failed.
-  - Evidence: workflow file at `.github/workflows/ci.yml` + passing run link/screenshot in PR.
+  - Evidence: workflow file at `.github/workflows/ci.yml`.
 
-- [ ] Management/config integration tests (status: In Progress)
+- [x] Management/config integration tests (status: Done)
   - Acceptance:
     - Covers MQTT config set/state routing for controller and thermostat topics.
     - Covers controller proxy updates for display config over MQTT.
     - Covers redaction behavior for password/secret fields in `/config` and state topics.
-  - Evidence: expanded host tests in `src/tests/test_management_paths.cpp` and passing `native-tests`.
+  - Evidence: expanded host tests in `src/tests/test_management_paths.cpp`; passing `native-tests` (28 tests).
 
-- [ ] ESP-NOW protocol robustness tests (status: In Progress)
+- [x] ESP-NOW protocol robustness tests (status: Done)
   - Acceptance:
     - Invalid packet length/type/version is safely rejected.
     - Sequence stale/duplicate/replay edge cases are covered.
     - Peer MAC filtering behavior is covered for unicast and broadcast fallback modes.
-  - Evidence: dedicated tests in `src/tests/test_codec.cpp` and `src/tests/test_espnow_packets.cpp` + passing `native-tests`.
+  - Evidence: dedicated tests in `src/tests/test_codec.cpp` and `src/tests/test_espnow_packets.cpp`; passing `native-tests`.
 
-- [ ] Config contract freeze (status: In Progress)
+- [x] Config contract freeze (status: Done)
   - Acceptance:
     - Every runtime config key documented with: key name, type, default, range, reboot-required.
     - Controller and thermostat keys separated clearly.
   - Evidence: runtime config contract section added in `docs/deployment-runbook.md`.
 
 ### P1
-- [ ] Release artifact script and verification (status: To Do)
+- [x] Release artifact script and verification (status: Done)
   - Acceptance:
     - One command builds both firmware binaries and records firmware version string from git.
     - Artifact naming includes env + version.
-  - Evidence: script path + usage documented.
+  - Evidence: `scripts/build_release_artifacts.sh`; usage documented in `docs/deployment-runbook.md`.
 
-- [ ] OTA rollout + rollback playbook (status: To Do)
+- [x] OTA rollout + rollback playbook (status: Done)
   - Acceptance:
     - Step-by-step rollout order (controller/display), health checks, and rollback triggers.
     - Includes recovery path when one node is unreachable.
-  - Evidence: runbook section updated.
+  - Evidence: OTA rollout section in `docs/deployment-runbook.md`.
 
-- [ ] Health/diagnostic telemetry parity pass (status: To Do)
+- [x] Health/diagnostic telemetry parity pass (status: Done)
   - Acceptance:
     - Topics for uptime, RSSI, free heap, and last comms timestamps are defined and emitted.
     - Error reason topic(s) defined for MQTT/OTA/ESP-NOW failures.
-  - Evidence: code + topic list in docs.
+  - Evidence: telemetry/error topics in `docs/deployment-runbook.md`; emitted in controller and thermostat MQTT state publishing paths.
 
 ### P2
 - [ ] Fault-injection harness for transport/runtime boundaries (status: To Do)
@@ -73,6 +73,6 @@ Goal: maximize confidence before physical hardware iteration starts.
 
 ## Current Sprint (Pre-Hardware Sprint 1)
 - [x] Land CI workflow for required matrix.
-- [x] Land first config integration test batch.
-- [x] Land first ESP-NOW robustness test batch.
-- [ ] Update deployment runbook with config contract table.
+- [x] Land config integration test coverage (including secret key/redaction classification).
+- [x] Land ESP-NOW robustness test coverage.
+- [x] Update deployment runbook with config contract table.

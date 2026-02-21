@@ -22,6 +22,7 @@
 
 #include "thermostat/thermostat_device_runtime.h"
 #include "thermostat/thermostat_screen_controller.h"
+#include "management_paths.h"
 
 #include <Adafruit_AHTX0.h>
 
@@ -220,6 +221,7 @@ uint32_t g_last_wifi_attempt_ms = 0;
 uint32_t g_first_wifi_attempt_ms = 0;
 uint32_t g_last_mqtt_attempt_ms = 0;
 uint32_t g_last_mqtt_publish_ms = 0;
+uint32_t g_last_mqtt_command_ms = 0;
 bool g_wifi_has_attempted_stored_connect = false;
 bool g_wifi_provisioning_started = false;
 float g_outdoor_temp_c = 6.0f;
@@ -254,6 +256,9 @@ bool g_cfg_reboot_required = false;
 uint16_t *g_screenshot_fb = nullptr;
 uint32_t g_boot_count = 0;
 String g_reset_reason = "unknown";
+String g_last_mqtt_error = "none";
+String g_last_ota_error = "none";
+String g_last_espnow_error = "none";
 
 const char *mode_to_mqtt(FurnaceMode mode) {
   switch (mode) {
@@ -312,42 +317,42 @@ String topic_for(const char *suffix) {
   return out;
 }
 
-void publish_cfg_value(const char *key, const String &value, bool redact) {
+void publish_cfg_value(const char *key, const String &value) {
   if (!g_mqtt.connected()) return;
   String topic = topic_for("cfg");
   topic += "/";
   topic += key;
   topic += "/state";
   const char *payload = value.c_str();
-  if (redact) {
+  if (thermostat::management_paths::is_secret_cfg_key(key)) {
     payload = value.length() > 0 ? "set" : "unset";
   }
   g_mqtt.publish(topic.c_str(), payload, true);
 }
 
 void publish_all_cfg_state() {
-  publish_cfg_value("wifi_ssid", g_cfg_wifi_ssid, false);
-  publish_cfg_value("wifi_password", g_cfg_wifi_password, true);
-  publish_cfg_value("mqtt_host", g_cfg_mqtt_host, false);
-  publish_cfg_value("mqtt_port", String(g_cfg_mqtt_port), false);
-  publish_cfg_value("mqtt_user", g_cfg_mqtt_user, false);
-  publish_cfg_value("mqtt_password", g_cfg_mqtt_password, true);
-  publish_cfg_value("mqtt_client_id", g_cfg_mqtt_client_id, false);
-  publish_cfg_value("mqtt_base_topic", g_cfg_mqtt_base_topic, false);
-  publish_cfg_value("discovery_prefix", g_cfg_discovery_prefix, false);
-  publish_cfg_value("shared_device_id", g_cfg_shared_device_id, false);
-  publish_cfg_value("pirateweather_api_key", g_cfg_pirateweather_api_key, true);
-  publish_cfg_value("pirateweather_zip", g_cfg_pirateweather_zip, false);
-  publish_cfg_value("display_timeout_s", String(g_display_timeout_ms / 1000UL), false);
-  publish_cfg_value("temp_comp_c", String(g_cfg_temp_comp_c, 2), false);
-  publish_cfg_value("temperature_unit", g_cfg_temp_unit_f ? "f" : "c", false);
-  publish_cfg_value("ota_hostname", g_cfg_ota_hostname, false);
-  publish_cfg_value("ota_password", g_cfg_ota_password, true);
-  publish_cfg_value("espnow_channel", String(g_cfg_espnow_channel), false);
-  publish_cfg_value("espnow_peer_mac", g_cfg_espnow_peer_mac, false);
-  publish_cfg_value("espnow_lmk", g_cfg_espnow_lmk, true);
-  publish_cfg_value("controller_timeout_ms", String(g_cfg_controller_timeout_ms), false);
-  publish_cfg_value("reboot_required", g_cfg_reboot_required ? "1" : "0", false);
+  publish_cfg_value("wifi_ssid", g_cfg_wifi_ssid);
+  publish_cfg_value("wifi_password", g_cfg_wifi_password);
+  publish_cfg_value("mqtt_host", g_cfg_mqtt_host);
+  publish_cfg_value("mqtt_port", String(g_cfg_mqtt_port));
+  publish_cfg_value("mqtt_user", g_cfg_mqtt_user);
+  publish_cfg_value("mqtt_password", g_cfg_mqtt_password);
+  publish_cfg_value("mqtt_client_id", g_cfg_mqtt_client_id);
+  publish_cfg_value("mqtt_base_topic", g_cfg_mqtt_base_topic);
+  publish_cfg_value("discovery_prefix", g_cfg_discovery_prefix);
+  publish_cfg_value("shared_device_id", g_cfg_shared_device_id);
+  publish_cfg_value("pirateweather_api_key", g_cfg_pirateweather_api_key);
+  publish_cfg_value("pirateweather_zip", g_cfg_pirateweather_zip);
+  publish_cfg_value("display_timeout_s", String(g_display_timeout_ms / 1000UL));
+  publish_cfg_value("temp_comp_c", String(g_cfg_temp_comp_c, 2));
+  publish_cfg_value("temperature_unit", g_cfg_temp_unit_f ? "f" : "c");
+  publish_cfg_value("ota_hostname", g_cfg_ota_hostname);
+  publish_cfg_value("ota_password", g_cfg_ota_password);
+  publish_cfg_value("espnow_channel", String(g_cfg_espnow_channel));
+  publish_cfg_value("espnow_peer_mac", g_cfg_espnow_peer_mac);
+  publish_cfg_value("espnow_lmk", g_cfg_espnow_lmk);
+  publish_cfg_value("controller_timeout_ms", String(g_cfg_controller_timeout_ms));
+  publish_cfg_value("reboot_required", g_cfg_reboot_required ? "1" : "0");
 }
 
 bool try_update_runtime_config(const String &key, const char *raw_value) {
@@ -458,9 +463,7 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
   }
   if (!known) return false;
   if (g_mqtt.connected()) {
-    publish_cfg_value(key.c_str(), value,
-                      key == "wifi_password" || key == "mqtt_password" ||
-                          key == "ota_password" || key == "espnow_lmk");
+    publish_cfg_value(key.c_str(), value);
   }
   return true;
 }
@@ -971,6 +974,26 @@ void mqtt_publish_state() {
   g_mqtt.publish(topic_for("state/reset_reason").c_str(), g_reset_reason.c_str(), true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
   g_mqtt.publish(topic_for("state/uptime_s").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_last_mqtt_command_ms));
+  g_mqtt.publish(topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_runtime->last_controller_heartbeat_ms()));
+  g_mqtt.publish(topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_runtime->espnow_send_ok_count()));
+  g_mqtt.publish(topic_for("state/espnow_send_ok_count").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_runtime->espnow_send_fail_count()));
+  g_mqtt.publish(topic_for("state/espnow_send_fail_count").c_str(), buf, true);
+  if (g_last_espnow_error != "begin_failed") {
+    g_last_espnow_error = g_runtime->espnow_send_fail_count() > 0 ? "send_failed" : "none";
+  }
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(esp_get_free_heap_size()));
+  g_mqtt.publish(topic_for("state/free_heap_bytes").c_str(), buf, true);
+  g_mqtt.publish(topic_for("state/error_mqtt").c_str(), g_last_mqtt_error.c_str(), true);
+  g_mqtt.publish(topic_for("state/error_ota").c_str(), g_last_ota_error.c_str(), true);
+  g_mqtt.publish(topic_for("state/error_espnow").c_str(), g_last_espnow_error.c_str(), true);
 
   if (WiFi.status() == WL_CONNECTED) {
     g_mqtt.publish(topic_for("state/wifi_ip").c_str(), WiFi.localIP().toString().c_str(), true);
@@ -1069,6 +1092,9 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
 
   if (g_runtime == nullptr) return;
+  if (topic_str.startsWith(topic_for("cmd/"))) {
+    g_last_mqtt_command_ms = now;
+  }
 
   if (topic_str == topic_for("cmd/mode")) {
     if (strcmp(normalized, "heat") == 0) {
@@ -1223,7 +1249,11 @@ void ensure_mqtt_connected(uint32_t now_ms) {
                         g_cfg_mqtt_password.c_str());
   }
 
-  if (!ok) return;
+  if (!ok) {
+    g_last_mqtt_error = String("connect_state_") + String(g_mqtt.state());
+    return;
+  }
+  g_last_mqtt_error = "none";
 
   g_mqtt.subscribe(topic_for("cmd/mode").c_str());
   g_mqtt.subscribe(topic_for("cmd/fan_mode").c_str());
@@ -1247,6 +1277,10 @@ void ensure_ota_ready() {
     if (g_cfg_ota_password.length() > 0) {
       ArduinoOTA.setPassword(g_cfg_ota_password.c_str());
     }
+    ArduinoOTA.onError([](ota_error_t error) {
+      g_last_ota_error = String("ota_error_") + String(static_cast<unsigned>(error));
+    });
+    ArduinoOTA.onEnd([]() { g_last_ota_error = "none"; });
     ArduinoOTA.begin();
     g_ota_started = true;
   }
@@ -1772,7 +1806,8 @@ void thermostat_firmware_setup() {
   init_display_and_lvgl();
   create_ui();
 
-  g_runtime->begin();
+  const bool runtime_ok = g_runtime->begin();
+  g_last_espnow_error = runtime_ok ? "none" : "begin_failed";
   g_runtime->set_local_temperature_compensation_c(g_cfg_temp_comp_c);
   g_runtime->set_temperature_unit(g_cfg_temp_unit_f ? TemperatureUnit::Fahrenheit
                                                     : TemperatureUnit::Celsius);

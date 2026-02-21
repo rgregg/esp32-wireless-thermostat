@@ -31,7 +31,7 @@ Use this checklist after flashing both devices.
 
 ## Transport Checks
 - [ ] ESP-NOW path works when MQTT is unavailable.
-- [ ] MQTT path updates controller state from display state topics.
+- [ ] MQTT path updates controller state from display packed command mirror (`state/packed_command`).
 - [ ] While MQTT-primary is active, ESP-NOW commands are gated on controller.
 - [ ] After MQTT outage, ESP-NOW fallback takes over.
 - [ ] After MQTT restore, controller returns to MQTT-primary mode.
