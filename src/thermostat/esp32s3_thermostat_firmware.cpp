@@ -259,6 +259,8 @@ String g_reset_reason = "unknown";
 String g_last_mqtt_error = "none";
 String g_last_ota_error = "none";
 String g_last_espnow_error = "none";
+bool g_reboot_requested = false;
+uint32_t g_reboot_at_ms = 0;
 
 const char *mode_to_mqtt(FurnaceMode mode) {
   switch (mode) {
@@ -470,6 +472,11 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
 
 bool parse_bool_payload(const char *value) {
   return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0;
+}
+
+void schedule_reboot() {
+  g_reboot_requested = true;
+  g_reboot_at_ms = millis() + 250;
 }
 
 void lower_in_place(char *text) {
@@ -797,6 +804,11 @@ void web_handle_config_post() {
   g_web.send(200, "text/plain", "updated=" + String(updated) + "\n");
 }
 
+void web_handle_reboot_post() {
+  schedule_reboot();
+  g_web.send(200, "text/plain", "rebooting\n");
+}
+
 void write_u16_le(uint8_t *out, uint16_t value) {
   out[0] = static_cast<uint8_t>(value & 0xFFu);
   out[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
@@ -913,6 +925,7 @@ void web_handle_root() {
   html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
 
   html += "<p>reboot_required=" + String(g_cfg_reboot_required ? "true" : "false") + "</p>";
+  html += "<form method=\"post\" action=\"/reboot\"><button type=\"submit\">Reboot Display</button></form>";
   html += "<p><img src=\"/screenshot\" style=\"max-width:95vw;border:1px solid #ccc\"></p>";
   html += "</body></html>";
   g_web.send(200, "text/html", html);
@@ -924,6 +937,7 @@ void ensure_web_ready() {
     g_web.on("/", HTTP_GET, web_handle_root);
     g_web.on("/config", HTTP_GET, web_handle_config_get);
     g_web.on("/config", HTTP_POST, web_handle_config_post);
+    g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
     g_web.on("/screenshot", HTTP_GET, web_handle_screenshot);
     g_web.begin();
     g_web_started = true;
@@ -1155,6 +1169,16 @@ void mqtt_publish_discovery() {
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(reset_seq_config.c_str(), payload, true);
 
+  const String reboot_config =
+      g_cfg_discovery_prefix + "/button/" + node + "_display_reboot/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Reboot\","
+           "\"uniq_id\":\"%s_display_reboot\","
+           "\"cmd_t\":\"%s/cmd/reboot\",\"pl_prs\":\"1\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(reboot_config.c_str(), payload, true);
+
   g_mqtt_discovery_sent = true;
 }
 
@@ -1217,6 +1241,10 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   } else if (topic_str == topic_for("cmd/sync")) {
     if (parse_bool_payload(normalized)) {
       g_runtime->request_sync(now);
+    }
+  } else if (topic_str == topic_for("cmd/reboot")) {
+    if (parse_bool_payload(normalized)) {
+      schedule_reboot();
     }
   } else if (topic_str == topic_for("cmd/reset_sequence")) {
     if (parse_bool_payload(normalized)) {
@@ -1357,6 +1385,7 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/target_temp_c").c_str());
   g_mqtt.subscribe(topic_for("cmd/unit").c_str());
   g_mqtt.subscribe(topic_for("cmd/sync").c_str());
+  g_mqtt.subscribe(topic_for("cmd/reboot").c_str());
   g_mqtt.subscribe(topic_for("cmd/reset_sequence").c_str());
   g_mqtt.subscribe(topic_for("cmd/filter_reset").c_str());
   g_mqtt.subscribe(topic_for("cmd/temp_comp_c").c_str());
@@ -1531,18 +1560,97 @@ void refresh_ui() {
 
   lv_label_set_text(g_screen_time_label, current_time_text().c_str());
   if (g_settings_diag_label != nullptr) {
-    char diag[256];
-    String ip_str = WiFi.isConnected() ? WiFi.localIP().toString() : String("N/A");
-    String mac_str = WiFi.macAddress();
-    String ssid_str = WiFi.isConnected() ? WiFi.SSID() : String("N/A");
-    const char *ssid = WiFi.isConnected() ? WiFi.SSID().c_str() : "N/A";
-    const char *ip = ip_str.c_str();
-    const char *mac = mac_str.c_str();
-    ssid = ssid_str.c_str();
-    snprintf(diag, sizeof(diag),
-             "IP: %s\nMAC: %s\nSSID: %s\nCH: %d RSSI: %d\nFW: %s",
-             ip, mac, ssid, WiFi.channel(), WiFi.RSSI(), THERMOSTAT_FIRMWARE_VERSION);
-    lv_label_set_text(g_settings_diag_label, diag);
+    const bool wifi_connected = WiFi.status() == WL_CONNECTED;
+    const bool mqtt_connected = g_mqtt.connected();
+    const uint32_t uptime_s = now / 1000UL;
+    const uint32_t last_mqtt_ms = g_last_mqtt_command_ms;
+    const uint32_t last_ctrl_hb_ms = g_runtime->last_controller_heartbeat_ms();
+    const uint32_t since_mqtt_ms = last_mqtt_ms > 0 ? (now - last_mqtt_ms) : 0;
+    const uint32_t since_ctrl_ms = last_ctrl_hb_ms > 0 ? (now - last_ctrl_hb_ms) : 0;
+
+    String diag;
+    diag.reserve(1800);
+    diag += "FW: ";
+    diag += THERMOSTAT_FIRMWARE_VERSION;
+    diag += "  boot_count: ";
+    diag += String(g_boot_count);
+    diag += "  reset: ";
+    diag += g_reset_reason;
+    diag += "\n";
+    diag += "uptime_s: ";
+    diag += String(uptime_s);
+    diag += "  free_heap: ";
+    diag += String(static_cast<unsigned long>(esp_get_free_heap_size()));
+    diag += "B\n";
+    diag += "wifi_connected: ";
+    diag += wifi_connected ? "yes" : "no";
+    diag += "  ip: ";
+    diag += wifi_connected ? WiFi.localIP().toString() : String("N/A");
+    diag += "\n";
+    diag += "wifi_ssid: ";
+    diag += wifi_connected ? WiFi.SSID() : String("N/A");
+    diag += "  mac: ";
+    diag += WiFi.macAddress();
+    diag += "\n";
+    diag += "wifi_ch: ";
+    diag += String(wifi_connected ? WiFi.channel() : 0);
+    diag += "  wifi_rssi_dbm: ";
+    diag += String(wifi_connected ? WiFi.RSSI() : 0);
+    diag += "\n";
+    diag += "mqtt_connected: ";
+    diag += mqtt_connected ? "yes" : "no";
+    diag += "  mqtt_state: ";
+    diag += String(g_mqtt.state());
+    diag += "\n";
+    diag += "mqtt_host: ";
+    diag += g_cfg_mqtt_host;
+    diag += ":";
+    diag += String(g_cfg_mqtt_port);
+    diag += "  client_id: ";
+    diag += g_cfg_mqtt_client_id;
+    diag += "\n";
+    diag += "mqtt_base_topic: ";
+    diag += g_cfg_mqtt_base_topic;
+    diag += "\n";
+    diag += "last_mqtt_cmd_ms: ";
+    diag += String(last_mqtt_ms);
+    diag += "  since_last_mqtt_ms: ";
+    diag += String(since_mqtt_ms);
+    diag += "\n";
+    diag += "last_ctrl_hb_ms: ";
+    diag += String(last_ctrl_hb_ms);
+    diag += "  since_last_ctrl_hb_ms: ";
+    diag += String(since_ctrl_ms);
+    diag += "\n";
+    diag += "espnow_channel: ";
+    diag += String(g_cfg_espnow_channel);
+    diag += "  peer_mac: ";
+    diag += g_cfg_espnow_peer_mac;
+    diag += "\n";
+    diag += "espnow_tx_ok: ";
+    diag += String(static_cast<unsigned long>(g_runtime->espnow_send_ok_count()));
+    diag += "  espnow_tx_fail: ";
+    diag += String(static_cast<unsigned long>(g_runtime->espnow_send_fail_count()));
+    diag += "\n";
+    diag += "errors mqtt/ota/espnow: ";
+    diag += g_last_mqtt_error;
+    diag += " / ";
+    diag += g_last_ota_error;
+    diag += " / ";
+    diag += g_last_espnow_error;
+    diag += "\n";
+    diag += "temp_unit: ";
+    diag += g_cfg_temp_unit_f ? "F" : "C";
+    diag += "  display_timeout_s: ";
+    diag += String(g_display_timeout_ms / 1000UL);
+    diag += "  temp_comp_c: ";
+    diag += String(g_cfg_temp_comp_c, 2);
+    diag += "\n";
+    diag += "reboot_required: ";
+    diag += g_cfg_reboot_required ? "true" : "false";
+    diag += "  reboot_pending: ";
+    diag += g_reboot_requested ? "true" : "false";
+    lv_label_set_text(g_settings_diag_label, diag.c_str());
   }
 
   g_screen.on_mode_changed(g_runtime->local_mode());
@@ -1913,6 +2021,9 @@ void thermostat_firmware_setup() {
 
 void thermostat_firmware_loop() {
   const uint32_t now = millis();
+  if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
+    ESP.restart();
+  }
 
   if ((now - g_last_ui_tick_ms) >= kUiTickMs) {
     g_last_ui_tick_ms = now;
