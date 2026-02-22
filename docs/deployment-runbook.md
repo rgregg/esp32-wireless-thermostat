@@ -22,6 +22,9 @@
 - Display screenshot: `http://<display-ip>/screenshot`
 - MQTT path smoke verifier (with broker + both devices online):
   - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan`
+- Sequence recovery command (no reboot required):
+  - Publish `1` to `thermostat/furnace-controller/cmd/reset_sequence`
+  - Controller resets its command sequence filter and forwards reset to display.
 
 ## Release Artifacts
 - Build both firmware binaries with one command:

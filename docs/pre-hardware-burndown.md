@@ -31,7 +31,7 @@ Goal: maximize confidence before physical hardware iteration starts.
     - Covers MQTT config set/state routing for controller and thermostat topics.
     - Covers controller proxy updates for display config over MQTT.
     - Covers redaction behavior for password/secret fields in `/config` and state topics.
-  - Evidence: expanded host tests in `src/tests/test_management_paths.cpp`; passing `native-tests` (28 tests).
+  - Evidence: expanded host tests in `src/tests/test_management_paths.cpp`; passing `native-tests` (30 tests).
 
 - [x] ESP-NOW protocol robustness tests (status: Done)
   - Acceptance:

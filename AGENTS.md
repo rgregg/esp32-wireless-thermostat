@@ -36,6 +36,9 @@
 - Thermostat base: `thermostat/furnace-display`
 - Commands: `<base>/cmd/...`
 - State: `<base>/state/...`
+- Sequence recovery command:
+  - Publish `1` to `thermostat/furnace-controller/cmd/reset_sequence`
+  - Controller resets sequence filtering and forwards reset to display
 - Protocol-aligned command path:
   - Controller accepts packed command words on: `<controller-base>/cmd/packed_word`
   - Thermostat publishes mirrored packed command words on: `<thermostat-base>/state/packed_command`
