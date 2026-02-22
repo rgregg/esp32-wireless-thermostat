@@ -56,6 +56,10 @@ constexpr uint32_t kProvisionStartDelayMs = 15000;
 constexpr uint32_t kMqttPublishMs = 10000;
 constexpr uint32_t kWeatherPollMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kHttpTimeoutMs = 8000;
+constexpr uint32_t kDisplayInitSettleMs = 150;
+constexpr uint32_t kBacklightEnableDelayMs = 400;
+constexpr uint32_t kRebootDelayMs = 1000;
+constexpr uint32_t kRebootPanelOffDelayMs = 200;
 
 #ifndef THERMOSTAT_WIFI_SSID
 #define THERMOSTAT_WIFI_SSID ""
@@ -123,6 +127,14 @@ constexpr uint32_t kHttpTimeoutMs = 8000;
 
 #ifndef THERMOSTAT_DISPLAY_TIMEOUT_S
 #define THERMOSTAT_DISPLAY_TIMEOUT_S 300
+#endif
+
+#ifndef THERMOSTAT_BACKLIGHT_ACTIVE_PCT
+#define THERMOSTAT_BACKLIGHT_ACTIVE_PCT 100
+#endif
+
+#ifndef THERMOSTAT_BACKLIGHT_SCREENSAVER_PCT
+#define THERMOSTAT_BACKLIGHT_SCREENSAVER_PCT 16
 #endif
 
 #ifndef THERMOSTAT_TIME_TZ
@@ -210,6 +222,7 @@ lv_obj_t *g_setpoint_label = nullptr;
 lv_obj_t *g_weather_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_settings_diag_label = nullptr;
+lv_obj_t *g_settings_display_label = nullptr;
 
 lv_obj_t *g_setpoint_column = nullptr;
 
@@ -229,6 +242,8 @@ std::string g_weather_condition = "Cloudy";
 bool g_have_weather_data = false;
 uint32_t g_last_weather_poll_ms = 0;
 uint32_t g_display_timeout_ms = static_cast<uint32_t>(THERMOSTAT_DISPLAY_TIMEOUT_S) * 1000UL;
+uint8_t g_cfg_backlight_active_pct = THERMOSTAT_BACKLIGHT_ACTIVE_PCT;
+uint8_t g_cfg_backlight_screensaver_pct = THERMOSTAT_BACKLIGHT_SCREENSAVER_PCT;
 bool g_ota_started = false;
 float g_cfg_temp_comp_c = 0.0f;
 bool g_cfg_temp_unit_f = false;
@@ -261,6 +276,25 @@ String g_last_ota_error = "none";
 String g_last_espnow_error = "none";
 bool g_reboot_requested = false;
 uint32_t g_reboot_at_ms = 0;
+bool g_backlight_enabled = false;
+uint32_t g_backlight_enable_at_ms = 0;
+
+uint8_t clamp_percent(long value) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 100) {
+    return 100;
+  }
+  return static_cast<uint8_t>(value);
+}
+
+uint8_t percent_to_duty(uint8_t percent) {
+  if (percent >= 100) {
+    return 255;
+  }
+  return static_cast<uint8_t>((static_cast<uint16_t>(percent) * 255U + 50U) / 100U);
+}
 
 const char *mode_to_mqtt(FurnaceMode mode) {
   switch (mode) {
@@ -308,6 +342,10 @@ void load_runtime_config() {
   g_cfg_controller_timeout_ms = g_cfg.getUInt("ctrl_to", g_cfg_controller_timeout_ms);
   const uint32_t display_timeout_s = g_cfg.getUInt("disp_to_s", THERMOSTAT_DISPLAY_TIMEOUT_S);
   g_display_timeout_ms = display_timeout_s * 1000UL;
+  g_cfg_backlight_active_pct =
+      clamp_percent(g_cfg.getUChar("bl_act", g_cfg_backlight_active_pct));
+  g_cfg_backlight_screensaver_pct =
+      clamp_percent(g_cfg.getUChar("bl_dim", g_cfg_backlight_screensaver_pct));
   g_cfg_temp_comp_c = g_cfg.getFloat("temp_comp", 0.0f);
   g_cfg_temp_unit_f = g_cfg.getBool("temp_u_f", false);
 }
@@ -346,6 +384,8 @@ void publish_all_cfg_state() {
   publish_cfg_value("pirateweather_api_key", g_cfg_pirateweather_api_key);
   publish_cfg_value("pirateweather_zip", g_cfg_pirateweather_zip);
   publish_cfg_value("display_timeout_s", String(g_display_timeout_ms / 1000UL));
+  publish_cfg_value("backlight_active_pct", String(g_cfg_backlight_active_pct));
+  publish_cfg_value("backlight_screensaver_pct", String(g_cfg_backlight_screensaver_pct));
   publish_cfg_value("temp_comp_c", String(g_cfg_temp_comp_c, 2));
   publish_cfg_value("temperature_unit", g_cfg_temp_unit_f ? "f" : "c");
   publish_cfg_value("ota_hostname", g_cfg_ota_hostname);
@@ -421,6 +461,12 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_display_timeout_ms = static_cast<uint32_t>(seconds) * 1000UL;
     g_cfg.putUInt("disp_to_s", static_cast<uint32_t>(seconds));
     g_screen.set_display_timeout_ms(g_display_timeout_ms);
+  } else if (key == "backlight_active_pct") {
+    g_cfg_backlight_active_pct = clamp_percent(atol(raw_value));
+    g_cfg.putUChar("bl_act", g_cfg_backlight_active_pct);
+  } else if (key == "backlight_screensaver_pct") {
+    g_cfg_backlight_screensaver_pct = clamp_percent(atol(raw_value));
+    g_cfg.putUChar("bl_dim", g_cfg_backlight_screensaver_pct);
   } else if (key == "temp_comp_c") {
     g_cfg_temp_comp_c = static_cast<float>(atof(raw_value));
     g_cfg.putFloat("temp_comp", g_cfg_temp_comp_c);
@@ -464,8 +510,16 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     known = false;
   }
   if (!known) return false;
+  String state_value(value);
+  if (key == "display_timeout_s") {
+    state_value = String(g_display_timeout_ms / 1000UL);
+  } else if (key == "backlight_active_pct") {
+    state_value = String(g_cfg_backlight_active_pct);
+  } else if (key == "backlight_screensaver_pct") {
+    state_value = String(g_cfg_backlight_screensaver_pct);
+  }
   if (g_mqtt.connected()) {
-    publish_cfg_value(key.c_str(), value);
+    publish_cfg_value(key.c_str(), state_value);
   }
   return true;
 }
@@ -476,7 +530,14 @@ bool parse_bool_payload(const char *value) {
 
 void schedule_reboot() {
   g_reboot_requested = true;
-  g_reboot_at_ms = millis() + 250;
+  g_reboot_at_ms = millis() + kRebootDelayMs;
+}
+
+void shutdown_display_for_reboot() {
+  ledcWrite(kBacklightChannel, 0);
+  if (g_panel != nullptr) {
+    esp_lcd_panel_disp_on_off(g_panel, false);
+  }
 }
 
 void lower_in_place(char *text) {
@@ -781,6 +842,8 @@ void web_handle_config_get() {
           String(g_cfg_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
   body += "\"pirateweather_zip\":\"" + json_escape(g_cfg_pirateweather_zip) + "\",";
   body += "\"display_timeout_s\":" + String(g_display_timeout_ms / 1000UL) + ",";
+  body += "\"backlight_active_pct\":" + String(g_cfg_backlight_active_pct) + ",";
+  body += "\"backlight_screensaver_pct\":" + String(g_cfg_backlight_screensaver_pct) + ",";
   body += "\"temp_comp_c\":" + String(g_cfg_temp_comp_c, 2) + ",";
   body += "\"temperature_unit\":\"" + String(g_cfg_temp_unit_f ? "f" : "c") + "\",";
   body += "\"ota_hostname\":\"" + json_escape(g_cfg_ota_hostname) + "\",";
@@ -905,6 +968,10 @@ void web_handle_root() {
   html += "<form method=\"post\" action=\"/config\">";
   html += "display_timeout_s: <input name=\"display_timeout_s\" type=\"number\" min=\"30\" max=\"600\" step=\"1\" value=\"" +
           String(g_display_timeout_ms / 1000UL) + "\"><br>";
+  html += "backlight_active_pct: <input name=\"backlight_active_pct\" type=\"number\" min=\"0\" max=\"100\" step=\"1\" value=\"" +
+          String(g_cfg_backlight_active_pct) + "\"><br>";
+  html += "backlight_screensaver_pct: <input name=\"backlight_screensaver_pct\" type=\"number\" min=\"0\" max=\"100\" step=\"1\" value=\"" +
+          String(g_cfg_backlight_screensaver_pct) + "\"><br>";
   html += "temperature_unit (c/f): <input name=\"temperature_unit\" pattern=\"^(c|f|celsius|fahrenheit)$\" title=\"Use c, f, celsius, or fahrenheit\" value=\"" +
           String(g_cfg_temp_unit_f ? "f" : "c") + "\"><br>";
   html += "<button type=\"submit\">Save Display</button></form></fieldset>";
@@ -982,6 +1049,10 @@ void mqtt_publish_state() {
   g_mqtt.publish(topic_for("state/temp_comp_c").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_display_timeout_ms / 1000UL));
   g_mqtt.publish(topic_for("state/display_timeout_s").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_cfg_backlight_active_pct));
+  g_mqtt.publish(topic_for("state/backlight_active_pct").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_cfg_backlight_screensaver_pct));
+  g_mqtt.publish(topic_for("state/backlight_screensaver_pct").c_str(), buf, true);
   g_mqtt.publish(topic_for("state/firmware_version").c_str(), THERMOSTAT_FIRMWARE_VERSION, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_boot_count));
   g_mqtt.publish(topic_for("state/boot_count").c_str(), buf, true);
@@ -1069,6 +1140,29 @@ void mqtt_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(timeout_config.c_str(), payload, true);
+
+  const String brightness_config = g_cfg_discovery_prefix + "/number/" + node +
+                                   "_display_backlight_active/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Brightness\",\"uniq_id\":\"%s_display_backlight_active\","
+           "\"cmd_t\":\"%s/cmd/backlight_active_pct\","
+           "\"stat_t\":\"%s/state/backlight_active_pct\","
+           "\"min\":0,\"max\":100,\"step\":1,\"mode\":\"box\",\"unit_of_meas\":\"%%\","
+           "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(brightness_config.c_str(), payload, true);
+
+  const String dim_brightness_config = g_cfg_discovery_prefix + "/number/" + node +
+                                       "_display_backlight_screensaver/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Screensaver Brightness\","
+           "\"uniq_id\":\"%s_display_backlight_screensaver\","
+           "\"cmd_t\":\"%s/cmd/backlight_screensaver_pct\","
+           "\"stat_t\":\"%s/state/backlight_screensaver_pct\","
+           "\"min\":0,\"max\":100,\"step\":1,\"mode\":\"box\",\"unit_of_meas\":\"%%\","
+           "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(dim_brightness_config.c_str(), payload, true);
 
   const String fw_config = g_cfg_discovery_prefix + "/sensor/" + node + "_firmware/config";
   snprintf(payload, sizeof(payload),
@@ -1270,6 +1364,16 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       g_cfg.putUInt("disp_to_s", static_cast<uint32_t>(seconds));
     }
     g_screen.set_display_timeout_ms(g_display_timeout_ms);
+  } else if (topic_str == topic_for("cmd/backlight_active_pct")) {
+    g_cfg_backlight_active_pct = clamp_percent(atol(value));
+    if (g_cfg_ready) {
+      g_cfg.putUChar("bl_act", g_cfg_backlight_active_pct);
+    }
+  } else if (topic_str == topic_for("cmd/backlight_screensaver_pct")) {
+    g_cfg_backlight_screensaver_pct = clamp_percent(atol(value));
+    if (g_cfg_ready) {
+      g_cfg.putUChar("bl_dim", g_cfg_backlight_screensaver_pct);
+    }
   }
 
   mqtt_publish_state();
@@ -1390,6 +1494,8 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/filter_reset").c_str());
   g_mqtt.subscribe(topic_for("cmd/temp_comp_c").c_str());
   g_mqtt.subscribe(topic_for("cmd/display_timeout_s").c_str());
+  g_mqtt.subscribe(topic_for("cmd/backlight_active_pct").c_str());
+  g_mqtt.subscribe(topic_for("cmd/backlight_screensaver_pct").c_str());
   g_mqtt.subscribe(topic_for("cfg/+/set").c_str());
 
   mqtt_publish_discovery();
@@ -1543,7 +1649,13 @@ void show_page(ThermostatPage page) {
 }
 
 void apply_backlight(bool screensaver_active) {
-  const uint8_t duty = screensaver_active ? 40 : 255;
+  if (!g_backlight_enabled) {
+    ledcWrite(kBacklightChannel, 0);
+    return;
+  }
+  const uint8_t duty =
+      screensaver_active ? percent_to_duty(g_cfg_backlight_screensaver_pct)
+                         : percent_to_duty(g_cfg_backlight_active_pct);
   ledcWrite(kBacklightChannel, duty);
 }
 
@@ -1643,6 +1755,10 @@ void refresh_ui() {
     diag += g_cfg_temp_unit_f ? "F" : "C";
     diag += "  display_timeout_s: ";
     diag += String(g_display_timeout_ms / 1000UL);
+    diag += "  brightness/dim_pct: ";
+    diag += String(g_cfg_backlight_active_pct);
+    diag += "/";
+    diag += String(g_cfg_backlight_screensaver_pct);
     diag += "  temp_comp_c: ";
     diag += String(g_cfg_temp_comp_c, 2);
     diag += "\n";
@@ -1651,6 +1767,18 @@ void refresh_ui() {
     diag += "  reboot_pending: ";
     diag += g_reboot_requested ? "true" : "false";
     lv_label_set_text(g_settings_diag_label, diag.c_str());
+  }
+  if (g_settings_display_label != nullptr) {
+    String display_text;
+    display_text.reserve(96);
+    display_text += "Display Timeout: ";
+    display_text += String(g_display_timeout_ms / 1000UL);
+    display_text += "s   Brightness: ";
+    display_text += String(g_cfg_backlight_active_pct);
+    display_text += "%   Screensaver: ";
+    display_text += String(g_cfg_backlight_screensaver_pct);
+    display_text += "%";
+    lv_label_set_text(g_settings_display_label, display_text.c_str());
   }
 
   g_screen.on_mode_changed(g_runtime->local_mode());
@@ -1709,9 +1837,10 @@ void btn_fan_cb(lv_event_t *e) {
 }
 
 void btn_unit_cb(lv_event_t *e) {
-  if (g_runtime == nullptr) return;
   auto unit = static_cast<TemperatureUnit>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-  g_runtime->set_temperature_unit(unit);
+  const char *raw = (unit == TemperatureUnit::Fahrenheit) ? "f" : "c";
+  try_update_runtime_config("temperature_unit", raw);
+  mqtt_publish_state();
 }
 
 void btn_sync_cb(lv_event_t *) {
@@ -1722,6 +1851,49 @@ void btn_sync_cb(lv_event_t *) {
 void btn_filter_reset_cb(lv_event_t *) {
   if (g_runtime == nullptr) return;
   g_runtime->request_filter_reset(millis());
+}
+
+void apply_runtime_u32_setting(const char *key, uint32_t value) {
+  String raw(value);
+  if (try_update_runtime_config(key, raw.c_str())) {
+    mqtt_publish_state();
+  }
+}
+
+void btn_timeout_down_cb(lv_event_t *) {
+  uint32_t seconds = g_display_timeout_ms / 1000UL;
+  seconds = (seconds <= 30U) ? 30U : (seconds - 30U);
+  apply_runtime_u32_setting("display_timeout_s", seconds);
+}
+
+void btn_timeout_up_cb(lv_event_t *) {
+  uint32_t seconds = g_display_timeout_ms / 1000UL;
+  seconds = (seconds >= 600U) ? 600U : (seconds + 30U);
+  apply_runtime_u32_setting("display_timeout_s", seconds);
+}
+
+void btn_brightness_down_cb(lv_event_t *) {
+  uint32_t percent = g_cfg_backlight_active_pct;
+  percent = (percent <= 5U) ? 0U : (percent - 5U);
+  apply_runtime_u32_setting("backlight_active_pct", percent);
+}
+
+void btn_brightness_up_cb(lv_event_t *) {
+  uint32_t percent = g_cfg_backlight_active_pct;
+  percent = (percent >= 95U) ? 100U : (percent + 5U);
+  apply_runtime_u32_setting("backlight_active_pct", percent);
+}
+
+void btn_dim_down_cb(lv_event_t *) {
+  uint32_t percent = g_cfg_backlight_screensaver_pct;
+  percent = (percent <= 5U) ? 0U : (percent - 5U);
+  apply_runtime_u32_setting("backlight_screensaver_pct", percent);
+}
+
+void btn_dim_up_cb(lv_event_t *) {
+  uint32_t percent = g_cfg_backlight_screensaver_pct;
+  percent = (percent >= 95U) ? 100U : (percent + 5U);
+  apply_runtime_u32_setting("backlight_screensaver_pct", percent);
 }
 
 lv_obj_t *make_page() {
@@ -1843,9 +2015,51 @@ void create_ui() {
   lv_obj_add_event_cb(filter_btn, btn_filter_reset_cb, LV_EVENT_CLICKED, nullptr);
   lv_label_set_text(lv_label_create(filter_btn), "Filter Reset");
 
+  lv_obj_t *timeout_down_btn = lv_btn_create(g_settings_page);
+  lv_obj_set_size(timeout_down_btn, 80, 44);
+  lv_obj_align(timeout_down_btn, LV_ALIGN_TOP_LEFT, 20, 180);
+  lv_obj_add_event_cb(timeout_down_btn, btn_timeout_down_cb, LV_EVENT_CLICKED, nullptr);
+  lv_label_set_text(lv_label_create(timeout_down_btn), "T-");
+
+  lv_obj_t *timeout_up_btn = lv_btn_create(g_settings_page);
+  lv_obj_set_size(timeout_up_btn, 80, 44);
+  lv_obj_align(timeout_up_btn, LV_ALIGN_TOP_LEFT, 110, 180);
+  lv_obj_add_event_cb(timeout_up_btn, btn_timeout_up_cb, LV_EVENT_CLICKED, nullptr);
+  lv_label_set_text(lv_label_create(timeout_up_btn), "T+");
+
+  lv_obj_t *brightness_down_btn = lv_btn_create(g_settings_page);
+  lv_obj_set_size(brightness_down_btn, 80, 44);
+  lv_obj_align(brightness_down_btn, LV_ALIGN_TOP_LEFT, 220, 180);
+  lv_obj_add_event_cb(brightness_down_btn, btn_brightness_down_cb, LV_EVENT_CLICKED, nullptr);
+  lv_label_set_text(lv_label_create(brightness_down_btn), "B-");
+
+  lv_obj_t *brightness_up_btn = lv_btn_create(g_settings_page);
+  lv_obj_set_size(brightness_up_btn, 80, 44);
+  lv_obj_align(brightness_up_btn, LV_ALIGN_TOP_LEFT, 310, 180);
+  lv_obj_add_event_cb(brightness_up_btn, btn_brightness_up_cb, LV_EVENT_CLICKED, nullptr);
+  lv_label_set_text(lv_label_create(brightness_up_btn), "B+");
+
+  lv_obj_t *dim_down_btn = lv_btn_create(g_settings_page);
+  lv_obj_set_size(dim_down_btn, 80, 44);
+  lv_obj_align(dim_down_btn, LV_ALIGN_TOP_LEFT, 420, 180);
+  lv_obj_add_event_cb(dim_down_btn, btn_dim_down_cb, LV_EVENT_CLICKED, nullptr);
+  lv_label_set_text(lv_label_create(dim_down_btn), "S-");
+
+  lv_obj_t *dim_up_btn = lv_btn_create(g_settings_page);
+  lv_obj_set_size(dim_up_btn, 80, 44);
+  lv_obj_align(dim_up_btn, LV_ALIGN_TOP_LEFT, 510, 180);
+  lv_obj_add_event_cb(dim_up_btn, btn_dim_up_cb, LV_EVENT_CLICKED, nullptr);
+  lv_label_set_text(lv_label_create(dim_up_btn), "S+");
+
+  g_settings_display_label = lv_label_create(g_settings_page);
+  lv_obj_set_width(g_settings_display_label, 760);
+  lv_obj_align(g_settings_display_label, LV_ALIGN_TOP_LEFT, 20, 232);
+  lv_label_set_long_mode(g_settings_display_label, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(g_settings_display_label, "Display settings...");
+
   g_settings_diag_label = lv_label_create(g_settings_page);
   lv_obj_set_width(g_settings_diag_label, 760);
-  lv_obj_align(g_settings_diag_label, LV_ALIGN_TOP_LEFT, 20, 180);
+  lv_obj_align(g_settings_diag_label, LV_ALIGN_TOP_LEFT, 20, 280);
   lv_label_set_long_mode(g_settings_diag_label, LV_LABEL_LONG_WRAP);
   lv_label_set_text(g_settings_diag_label, "Diagnostics...");
 
@@ -1898,6 +2112,7 @@ void init_display_and_lvgl() {
   panel_config.sram_trans_align = 4;
   panel_config.flags.fb_in_psram = 1;
 
+  delay(kDisplayInitSettleMs);
   if (esp_lcd_new_rgb_panel(&panel_config, &g_panel) == ESP_OK) {
     esp_lcd_panel_reset(g_panel);
     esp_lcd_panel_init(g_panel);
@@ -1933,7 +2148,9 @@ void init_display_and_lvgl() {
 void init_backlight() {
   ledcSetup(kBacklightChannel, kBacklightFreq, kBacklightResolution);
   ledcAttachPin(kBacklightPin, kBacklightChannel);
-  ledcWrite(kBacklightChannel, 255);
+  ledcWrite(kBacklightChannel, 0);
+  g_backlight_enabled = false;
+  g_backlight_enable_at_ms = 0;
 }
 
 void init_sensors() {
@@ -2011,6 +2228,7 @@ void thermostat_firmware_setup() {
   init_network();
   init_display_and_lvgl();
   create_ui();
+  g_backlight_enable_at_ms = millis() + kBacklightEnableDelayMs;
 
   const bool runtime_ok = g_runtime->begin();
   g_last_espnow_error = runtime_ok ? "none" : "begin_failed";
@@ -2022,7 +2240,16 @@ void thermostat_firmware_setup() {
 void thermostat_firmware_loop() {
   const uint32_t now = millis();
   if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
+    shutdown_display_for_reboot();
+    delay(kRebootPanelOffDelayMs);
     ESP.restart();
+    return;
+  }
+
+  if (!g_backlight_enabled && g_backlight_enable_at_ms > 0 &&
+      static_cast<int32_t>(now - g_backlight_enable_at_ms) >= 0) {
+    g_backlight_enabled = true;
+    apply_backlight(g_screen.screensaver_active());
   }
 
   if ((now - g_last_ui_tick_ms) >= kUiTickMs) {

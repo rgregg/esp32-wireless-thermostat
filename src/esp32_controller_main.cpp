@@ -45,6 +45,8 @@ bool g_ctrl_web_started = false;
 bool g_ctrl_mdns_started = false;
 uint32_t g_ctrl_boot_count = 0;
 String g_ctrl_reset_reason = "unknown";
+bool g_ctrl_reboot_requested = false;
+uint32_t g_ctrl_reboot_at_ms = 0;
 
 constexpr uint32_t kCtrlNetworkRetryMs = 5000;
 constexpr uint32_t kCtrlMqttPublishMs = 10000;
@@ -238,6 +240,11 @@ bool ctrl_publish_display_cmd(const String &key, const String &value) {
   topic += "/";
   topic += key;
   return g_ctrl_mqtt.publish(topic.c_str(), value.c_str(), true);
+}
+
+void ctrl_schedule_reboot() {
+  g_ctrl_reboot_requested = true;
+  g_ctrl_reboot_at_ms = millis() + 250;
 }
 
 void ctrl_publish_cfg_value(const char *key, const String &value) {
@@ -472,6 +479,8 @@ void ctrl_publish_discovery() {
       String("homeassistant/sensor/") + dev_id + "_controller_error_espnow/config";
   const String reset_seq_topic =
       String("homeassistant/button/") + dev_id + "_controller_reset_sequence/config";
+  const String reboot_topic =
+      String("homeassistant/button/") + dev_id + "_controller_reboot/config";
 
   char payload[768];
   snprintf(payload, sizeof(payload),
@@ -576,6 +585,14 @@ void ctrl_publish_discovery() {
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(reset_seq_topic.c_str(), payload, true);
 
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Reboot\","
+           "\"uniq_id\":\"%s_controller_reboot\","
+           "\"cmd_t\":\"%s/cmd/reboot\",\"pl_prs\":\"1\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(reboot_topic.c_str(), payload, true);
+
   g_ctrl_mqtt_discovery_sent = true;
 }
 
@@ -629,6 +646,12 @@ void ctrl_web_handle_config_post() {
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
     const String value = g_ctrl_web.arg(i);
+    if (name == "disp_reboot" && ctrl_parse_bool_payload(value.c_str())) {
+      if (ctrl_publish_display_cmd("reboot", "1")) {
+        ++updated_display;
+      }
+      continue;
+    }
     std::string key_std;
     if (thermostat::management_paths::parse_prefixed_form_key(name.c_str(), "disp_",
                                                                &key_std)) {
@@ -644,6 +667,11 @@ void ctrl_web_handle_config_post() {
   String body = "updated_local=" + String(updated_local) +
                 " updated_display=" + String(updated_display) + "\n";
   g_ctrl_web.send(200, "text/plain", body);
+}
+
+void ctrl_web_handle_reboot_post() {
+  ctrl_schedule_reboot();
+  g_ctrl_web.send(200, "text/plain", "rebooting\n");
 }
 
 void ctrl_web_handle_root() {
@@ -752,6 +780,8 @@ void ctrl_web_handle_root() {
   html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
 
   html += "<p>display_reboot_required=" + ctrl_get_display_cfg_cache("reboot_required") + "</p>";
+  html += "<form method=\"post\" action=\"/reboot\"><button type=\"submit\">Reboot Controller</button></form>";
+  html += "<form method=\"post\" action=\"/config\"><input type=\"hidden\" name=\"disp_reboot\" value=\"1\"><button type=\"submit\">Reboot Display (via MQTT)</button></form>";
   html += "<p>Use the display device IP + /screenshot for remote screen capture.</p>";
   html += "</body></html>";
   g_ctrl_web.send(200, "text/html", html);
@@ -765,6 +795,7 @@ void ctrl_ensure_web_ready() {
     g_ctrl_web.on("/", HTTP_GET, ctrl_web_handle_root);
     g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
+    g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
     g_ctrl_web.begin();
     g_ctrl_web_started = true;
   }
@@ -947,6 +978,10 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_apply_mqtt_shadow(true, false);
     return;
   }
+  if (topic_str == ctrl_topic_for("cmd/reboot") && ctrl_parse_bool_payload(value)) {
+    ctrl_schedule_reboot();
+    return;
+  }
   if (topic_str == ctrl_topic_for("cmd/reset_sequence") && ctrl_parse_bool_payload(value)) {
     g_controller->app().reset_remote_command_sequence();
     g_ctrl_mqtt_seq = 0;
@@ -1026,6 +1061,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/target_temp_c").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/packed_word").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/sync").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reboot").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reset_sequence").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str());
@@ -1114,6 +1150,9 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
+  if (g_ctrl_reboot_requested && static_cast<int32_t>(now - g_ctrl_reboot_at_ms) >= 0) {
+    ESP.restart();
+  }
   if (g_controller != nullptr) {
     g_controller->tick(now);
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();

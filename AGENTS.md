@@ -51,6 +51,9 @@
   - edits controller local config
   - proxies display config via MQTT
 - JSON config endpoint: `/config`
+- Reboot endpoints:
+  - controller: `POST /reboot`
+  - display: `POST /reboot`
 - Thermostat screenshot endpoint: `http://<display-ip>/screenshot`
 
 ## Versioning

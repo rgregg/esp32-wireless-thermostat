@@ -18,10 +18,15 @@
 
 ## Runtime Management
 - Controller local config: `http://<controller-ip>/config`
+- Controller reboot endpoint: `POST http://<controller-ip>/reboot`
 - Display local fallback config: `http://<display-ip>/config`
+- Display reboot endpoint: `POST http://<display-ip>/reboot`
 - Display screenshot: `http://<display-ip>/screenshot`
 - MQTT path smoke verifier (with broker + both devices online):
   - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan`
+- MQTT reboot commands:
+  - Controller: publish `1` to `thermostat/furnace-controller/cmd/reboot`
+  - Display: publish `1` to `thermostat/furnace-display/cmd/reboot`
 - Sequence recovery command (no reboot required):
   - Publish `1` to `thermostat/furnace-controller/cmd/reset_sequence`
   - Controller resets its command sequence filter and forwards reset to display.
