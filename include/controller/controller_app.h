@@ -32,6 +32,7 @@ class ControllerApp {
   CommandApplyResult on_command_word(uint32_t packed_word);
   void on_thermostat_ack(uint16_t seq);
   void set_hvac_lockout(bool locked);
+  void reset_remote_command_sequence();
 
   void on_indoor_temperature_c(float temp_c);
   void on_indoor_humidity(float humidity_pct);

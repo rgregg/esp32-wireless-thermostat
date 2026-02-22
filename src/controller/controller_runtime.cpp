@@ -32,6 +32,10 @@ void ControllerRuntime::set_hvac_lockout(bool locked_out) {
   }
 }
 
+void ControllerRuntime::reset_remote_command_sequence() {
+  last_seq_ = 0;
+}
+
 CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cmd) {
   CommandApplyResult result;
 

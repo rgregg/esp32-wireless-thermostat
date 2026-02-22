@@ -1145,6 +1145,16 @@ void mqtt_publish_discovery() {
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(err_espnow_config.c_str(), payload, true);
 
+  const String reset_seq_config =
+      g_cfg_discovery_prefix + "/button/" + node + "_display_reset_sequence/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Reset Command Sequence\","
+           "\"uniq_id\":\"%s_display_reset_sequence\","
+           "\"cmd_t\":\"%s/cmd/reset_sequence\",\"pl_prs\":\"1\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(reset_seq_config.c_str(), payload, true);
+
   g_mqtt_discovery_sent = true;
 }
 
@@ -1206,6 +1216,11 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     }
   } else if (topic_str == topic_for("cmd/sync")) {
     if (parse_bool_payload(normalized)) {
+      g_runtime->request_sync(now);
+    }
+  } else if (topic_str == topic_for("cmd/reset_sequence")) {
+    if (parse_bool_payload(normalized)) {
+      g_runtime->reset_local_command_sequence();
       g_runtime->request_sync(now);
     }
   } else if (topic_str == topic_for("cmd/filter_reset")) {
@@ -1342,6 +1357,7 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/target_temp_c").c_str());
   g_mqtt.subscribe(topic_for("cmd/unit").c_str());
   g_mqtt.subscribe(topic_for("cmd/sync").c_str());
+  g_mqtt.subscribe(topic_for("cmd/reset_sequence").c_str());
   g_mqtt.subscribe(topic_for("cmd/filter_reset").c_str());
   g_mqtt.subscribe(topic_for("cmd/temp_comp_c").c_str());
   g_mqtt.subscribe(topic_for("cmd/display_timeout_s").c_str());

@@ -58,6 +58,10 @@ void ControllerApp::set_hvac_lockout(bool locked) {
   publish();
 }
 
+void ControllerApp::reset_remote_command_sequence() {
+  runtime_.reset_remote_command_sequence();
+}
+
 void ControllerApp::on_indoor_temperature_c(float temp_c) {
   indoor_temp_c_ = temp_c;
   has_indoor_temp_ = true;

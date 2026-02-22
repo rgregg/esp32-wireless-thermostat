@@ -230,6 +230,16 @@ bool ctrl_publish_display_cfg_set(const String &key, const String &value) {
   return g_ctrl_mqtt.publish(topic.c_str(), value.c_str(), true);
 }
 
+bool ctrl_publish_display_cmd(const String &key, const String &value) {
+  if (!g_ctrl_mqtt.connected()) {
+    return false;
+  }
+  String topic = display_topic_for("cmd");
+  topic += "/";
+  topic += key;
+  return g_ctrl_mqtt.publish(topic.c_str(), value.c_str(), true);
+}
+
 void ctrl_publish_cfg_value(const char *key, const String &value) {
   if (!g_ctrl_mqtt.connected()) {
     return;
@@ -460,6 +470,8 @@ void ctrl_publish_discovery() {
       String("homeassistant/sensor/") + dev_id + "_controller_error_ota/config";
   const String err_espnow_topic =
       String("homeassistant/sensor/") + dev_id + "_controller_error_espnow/config";
+  const String reset_seq_topic =
+      String("homeassistant/button/") + dev_id + "_controller_reset_sequence/config";
 
   char payload[768];
   snprintf(payload, sizeof(payload),
@@ -555,6 +567,14 @@ void ctrl_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(err_espnow_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Reset Command Sequence\","
+           "\"uniq_id\":\"%s_controller_reset_sequence\","
+           "\"cmd_t\":\"%s/cmd/reset_sequence\",\"pl_prs\":\"1\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(reset_seq_topic.c_str(), payload, true);
 
   g_ctrl_mqtt_discovery_sent = true;
 }
@@ -927,6 +947,13 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_apply_mqtt_shadow(true, false);
     return;
   }
+  if (topic_str == ctrl_topic_for("cmd/reset_sequence") && ctrl_parse_bool_payload(value)) {
+    g_controller->app().reset_remote_command_sequence();
+    g_ctrl_mqtt_seq = 0;
+    ctrl_publish_display_cmd("reset_sequence", "1");
+    ctrl_publish_runtime_state();
+    return;
+  }
   if (topic_str == ctrl_topic_for("cmd/filter_reset") && ctrl_parse_bool_payload(value)) {
     ctrl_apply_mqtt_shadow(false, true);
     return;
@@ -999,6 +1026,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/target_temp_c").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/packed_word").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/sync").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reset_sequence").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str());

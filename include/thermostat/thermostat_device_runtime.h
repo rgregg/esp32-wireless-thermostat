@@ -31,6 +31,7 @@ class ThermostatDeviceRuntime {
   void on_user_set_fan_mode(FanMode mode, uint32_t now_ms);
   void request_sync(uint32_t now_ms);
   void request_filter_reset(uint32_t now_ms);
+  void reset_local_command_sequence();
   void set_temperature_unit(TemperatureUnit unit);
   TemperatureUnit temperature_unit() const;
   void set_local_temperature_compensation_c(float value);

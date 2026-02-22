@@ -28,6 +28,7 @@ class ThermostatApp {
 
   void request_sync(uint32_t now_ms);
   void request_filter_reset(uint32_t now_ms);
+  void reset_local_command_sequence();
 
   void publish_indoor_temperature_c(float temp_c);
   void publish_indoor_humidity(float humidity_pct);

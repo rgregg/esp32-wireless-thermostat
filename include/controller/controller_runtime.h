@@ -43,6 +43,7 @@ class ControllerRuntime {
 
   void note_heartbeat(uint32_t now_ms);
   void set_hvac_lockout(bool locked_out);
+  void reset_remote_command_sequence();
 
   CommandApplyResult apply_remote_command(const CommandWord &cmd);
 

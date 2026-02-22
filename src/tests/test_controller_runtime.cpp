@@ -120,4 +120,18 @@ TEST_CASE(controller_runtime_enforces_min_run_min_off_and_min_idle) {
   rt.tick(t6);
   ASSERT_TRUE(rt.heat_demand());
 }
+
+TEST_CASE(controller_runtime_reset_remote_command_sequence_allows_reseed) {
+  thermostat::ControllerRuntime rt;
+
+  CommandWord cmd;
+  cmd.seq = 100;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).stale_or_duplicate);
+
+  rt.reset_remote_command_sequence();
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+}
 #endif

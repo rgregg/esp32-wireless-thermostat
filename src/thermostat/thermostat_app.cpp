@@ -87,6 +87,13 @@ void ThermostatApp::request_filter_reset(uint32_t now_ms) {
   send_command(false, true);
 }
 
+void ThermostatApp::reset_local_command_sequence() {
+  seq_local_ = 0;
+  has_last_packed_command_ = false;
+  last_packed_command_ = 0;
+  last_command_seq_ = 0;
+}
+
 void ThermostatApp::publish_indoor_temperature_c(float temp_c) {
   transport_.publish_indoor_temperature_c(temp_c);
 }

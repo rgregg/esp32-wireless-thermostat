@@ -92,4 +92,21 @@ TEST_CASE(thermostat_app_ignores_duplicate_and_stale_controller_seq) {
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
 }
+
+TEST_CASE(thermostat_app_reset_local_command_sequence_restarts_at_one) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(1));
+
+  app.set_local_mode(FurnaceMode::Cool, 2000);
+  ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(2));
+
+  app.reset_local_command_sequence();
+  ASSERT_TRUE(!app.has_last_packed_command());
+
+  app.set_local_mode(FurnaceMode::Off, 3000);
+  ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(1));
+}
 #endif

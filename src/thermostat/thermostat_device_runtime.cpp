@@ -47,6 +47,10 @@ void ThermostatDeviceRuntime::request_filter_reset(uint32_t now_ms) {
   node_.app().request_filter_reset(now_ms);
 }
 
+void ThermostatDeviceRuntime::reset_local_command_sequence() {
+  node_.app().reset_local_command_sequence();
+}
+
 void ThermostatDeviceRuntime::set_temperature_unit(TemperatureUnit unit) {
   display_.set_temperature_unit(unit);
 }
