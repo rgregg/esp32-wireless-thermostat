@@ -9,6 +9,8 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 
+#include "command_builder.h"
+#include "controller/controller_app.h"
 #include "controller/controller_relay_io.h"
 #include "controller/controller_runtime.h"
 #include "espnow_cmd_word.h"
@@ -50,12 +52,57 @@ TTF_Font *g_font_medium = nullptr;
 TTF_Font *g_font_small = nullptr;
 bool g_running = true;
 
-thermostat::ControllerConfig g_config;
-thermostat::ControllerRuntime *g_runtime = nullptr;
-
-// MQTT client
 sim::SimMqttClient g_mqtt;
 bool g_mqtt_connected = false;
+
+std::string ctrl_topic(const char *suffix) {
+  return std::string(kControllerBaseTopic) + "/" + suffix;
+}
+
+std::string display_topic(const char *suffix) {
+  return std::string(kDisplayBaseTopic) + "/" + suffix;
+}
+
+// SimControllerTransport: bridges ControllerApp telemetry to MQTT topics
+class SimControllerTransport : public thermostat::IControllerTransport {
+ public:
+  void publish_telemetry(const thermostat::ControllerTelemetry &t) override {
+    if (!g_mqtt_connected) return;
+
+    char buf[64];
+
+    g_mqtt.publish(ctrl_topic("state/availability"), "online", true);
+
+    const char *mode_str = "off";
+    if (t.mode_code == 1) mode_str = "heat";
+    else if (t.mode_code == 2) mode_str = "cool";
+    g_mqtt.publish(ctrl_topic("state/mode"), mode_str, true);
+
+    const char *fan_str = "auto";
+    if (t.fan_code == 1) fan_str = "on";
+    else if (t.fan_code == 2) fan_str = "circulate";
+    g_mqtt.publish(ctrl_topic("state/fan_mode"), fan_str, true);
+
+    snprintf(buf, sizeof(buf), "%.1f", t.setpoint_c);
+    g_mqtt.publish(ctrl_topic("state/target_temp_c"), buf, true);
+
+    snprintf(buf, sizeof(buf), "%d", static_cast<int>(t.state));
+    g_mqtt.publish(ctrl_topic("state/furnace_state"), buf, true);
+
+    snprintf(buf, sizeof(buf), "%.1f", t.filter_runtime_hours);
+    g_mqtt.publish(ctrl_topic("state/filter_runtime_hours"), buf, true);
+
+    g_mqtt.publish(ctrl_topic("state/lockout"), t.lockout ? "1" : "0", true);
+
+    snprintf(buf, sizeof(buf), "%u", t.seq);
+    g_mqtt.publish(ctrl_topic("state/telemetry_seq"), buf, true);
+  }
+};
+
+thermostat::ControllerConfig g_config;
+SimControllerTransport g_transport;
+thermostat::ControllerApp *g_app = nullptr;
+
 uint32_t g_last_mqtt_connect_attempt_ms = 0;
 bool g_mqtt_first_attempt = true;
 uint32_t g_last_state_publish_ms = 0;
@@ -71,14 +118,6 @@ thermostat::ControllerRelayIo g_relay_io;
 // Simulated state
 float g_simulated_indoor_c = 20.0f;
 uint32_t g_start_time_ms = 0;
-
-std::string ctrl_topic(const char *suffix) {
-  return std::string(kControllerBaseTopic) + "/" + suffix;
-}
-
-std::string display_topic(const char *suffix) {
-  return std::string(kDisplayBaseTopic) + "/" + suffix;
-}
 
 const char *mode_name(FurnaceMode mode) {
   switch (mode) {
@@ -129,33 +168,21 @@ const char *hvac_state_name(FurnaceStateCode state) {
   }
 }
 
-void publish_controller_state() {
-  if (!g_mqtt_connected || g_runtime == nullptr) return;
+void publish_controller_extras() {
+  // Publish relay/uptime/failsafe info that the telemetry transport doesn't cover
+  if (!g_mqtt_connected || g_app == nullptr) return;
 
+  const auto &rt = g_app->runtime();
   char buf[64];
 
-  g_mqtt.publish(ctrl_topic("state/availability"), "online", true);
-  g_mqtt.publish(ctrl_topic("state/mode"), mode_mqtt(g_runtime->mode()), true);
-  g_mqtt.publish(ctrl_topic("state/fan_mode"), fan_mode_mqtt(g_runtime->fan_mode()), true);
-
-  snprintf(buf, sizeof(buf), "%.1f", g_runtime->target_temperature_c());
-  g_mqtt.publish(ctrl_topic("state/target_temp_c"), buf, true);
-
-  snprintf(buf, sizeof(buf), "%d", static_cast<int>(g_runtime->furnace_state()));
-  g_mqtt.publish(ctrl_topic("state/furnace_state"), buf, true);
-
-  snprintf(buf, sizeof(buf), "%.1f", g_runtime->filter_runtime_hours());
-  g_mqtt.publish(ctrl_topic("state/filter_runtime_hours"), buf, true);
-
-  g_mqtt.publish(ctrl_topic("state/lockout"), g_runtime->hvac_lockout() ? "1" : "0", true);
-  g_mqtt.publish(ctrl_topic("state/relay_heat"), g_runtime->heat_demand() ? "1" : "0", true);
-  g_mqtt.publish(ctrl_topic("state/relay_cool"), g_runtime->cool_demand() ? "1" : "0", true);
-  g_mqtt.publish(ctrl_topic("state/relay_fan"), g_runtime->fan_demand() ? "1" : "0", true);
+  g_mqtt.publish(ctrl_topic("state/relay_heat"), rt.heat_demand() ? "1" : "0", true);
+  g_mqtt.publish(ctrl_topic("state/relay_cool"), rt.cool_demand() ? "1" : "0", true);
+  g_mqtt.publish(ctrl_topic("state/relay_fan"), rt.fan_demand() ? "1" : "0", true);
 
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>((SDL_GetTicks() - g_start_time_ms) / 1000));
   g_mqtt.publish(ctrl_topic("state/uptime_s"), buf, true);
 
-  g_mqtt.publish(ctrl_topic("state/failsafe"), g_runtime->failsafe_active() ? "1" : "0", true);
+  g_mqtt.publish(ctrl_topic("state/failsafe"), rt.failsafe_active() ? "1" : "0", true);
 }
 
 void on_mqtt_message(const std::string &topic, const std::string &payload) {
@@ -176,23 +203,21 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
            static_cast<unsigned long>(packed), cmd.seq, static_cast<int>(cmd.mode),
            static_cast<int>(cmd.fan), cmd.setpoint_decic / 10.0f);
 
-    auto result = g_runtime->apply_remote_command(cmd);
+    auto result = g_app->on_command_word(packed);
     printf("[MQTT RX] Command %s\n", result.accepted ? "ACCEPTED" : "REJECTED");
 
-    // Always note heartbeat on receiving a valid message, even if command was rejected
-    g_runtime->note_heartbeat(now);
-
-    if (result.accepted) {
-      publish_controller_state();
-    }
+    g_app->on_heartbeat(now);
+    publish_controller_extras();
     return;
   }
 
-  // Direct controller commands
+  // Direct controller commands — build packed command word and route through app
+  const auto &rt = g_app->runtime();
+
   if (topic == ctrl_topic("cmd/lockout")) {
     bool lockout = (payload == "1" || payload == "true" || payload == "on");
-    g_runtime->set_hvac_lockout(lockout);
-    publish_controller_state();
+    g_app->set_hvac_lockout(lockout);
+    publish_controller_extras();
     return;
   }
 
@@ -201,14 +226,12 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     if (payload == "heat") mode = FurnaceMode::Heat;
     else if (payload == "cool") mode = FurnaceMode::Cool;
 
-    CommandWord cmd{};
-    cmd.seq = static_cast<uint16_t>((now / 100) & 0x1FF);
-    cmd.mode = mode;
-    cmd.fan = g_runtime->fan_mode();
-    cmd.setpoint_decic = static_cast<int16_t>(g_runtime->target_temperature_c() * 10.0f);
-    g_runtime->apply_remote_command(cmd);
-    g_runtime->note_heartbeat(now);
-    publish_controller_state();
+    uint32_t packed = thermostat::build_packed_command(
+        mode, rt.fan_mode(), rt.target_temperature_c(),
+        static_cast<uint16_t>((now / 100) & 0x1FF), false, false);
+    g_app->on_command_word(packed);
+    g_app->on_heartbeat(now);
+    publish_controller_extras();
     return;
   }
 
@@ -217,42 +240,35 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     if (payload == "on" || payload == "always on") fan = FanMode::AlwaysOn;
     else if (payload == "circulate") fan = FanMode::Circulate;
 
-    CommandWord cmd{};
-    cmd.seq = static_cast<uint16_t>((now / 100) & 0x1FF);
-    cmd.mode = g_runtime->mode();
-    cmd.fan = fan;
-    cmd.setpoint_decic = static_cast<int16_t>(g_runtime->target_temperature_c() * 10.0f);
-    g_runtime->apply_remote_command(cmd);
-    g_runtime->note_heartbeat(now);
-    publish_controller_state();
+    uint32_t packed = thermostat::build_packed_command(
+        rt.mode(), fan, rt.target_temperature_c(),
+        static_cast<uint16_t>((now / 100) & 0x1FF), false, false);
+    g_app->on_command_word(packed);
+    g_app->on_heartbeat(now);
+    publish_controller_extras();
     return;
   }
 
   if (topic == ctrl_topic("cmd/target_temp_c")) {
     float temp = static_cast<float>(atof(payload.c_str()));
 
-    CommandWord cmd{};
-    cmd.seq = static_cast<uint16_t>((now / 100) & 0x1FF);
-    cmd.mode = g_runtime->mode();
-    cmd.fan = g_runtime->fan_mode();
-    cmd.setpoint_decic = static_cast<int16_t>(temp * 10.0f);
-    g_runtime->apply_remote_command(cmd);
-    g_runtime->note_heartbeat(now);
-    publish_controller_state();
+    uint32_t packed = thermostat::build_packed_command(
+        rt.mode(), rt.fan_mode(), temp,
+        static_cast<uint16_t>((now / 100) & 0x1FF), false, false);
+    g_app->on_command_word(packed);
+    g_app->on_heartbeat(now);
+    publish_controller_extras();
     return;
   }
 
   if (topic == ctrl_topic("cmd/filter_reset")) {
     if (payload == "1" || payload == "true") {
-      CommandWord cmd{};
-      cmd.seq = static_cast<uint16_t>((now / 100) & 0x1FF);
-      cmd.mode = g_runtime->mode();
-      cmd.fan = g_runtime->fan_mode();
-      cmd.setpoint_decic = static_cast<int16_t>(g_runtime->target_temperature_c() * 10.0f);
-      cmd.filter_reset = true;
-      g_runtime->apply_remote_command(cmd);
-      g_runtime->note_heartbeat(now);
-      publish_controller_state();
+      uint32_t packed = thermostat::build_packed_command(
+          rt.mode(), rt.fan_mode(), rt.target_temperature_c(),
+          static_cast<uint16_t>((now / 100) & 0x1FF), false, true);
+      g_app->on_command_word(packed);
+      g_app->on_heartbeat(now);
+      publish_controller_extras();
     }
     return;
   }
@@ -279,18 +295,16 @@ void ensure_mqtt_connected() {
   g_mqtt.publish(display_topic("state/packed_command"), "", true);
 
   // Reset the sequence tracker so we accept the next command regardless of sequence
-  g_runtime->reset_remote_command_sequence();
+  g_app->reset_remote_command_sequence();
 
   g_mqtt.subscribe(ctrl_topic("cmd/lockout"));
   g_mqtt.subscribe(ctrl_topic("cmd/mode"));
   g_mqtt.subscribe(ctrl_topic("cmd/fan_mode"));
   g_mqtt.subscribe(ctrl_topic("cmd/target_temp_c"));
-  g_mqtt.subscribe(ctrl_topic("cmd/packed_word"));
-  g_mqtt.subscribe(ctrl_topic("cmd/sync"));
   g_mqtt.subscribe(ctrl_topic("cmd/filter_reset"));
   g_mqtt.subscribe(display_topic("state/packed_command"));
 
-  publish_controller_state();
+  publish_controller_extras();
 }
 
 SDL_Color to_sdl_color(uint32_t color) {
@@ -411,16 +425,16 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   char buf[128];
 
   // Mode & Fan
-  snprintf(buf, sizeof(buf), "Mode: %s", mode_name(g_runtime->mode()));
+  snprintf(buf, sizeof(buf), "Mode: %s", mode_name(g_app->runtime().mode()));
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
   ly += line_height;
 
-  snprintf(buf, sizeof(buf), "Fan: %s", fan_mode_name(g_runtime->fan_mode()));
+  snprintf(buf, sizeof(buf), "Fan: %s", fan_mode_name(g_app->runtime().fan_mode()));
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
   ly += line_height;
 
   // Temperatures
-  snprintf(buf, sizeof(buf), "Setpoint: %.1f C", g_runtime->target_temperature_c());
+  snprintf(buf, sizeof(buf), "Setpoint: %.1f C", g_app->runtime().target_temperature_c());
   draw_text(g_font_small, x + 10, ly, buf, kColorYellow);
   ly += line_height;
 
@@ -429,7 +443,7 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   ly += line_height;
 
   // Deadband visualization
-  float setpoint = g_runtime->target_temperature_c();
+  float setpoint = g_app->runtime().target_temperature_c();
   float deadband = 0.5f;
   snprintf(buf, sizeof(buf), "Heat < %.1f C", setpoint - deadband);
   draw_text(g_font_small, x + 10, ly, buf, 0xFFFF8888);
@@ -441,7 +455,7 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
 
   // State
   ly += 5;
-  FurnaceStateCode state = g_runtime->furnace_state();
+  FurnaceStateCode state = g_app->runtime().furnace_state();
   uint32_t state_color = kColorWhite;
   if (state == FurnaceStateCode::HeatOn) state_color = kColorRed;
   else if (state == FurnaceStateCode::CoolOn) state_color = kColorLightBlue;
@@ -454,18 +468,18 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
 
   // Safety states
   ly += 5;
-  snprintf(buf, sizeof(buf), "Failsafe: %s", g_runtime->failsafe_active() ? "ACTIVE" : "OK");
+  snprintf(buf, sizeof(buf), "Failsafe: %s", g_app->runtime().failsafe_active() ? "ACTIVE" : "OK");
   draw_text(g_font_small, x + 10, ly, buf,
-            g_runtime->failsafe_active() ? kColorRed : kColorGreen);
+            g_app->runtime().failsafe_active() ? kColorRed : kColorGreen);
   ly += line_height;
 
-  snprintf(buf, sizeof(buf), "Lockout: %s", g_runtime->hvac_lockout() ? "ACTIVE" : "OK");
+  snprintf(buf, sizeof(buf), "Lockout: %s", g_app->runtime().hvac_lockout() ? "ACTIVE" : "OK");
   draw_text(g_font_small, x + 10, ly, buf,
-            g_runtime->hvac_lockout() ? kColorRed : kColorGreen);
+            g_app->runtime().hvac_lockout() ? kColorRed : kColorGreen);
   ly += line_height;
 
   // Filter runtime
-  snprintf(buf, sizeof(buf), "Filter: %.1f hrs", g_runtime->filter_runtime_hours());
+  snprintf(buf, sizeof(buf), "Filter: %.1f hrs", g_app->runtime().filter_runtime_hours());
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
   ly += line_height;
 
@@ -539,7 +553,7 @@ void draw_timing_panel(int x, int y, int w, int h) {
 
   // Heartbeat
   ly += 5;
-  uint32_t hb_ago = now - g_runtime->heartbeat_last_seen_ms();
+  uint32_t hb_ago = now - g_app->runtime().heartbeat_last_seen_ms();
   snprintf(buf, sizeof(buf), "Heartbeat: %lu ms ago", static_cast<unsigned long>(hb_ago));
   uint32_t hb_color = (hb_ago < 5000) ? kColorGreen : ((hb_ago < 10000) ? kColorYellow : kColorRed);
   draw_text(g_font_small, x + 10, ly, buf, hb_color);
@@ -623,9 +637,9 @@ void render_board() {
   bool io_pending = g_relay_io.has_pending();
 
   // A relay is "blocked" if the runtime demands it but the IO layer hasn't engaged it yet
-  bool heat_blocked = g_runtime->heat_demand() && !relay_out.heat && io_pending;
-  bool cool_blocked = g_runtime->cool_demand() && !relay_out.cool && io_pending;
-  bool fan_blocked = g_runtime->fan_demand() && !relay_out.fan && io_pending;
+  bool heat_blocked = g_app->runtime().heat_demand() && !relay_out.heat && io_pending;
+  bool cool_blocked = g_app->runtime().cool_demand() && !relay_out.cool && io_pending;
+  bool fan_blocked = g_app->runtime().fan_demand() && !relay_out.fan && io_pending;
 
   draw_relay_block(relay_start_x, relay_y, "HEAT", relay_out.heat, heat_blocked);
   draw_relay_block(relay_start_x + relay_spacing, relay_y, "COOL", relay_out.cool, cool_blocked);
@@ -654,65 +668,58 @@ void send_simulated_command(FurnaceMode mode, FanMode fan, float setpoint) {
   static uint16_t seq = 0;
   ++seq;
 
-  CommandWord cmd{};
-  cmd.seq = seq;
-  cmd.mode = mode;
-  cmd.fan = fan;
-  cmd.setpoint_decic = static_cast<int16_t>(setpoint * 10.0f);
-  cmd.sync_request = false;
-  cmd.filter_reset = false;
-
-  g_runtime->apply_remote_command(cmd);
-  g_runtime->note_heartbeat(SDL_GetTicks());
-  publish_controller_state();
+  uint32_t packed = thermostat::build_packed_command(mode, fan, setpoint, seq, false, false);
+  g_app->on_command_word(packed);
+  g_app->on_heartbeat(SDL_GetTicks());
+  publish_controller_extras();
 }
 
 void handle_keypress(SDL_Keycode key) {
   switch (key) {
     case SDLK_h:
-      send_simulated_command(FurnaceMode::Heat, g_runtime->fan_mode(),
-                             g_runtime->target_temperature_c());
+      send_simulated_command(FurnaceMode::Heat, g_app->runtime().fan_mode(),
+                             g_app->runtime().target_temperature_c());
       break;
 
     case SDLK_c:
-      send_simulated_command(FurnaceMode::Cool, g_runtime->fan_mode(),
-                             g_runtime->target_temperature_c());
+      send_simulated_command(FurnaceMode::Cool, g_app->runtime().fan_mode(),
+                             g_app->runtime().target_temperature_c());
       break;
 
     case SDLK_o:
-      send_simulated_command(FurnaceMode::Off, g_runtime->fan_mode(),
-                             g_runtime->target_temperature_c());
+      send_simulated_command(FurnaceMode::Off, g_app->runtime().fan_mode(),
+                             g_app->runtime().target_temperature_c());
       break;
 
     case SDLK_f: {
       FanMode next_fan;
-      switch (g_runtime->fan_mode()) {
+      switch (g_app->runtime().fan_mode()) {
         case FanMode::Automatic: next_fan = FanMode::AlwaysOn; break;
         case FanMode::AlwaysOn: next_fan = FanMode::Circulate; break;
         default: next_fan = FanMode::Automatic; break;
       }
-      send_simulated_command(g_runtime->mode(), next_fan, g_runtime->target_temperature_c());
+      send_simulated_command(g_app->runtime().mode(), next_fan, g_app->runtime().target_temperature_c());
       break;
     }
 
     case SDLK_PLUS:
     case SDLK_EQUALS:
-      send_simulated_command(g_runtime->mode(), g_runtime->fan_mode(),
-                             g_runtime->target_temperature_c() + 0.5f);
+      send_simulated_command(g_app->runtime().mode(), g_app->runtime().fan_mode(),
+                             g_app->runtime().target_temperature_c() + 0.5f);
       break;
 
     case SDLK_MINUS:
-      send_simulated_command(g_runtime->mode(), g_runtime->fan_mode(),
-                             g_runtime->target_temperature_c() - 0.5f);
+      send_simulated_command(g_app->runtime().mode(), g_app->runtime().fan_mode(),
+                             g_app->runtime().target_temperature_c() - 0.5f);
       break;
 
     case SDLK_t:
-      g_runtime->note_heartbeat(SDL_GetTicks());
+      g_app->on_heartbeat(SDL_GetTicks());
       break;
 
     case SDLK_l:
-      g_runtime->set_hvac_lockout(!g_runtime->hvac_lockout());
-      publish_controller_state();
+      g_app->set_hvac_lockout(!g_app->runtime().hvac_lockout());
+      publish_controller_extras();
       break;
 
     case SDLK_q:
@@ -744,27 +751,13 @@ void tick_controller() {
       (static_cast<uint32_t>(now - g_last_mqtt_command_ms) < kMqttPrimaryHoldMs);
   g_espnow_command_enabled = !mqtt_primary_active;
 
-  const float target = g_runtime->target_temperature_c();
-  const float deadband = 0.5f;
-
-  bool heat_call = false;
-  bool cool_call = false;
-
-  if (g_runtime->mode() == FurnaceMode::Heat) {
-    heat_call = g_simulated_indoor_c < (target - deadband);
-  } else if (g_runtime->mode() == FurnaceMode::Cool) {
-    cool_call = g_simulated_indoor_c > (target + deadband);
-  }
-
-  thermostat::ControllerTickInput input;
-  input.now_ms = now;
-  input.heat_call = heat_call;
-  input.cool_call = cool_call;
-
-  g_runtime->tick(input);
+  // Feed simulated indoor temperature into the app — ControllerApp::tick()
+  // uses compute_hvac_calls() with proper deadband/overrun logic.
+  g_app->on_indoor_temperature_c(g_simulated_indoor_c);
+  g_app->tick(now);
 
   // Apply relay IO interlock layer on top of runtime demand
-  auto snap = g_runtime->snapshot();
+  auto snap = g_app->runtime().snapshot();
   g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
 
   // Simulate temperature drift based on actual relay output (post-interlock)
@@ -781,10 +774,10 @@ void tick_controller() {
   if (g_simulated_indoor_c < 5.0f) g_simulated_indoor_c = 5.0f;
   if (g_simulated_indoor_c > 40.0f) g_simulated_indoor_c = 40.0f;
 
-  // Publish state periodically
+  // Publish relay/uptime extras periodically
   if (g_mqtt_connected && (now - g_last_state_publish_ms) > 5000) {
     g_last_state_publish_ms = now;
-    publish_controller_state();
+    publish_controller_extras();
   }
 }
 
@@ -862,8 +855,8 @@ void shutdown() {
   }
   SDL_Quit();
 
-  delete g_runtime;
-  g_runtime = nullptr;
+  delete g_app;
+  g_app = nullptr;
 }
 
 }  // namespace
@@ -882,11 +875,11 @@ int main(int /* argc */, char ** /* argv */) {
   g_config.min_cooling_run_time_ms = 5000;    // 5 seconds
   g_config.min_idle_time_ms = 3000;           // 3 seconds
 
-  g_runtime = new thermostat::ControllerRuntime(g_config);
+  g_app = new thermostat::ControllerApp(g_transport, g_config);
   g_relay_io.begin();
   g_start_time_ms = SDL_GetTicks();
 
-  g_runtime->note_heartbeat(SDL_GetTicks());
+  g_app->on_heartbeat(SDL_GetTicks());
 
   g_mqtt.set_message_callback(on_mqtt_message);
 

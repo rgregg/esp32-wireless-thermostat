@@ -10,9 +10,13 @@
 #include <SDL2/SDL.h>
 #include <lvgl.h>
 
+#include <time.h>
+
 #include "espnow_cmd_word.h"
 #include "sim_mqtt_client.h"
 #include "thermostat/display_model.h"
+#include "thermostat/thermostat_app.h"
+#include "thermostat/thermostat_display_app.h"
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/thermostat_ui_state.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
@@ -94,33 +98,31 @@ lv_obj_t *g_brightness_slider = nullptr;
 lv_obj_t *g_dim_slider = nullptr;
 
 thermostat::ThermostatScreenController g_screen;
-float g_setpoint_c = 21.5f;
 uint32_t g_display_timeout_s = 300;
 uint8_t g_brightness_pct = 100;
 uint8_t g_screensaver_brightness_pct = 16;
-thermostat::DisplayModel g_preview_model;
-thermostat::TemperatureUnit g_preview_unit = thermostat::TemperatureUnit::Celsius;
-FurnaceMode g_preview_mode = FurnaceMode::Off;
-FanMode g_preview_fan_mode = FanMode::Automatic;
-float g_preview_indoor_c = 22.2f;
-float g_preview_humidity = 43.0f;
-float g_preview_outdoor_c = 9.0f;
-const char *g_preview_weather_condition = "Cloudy";
 
 // MQTT state
 sim::SimMqttClient g_mqtt;
 bool g_mqtt_connected = false;
 uint32_t g_last_mqtt_connect_attempt_ms = 0;
 bool g_mqtt_first_attempt = true;
-uint16_t g_command_seq = 0;
 
-// Controller state received via MQTT
-bool g_ctrl_relay_heat = false;
-bool g_ctrl_relay_cool = false;
-bool g_ctrl_relay_fan = false;
-bool g_ctrl_failsafe = false;
-bool g_ctrl_lockout = false;
-float g_ctrl_filter_hours = 0.0f;
+// Heartbeat interval (matches EspNowThermostatTransport default)
+constexpr uint32_t kHeartbeatIntervalMs = 10000;
+uint32_t g_last_heartbeat_ms = 0;
+
+// Simulated sensor/weather values
+float g_preview_indoor_c = 22.2f;
+float g_preview_humidity = 43.0f;
+float g_preview_outdoor_c = 9.0f;
+std::string g_preview_weather_condition = "Cloudy";
+
+// Weather cycle for interactive control
+constexpr const char *kWeatherConditions[] = {
+    "Clear", "Cloudy", "Rain", "Snow", "Fog", "Lightning"};
+constexpr int kWeatherConditionCount = 6;
+int g_weather_index = 1;  // Start at Cloudy
 
 std::string display_topic(const char *suffix) {
   return std::string(kDisplayBaseTopic) + "/" + suffix;
@@ -130,63 +132,113 @@ std::string controller_topic(const char *suffix) {
   return std::string(kControllerBaseTopic) + "/" + suffix;
 }
 
-void publish_packed_command() {
-  if (!g_mqtt_connected) return;
+// SimThermostatTransport: bridges ThermostatApp commands to MQTT topics
+class SimThermostatTransport : public thermostat::IThermostatTransport {
+ public:
+  void publish_command_word(uint32_t packed_word) override {
+    if (!g_mqtt_connected) return;
 
-  ++g_command_seq;
-  CommandWord cmd{};
-  cmd.seq = g_command_seq;
-  cmd.mode = g_preview_mode;
-  cmd.fan = g_preview_fan_mode;
-  cmd.setpoint_decic = static_cast<int16_t>(g_setpoint_c * 10.0f);
-  cmd.sync_request = false;
-  cmd.filter_reset = false;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(packed_word));
+    g_mqtt.publish(display_topic("state/packed_command"), buf, true);
 
-  uint32_t packed = espnow_cmd::encode(cmd);
-  char buf[32];
-  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(packed));
-  g_mqtt.publish(display_topic("state/packed_command"), buf, true);
+    printf("[MQTT TX] packed_command=%lu\n", static_cast<unsigned long>(packed_word));
+  }
 
-  // Also publish granular state
-  const char *mode_str = "off";
-  if (g_preview_mode == FurnaceMode::Heat) mode_str = "heat";
-  else if (g_preview_mode == FurnaceMode::Cool) mode_str = "cool";
-  g_mqtt.publish(display_topic("state/mode"), mode_str, true);
+  void publish_controller_ack(uint16_t seq) override {
+    if (!g_mqtt_connected) return;
 
-  const char *fan_str = "auto";
-  if (g_preview_fan_mode == FanMode::AlwaysOn) fan_str = "on";
-  else if (g_preview_fan_mode == FanMode::Circulate) fan_str = "circulate";
-  g_mqtt.publish(display_topic("state/fan_mode"), fan_str, true);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u", seq);
+    g_mqtt.publish(display_topic("state/controller_ack"), buf, true);
+  }
 
-  snprintf(buf, sizeof(buf), "%.1f", g_setpoint_c);
-  g_mqtt.publish(display_topic("state/target_temp_c"), buf, true);
+  void publish_indoor_temperature_c(float temp_c) override {
+    if (!g_mqtt_connected) return;
 
-  snprintf(buf, sizeof(buf), "%.1f", g_preview_indoor_c);
-  g_mqtt.publish(display_topic("state/current_temp_c"), buf, true);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1f", temp_c);
+    g_mqtt.publish(display_topic("state/current_temp_c"), buf, true);
+  }
 
-  snprintf(buf, sizeof(buf), "%u", g_command_seq);
-  g_mqtt.publish(display_topic("state/command_seq"), buf, true);
+  void publish_indoor_humidity(float humidity_pct) override {
+    if (!g_mqtt_connected) return;
 
-  printf("[MQTT TX] packed_command=%lu mode=%s fan=%s target=%.1f\n",
-         static_cast<unsigned long>(packed), mode_str, fan_str, g_setpoint_c);
-}
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1f", humidity_pct);
+    g_mqtt.publish(display_topic("state/humidity"), buf, true);
+  }
+};
+
+SimThermostatTransport g_transport;
+thermostat::ThermostatApp *g_therm_app = nullptr;
+thermostat::ThermostatDisplayApp *g_display_app = nullptr;
+constexpr uint32_t kControllerConnectionTimeoutMs = 30000;
 
 void on_mqtt_message(const std::string &topic, const std::string &payload) {
-  // Handle controller state updates
-  if (topic == controller_topic("state/relay_heat")) {
-    g_ctrl_relay_heat = (payload == "1");
-  } else if (topic == controller_topic("state/relay_cool")) {
-    g_ctrl_relay_cool = (payload == "1");
-  } else if (topic == controller_topic("state/relay_fan")) {
-    g_ctrl_relay_fan = (payload == "1");
-  } else if (topic == controller_topic("state/failsafe")) {
-    g_ctrl_failsafe = (payload == "1");
+  const uint32_t now = SDL_GetTicks();
+
+  // Accumulate controller state from individual MQTT topics.
+  // The telemetry_seq topic carries the sequence number that ThermostatApp
+  // uses for dedup — only feed telemetry to the app when seq changes.
+  static FurnaceStateCode s_state = FurnaceStateCode::Error;
+  static bool s_lockout = false;
+  static uint8_t s_mode_code = 0;
+  static uint8_t s_fan_code = 0;
+  static float s_setpoint_c = 20.0f;
+  static uint32_t s_filter_seconds = 0;
+  static uint16_t s_seq = 0;
+  static bool s_seq_received = false;
+
+  bool state_updated = false;
+
+  if (topic == controller_topic("state/furnace_state")) {
+    s_state = static_cast<FurnaceStateCode>(atoi(payload.c_str()));
+    state_updated = true;
   } else if (topic == controller_topic("state/lockout")) {
-    g_ctrl_lockout = (payload == "1");
+    s_lockout = (payload == "1");
+    state_updated = true;
+  } else if (topic == controller_topic("state/mode")) {
+    if (payload == "heat") s_mode_code = 1;
+    else if (payload == "cool") s_mode_code = 2;
+    else s_mode_code = 0;
+    state_updated = true;
+  } else if (topic == controller_topic("state/fan_mode")) {
+    if (payload == "on") s_fan_code = 1;
+    else if (payload == "circulate") s_fan_code = 2;
+    else s_fan_code = 0;
+    state_updated = true;
+  } else if (topic == controller_topic("state/target_temp_c")) {
+    s_setpoint_c = static_cast<float>(atof(payload.c_str()));
+    state_updated = true;
   } else if (topic == controller_topic("state/filter_runtime_hours")) {
-    g_ctrl_filter_hours = static_cast<float>(atof(payload.c_str()));
-  } else if (topic == controller_topic("state/furnace_state")) {
-    // Could update UI based on controller furnace state
+    s_filter_seconds = static_cast<uint32_t>(atof(payload.c_str()) * 3600.0f);
+    state_updated = true;
+  } else if (topic == controller_topic("state/telemetry_seq")) {
+    s_seq = static_cast<uint16_t>(atoi(payload.c_str()));
+    s_seq_received = true;
+    state_updated = true;
+  }
+
+  if (!state_updated) return;
+
+  // Always note heartbeat when we receive any controller state
+  g_therm_app->on_controller_heartbeat(now);
+
+  // Only feed full telemetry once we have a valid sequence number,
+  // so ThermostatApp's dedup logic works correctly.
+  if (s_seq_received) {
+    thermostat::ThermostatControllerTelemetry telemetry;
+    telemetry.seq = s_seq;
+    telemetry.state = s_state;
+    telemetry.lockout = s_lockout;
+    telemetry.mode_code = s_mode_code;
+    telemetry.fan_code = s_fan_code;
+    telemetry.setpoint_c = s_setpoint_c;
+    telemetry.filter_runtime_seconds = s_filter_seconds;
+
+    g_therm_app->on_controller_telemetry(now, telemetry);
+    g_display_app->sync_from_app();
   }
 }
 
@@ -212,17 +264,10 @@ void ensure_mqtt_connected() {
 
   // Publish initial state
   g_mqtt.publish(display_topic("state/availability"), "online", true);
-  publish_packed_command();
-}
 
-FurnaceStateCode preview_state_code() {
-  if (g_preview_mode == FurnaceMode::Heat) {
-    return (g_preview_indoor_c < g_setpoint_c) ? FurnaceStateCode::HeatOn : FurnaceStateCode::HeatMode;
-  }
-  if (g_preview_mode == FurnaceMode::Cool) {
-    return (g_preview_indoor_c > g_setpoint_c) ? FurnaceStateCode::CoolOn : FurnaceStateCode::CoolMode;
-  }
-  return FurnaceStateCode::Idle;
+  // Reset command sequence on new connection and request sync
+  g_therm_app->reset_local_command_sequence();
+  g_therm_app->request_sync(SDL_GetTicks());
 }
 
 void init_styles() {
@@ -339,26 +384,33 @@ void activate_screensaver() {
 void wake_screensaver() { g_screen.on_user_interaction(SDL_GetTicks()); }
 
 void update_labels() {
-  const char *weather_icon = LV_SYMBOL_IMAGE;
-  g_preview_model.set_temperature_unit(g_preview_unit);
-  g_preview_model.set_local_setpoint_c(g_setpoint_c);
-  g_preview_model.set_local_indoor_temperature_c(g_preview_indoor_c);
-  g_preview_model.set_local_indoor_humidity(g_preview_humidity);
-  g_preview_model.set_outdoor_temperature_c(g_preview_outdoor_c);
-  g_preview_model.set_weather_condition(g_preview_weather_condition);
+  const uint32_t now = SDL_GetTicks();
 
-  const std::string setpoint_text = g_preview_model.format_setpoint_text();
-  const std::string indoor_text = g_preview_model.format_indoor_temperature_text();
-  const std::string humidity_text = g_preview_model.format_indoor_humidity_text();
-  const std::string weather_text = g_preview_model.format_weather_text();
+  // Use ThermostatDisplayApp for all formatted text
+  const std::string setpoint_text = g_display_app->setpoint_text();
+  const std::string indoor_text = g_display_app->indoor_temp_text();
+  const std::string humidity_text = g_display_app->indoor_humidity_text();
+  const std::string weather_text = g_display_app->weather_text();
   const std::string status_text =
-      thermostat::furnace_state_text(preview_state_code(), true, false, false);
+      g_display_app->status_text(now, kControllerConnectionTimeoutMs);
+
+  // Weather icon from display app
+  const char *weather_icon = LV_SYMBOL_IMAGE;
+
+  // Live clock
+  time_t raw_time;
+  time(&raw_time);
+  struct tm *tm_info = localtime(&raw_time);
+  char date_buf[32];
+  char time_buf[16];
+  strftime(date_buf, sizeof(date_buf), "%A, %b %d", tm_info);
+  strftime(time_buf, sizeof(time_buf), "%-I:%M %p", tm_info);
 
   if (g_home_date_label != nullptr) {
-    lv_label_set_text(g_home_date_label, "Sunday, Feb 22");
+    lv_label_set_text(g_home_date_label, date_buf);
   }
   if (g_home_time_label != nullptr) {
-    lv_label_set_text(g_home_time_label, "12:34 PM");
+    lv_label_set_text(g_home_time_label, time_buf);
   }
   lv_label_set_text(g_setpoint_label, setpoint_text.c_str());
   lv_label_set_text(g_status_label, status_text.c_str());
@@ -368,7 +420,7 @@ void update_labels() {
   if (g_weather_icon_label != nullptr) {
     lv_label_set_text(g_weather_icon_label, weather_icon);
   }
-  lv_label_set_text(g_screen_time_label, "12:34 PM");
+  lv_label_set_text(g_screen_time_label, time_buf);
   if (g_screen_weather_label != nullptr) {
     lv_label_set_text(g_screen_weather_label, weather_text.c_str());
   }
@@ -381,54 +433,80 @@ void update_labels() {
   }
 
   char system_text[256];
-  snprintf(system_text, sizeof(system_text),
-           "fw: 0.9.0-preview+18\n"
-           "build: native-ui-preview\n"
-           "boot_count: 14\n"
-           "reset: software\n"
-           "uptime_s: %lu",
-           static_cast<unsigned long>(SDL_GetTicks() / 1000U));
+  {
+#ifdef THERMOSTAT_FIRMWARE_VERSION
+    const char *fw_version = THERMOSTAT_FIRMWARE_VERSION;
+#else
+    const char *fw_version = "dev";
+#endif
+    snprintf(system_text, sizeof(system_text),
+             "fw: %s\n"
+             "build: native-ui-preview\n"
+             "boot_count: 1\n"
+             "reset: sim\n"
+             "uptime_s: %lu",
+             fw_version,
+             static_cast<unsigned long>(now / 1000U));
+  }
 
   char wifi_text[256];
   snprintf(wifi_text, sizeof(wifi_text),
-           "connected: yes\n"
-           "ip: 192.168.1.77\n"
-           "ssid: lab-2g\n"
-           "mac: AA:BB:CC:DD:EE:FF\n"
-           "channel: 6\n"
-           "rssi_dbm: -58");
+           "connected: n/a (sim)\n"
+           "ip: n/a\n"
+           "ssid: n/a\n"
+           "mac: n/a\n"
+           "channel: n/a\n"
+           "rssi_dbm: n/a");
 
   char mqtt_text[256];
-  snprintf(mqtt_text, sizeof(mqtt_text),
-           "connected: yes\n"
-           "state: 0\n"
-           "host: mqtt.lan:1883\n"
-           "user: (none)\n"
-           "password: unset\n"
-           "client_id: esp32-furnace-thermostat\n"
-           "base_topic: thermostat/furnace-display\n"
-           "last_cmd_ago_s: 7");
+  {
+    uint32_t cmd_ago_s = g_last_heartbeat_ms == 0 ? 0 : (now - g_last_heartbeat_ms) / 1000;
+    snprintf(mqtt_text, sizeof(mqtt_text),
+             "connected: %s\n"
+             "state: 0\n"
+             "host: %s:%d\n"
+             "user: (none)\n"
+             "password: unset\n"
+             "client_id: %s\n"
+             "base_topic: %s\n"
+             "last_cmd_ago_s: %lu",
+             g_mqtt_connected ? "yes" : "no",
+             kMqttHost, kMqttPort,
+             kMqttClientId,
+             kDisplayBaseTopic,
+             static_cast<unsigned long>(cmd_ago_s));
+  }
 
   char controller_text[96];
-  snprintf(controller_text, sizeof(controller_text),
-           "last_hb_ago_s: 2\n"
-           "timeout_ms: 30000");
+  {
+    uint32_t hb_ms = g_therm_app->last_controller_heartbeat_ms();
+    uint32_t hb_ago_s = (hb_ms == 0) ? 0 : (now - hb_ms) / 1000;
+    bool connected = g_therm_app->controller_connected(now, kControllerConnectionTimeoutMs);
+    snprintf(controller_text, sizeof(controller_text),
+             "connected: %s\n"
+             "last_hb_ago_s: %lu\n"
+             "timeout_ms: %lu",
+             connected ? "yes" : "no",
+             static_cast<unsigned long>(hb_ago_s),
+             static_cast<unsigned long>(kControllerConnectionTimeoutMs));
+  }
 
   char espnow_text[160];
   snprintf(espnow_text, sizeof(espnow_text),
-           "channel: 6\n"
-           "peer_mac: 24:6F:28:AA:BB:CC\n"
-           "tx_ok: 122\n"
-           "tx_fail: 1");
+           "channel: n/a (sim)\n"
+           "peer_mac: n/a\n"
+           "tx_ok: n/a\n"
+           "tx_fail: n/a");
 
   char config_text[192];
   snprintf(config_text, sizeof(config_text),
            "temp_unit: %s\n"
-           "temp_comp_c: -0.3\n"
+           "temp_comp_c: %.1f\n"
            "display_timeout_s: %lu\n"
            "brightness_pct: %u\n"
            "saver_pct: %u",
-           g_preview_unit == thermostat::TemperatureUnit::Fahrenheit ? "F" : "C",
+           g_display_app->temperature_unit() == thermostat::TemperatureUnit::Fahrenheit ? "F" : "C",
+           static_cast<double>(g_display_app->local_temperature_compensation_c()),
            static_cast<unsigned long>(g_display_timeout_s),
            static_cast<unsigned>(g_brightness_pct),
            static_cast<unsigned>(g_screensaver_brightness_pct));
@@ -480,43 +558,53 @@ void on_tab_changed(lv_event_t *e) {
 }
 
 void on_setpoint_up(lv_event_t *) {
-  const float step = (g_preview_unit == thermostat::TemperatureUnit::Fahrenheit) ? 1.0f : 0.5f;
-  const float user_val = g_preview_model.to_user_temperature(g_setpoint_c);
-  g_setpoint_c = g_preview_model.to_celsius_from_user(user_val + step);
-  if (g_setpoint_c > 35.0f) g_setpoint_c = 35.0f;
-  publish_packed_command();
+  const uint32_t now = SDL_GetTicks();
+  const bool is_f = g_display_app->temperature_unit() == thermostat::TemperatureUnit::Fahrenheit;
+  const float step = is_f ? 1.0f : 0.5f;
+  // Read current setpoint in user units, step, write back via display app
+  const float current_c = g_display_app->local_setpoint_c();
+  // Step in user units using the display model's conversion
+  thermostat::DisplayModel tmp;
+  tmp.set_temperature_unit(g_display_app->temperature_unit());
+  const float user_val = tmp.to_user_temperature(current_c);
+  const float new_c = tmp.to_celsius_from_user(user_val + step);
+  g_display_app->on_user_set_setpoint_c(new_c > 35.0f ? 35.0f : new_c, now);
 }
 
 void on_setpoint_down(lv_event_t *) {
-  const float step = (g_preview_unit == thermostat::TemperatureUnit::Fahrenheit) ? 1.0f : 0.5f;
-  const float user_val = g_preview_model.to_user_temperature(g_setpoint_c);
-  g_setpoint_c = g_preview_model.to_celsius_from_user(user_val - step);
-  if (g_setpoint_c < 5.0f) g_setpoint_c = 5.0f;
-  publish_packed_command();
+  const uint32_t now = SDL_GetTicks();
+  const bool is_f = g_display_app->temperature_unit() == thermostat::TemperatureUnit::Fahrenheit;
+  const float step = is_f ? 1.0f : 0.5f;
+  const float current_c = g_display_app->local_setpoint_c();
+  thermostat::DisplayModel tmp;
+  tmp.set_temperature_unit(g_display_app->temperature_unit());
+  const float user_val = tmp.to_user_temperature(current_c);
+  const float new_c = tmp.to_celsius_from_user(user_val - step);
+  g_display_app->on_user_set_setpoint_c(new_c < 5.0f ? 5.0f : new_c, now);
 }
 
 void on_unit_changed(lv_event_t *e) {
   if (e == nullptr) return;
   const auto unit =
       static_cast<thermostat::TemperatureUnit>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-  g_preview_unit = unit;
+  g_display_app->set_temperature_unit(unit);
   thermostat::ui::set_temperature_unit_button_state(unit);
 }
 
 void on_mode_changed(lv_event_t *e) {
   if (e == nullptr) return;
+  const uint32_t now = SDL_GetTicks();
   const auto mode = static_cast<FurnaceMode>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-  g_preview_mode = mode;
+  g_display_app->on_user_set_mode(mode, now);
   thermostat::ui::set_mode_button_state(mode);
   g_screen.on_mode_changed(mode);
-  publish_packed_command();
 }
 
 void on_fan_changed(lv_event_t *e) {
   if (e == nullptr) return;
+  const uint32_t now = SDL_GetTicks();
   const auto fan = static_cast<FanMode>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
-  g_preview_fan_mode = fan;
-  publish_packed_command();
+  g_display_app->on_user_set_fan_mode(fan, now);
 }
 
 uint32_t snap_to_step(uint32_t value, uint32_t step, uint32_t min_v, uint32_t max_v) {
@@ -597,11 +685,11 @@ void create_ui() {
   g_brightness_slider = handles.brightness_slider;
   g_dim_slider = handles.dim_slider;
 
-  thermostat::ui::set_mode_button_state(g_preview_mode);
-  thermostat::ui::set_temperature_unit_button_state(g_preview_unit);
+  thermostat::ui::set_mode_button_state(g_display_app->local_mode());
+  thermostat::ui::set_temperature_unit_button_state(g_display_app->temperature_unit());
   const uint32_t now = SDL_GetTicks();
   g_screen.on_boot(now);
-  g_screen.on_mode_changed(g_preview_mode);
+  g_screen.on_mode_changed(g_display_app->local_mode());
   g_screen.set_display_timeout_ms(g_display_timeout_s * 1000U);
   show_page(g_screen.current_page());
   update_labels();
@@ -682,6 +770,29 @@ void process_events() {
       if (e.key.keysym.sym == SDLK_s) {
         activate_screensaver();
       } else if (e.key.keysym.sym == SDLK_w) {
+        // W key: cycle weather condition
+        g_weather_index = (g_weather_index + 1) % kWeatherConditionCount;
+        g_preview_weather_condition = kWeatherConditions[g_weather_index];
+        g_display_app->on_outdoor_weather_update(g_preview_outdoor_c,
+                                                  g_preview_weather_condition);
+        printf("[SIM] Weather: %s, Outdoor: %.1f C\n",
+               g_preview_weather_condition.c_str(), g_preview_outdoor_c);
+      } else if (e.key.keysym.sym == SDLK_RIGHTBRACKET) {
+        // ] key: increase outdoor temperature
+        g_preview_outdoor_c += 2.0f;
+        if (g_preview_outdoor_c > 50.0f) g_preview_outdoor_c = 50.0f;
+        g_display_app->on_outdoor_weather_update(g_preview_outdoor_c,
+                                                  g_preview_weather_condition);
+        printf("[SIM] Outdoor temp: %.1f C\n", g_preview_outdoor_c);
+      } else if (e.key.keysym.sym == SDLK_LEFTBRACKET) {
+        // [ key: decrease outdoor temperature
+        g_preview_outdoor_c -= 2.0f;
+        if (g_preview_outdoor_c < -40.0f) g_preview_outdoor_c = -40.0f;
+        g_display_app->on_outdoor_weather_update(g_preview_outdoor_c,
+                                                  g_preview_weather_condition);
+        printf("[SIM] Outdoor temp: %.1f C\n", g_preview_outdoor_c);
+      } else if (e.key.keysym.sym == SDLK_d) {
+        // D key: wake display (renamed from W since W is now weather)
         wake_screensaver();
       }
     } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
@@ -805,6 +916,11 @@ void shutdown() {
     g_mqtt.disconnect();
   }
 
+  delete g_display_app;
+  g_display_app = nullptr;
+  delete g_therm_app;
+  g_therm_app = nullptr;
+
   if (g_texture != nullptr) {
     SDL_DestroyTexture(g_texture);
     g_texture = nullptr;
@@ -834,6 +950,17 @@ int main(int argc, char **argv) {
     shutdown();
     return 1;
   }
+
+  // Initialize app layer
+  g_therm_app = new thermostat::ThermostatApp(g_transport);
+  g_display_app = new thermostat::ThermostatDisplayApp(*g_therm_app);
+  g_display_app->set_temperature_unit(thermostat::TemperatureUnit::Celsius);
+  g_display_app->set_local_temperature_compensation_c(-0.3f);
+
+  // Seed initial sensor/weather data
+  g_display_app->on_local_sensor_update(g_preview_indoor_c, g_preview_humidity);
+  g_display_app->on_outdoor_weather_update(g_preview_outdoor_c, g_preview_weather_condition);
+
   init_lvgl();
   create_ui();
   g_last_tick_ms = SDL_GetTicks();
@@ -844,7 +971,9 @@ int main(int argc, char **argv) {
     return ok ? 0 : 1;
   }
 
-  fprintf(stdout, "Simulator controls: S=activate screensaver, W=wake display\n");
+  fprintf(stdout, "Simulator controls:\n");
+  fprintf(stdout, "  S = activate screensaver, D = wake display\n");
+  fprintf(stdout, "  W = cycle weather, [ / ] = adjust outdoor temp\n");
   fprintf(stdout, "Connecting to MQTT broker at %s:%d\n", kMqttHost, kMqttPort);
 
   // Setup MQTT callback
@@ -854,7 +983,20 @@ int main(int argc, char **argv) {
     ensure_mqtt_connected();
     g_mqtt.loop();
     process_events();
-    g_screen.tick(SDL_GetTicks());
+
+    // Periodic heartbeat: re-publish last command so the controller
+    // doesn't trip its failsafe timer (mirrors ESP-NOW heartbeat).
+    const uint32_t now = SDL_GetTicks();
+    if (g_mqtt_connected && g_therm_app->has_last_packed_command() &&
+        (now - g_last_heartbeat_ms) >= kHeartbeatIntervalMs) {
+      g_last_heartbeat_ms = now;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%lu",
+               static_cast<unsigned long>(g_therm_app->last_packed_command()));
+      g_mqtt.publish(display_topic("state/packed_command"), buf, true);
+    }
+
+    g_screen.tick(now);
     show_page(g_screen.current_page());
     tick_lvgl();
     render();
