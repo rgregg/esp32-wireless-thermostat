@@ -48,6 +48,13 @@ struct UiHandles {
   lv_obj_t *screen_time_label = nullptr;
   lv_obj_t *settings_diag_label = nullptr;
   lv_obj_t *settings_display_label = nullptr;
+  lv_obj_t *settings_system_label = nullptr;
+  lv_obj_t *settings_wifi_label = nullptr;
+  lv_obj_t *settings_mqtt_label = nullptr;
+  lv_obj_t *settings_controller_label = nullptr;
+  lv_obj_t *settings_espnow_label = nullptr;
+  lv_obj_t *settings_config_label = nullptr;
+  lv_obj_t *settings_errors_label = nullptr;
   lv_obj_t *timeout_slider = nullptr;
   lv_obj_t *brightness_slider = nullptr;
   lv_obj_t *dim_slider = nullptr;

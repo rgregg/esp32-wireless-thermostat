@@ -70,6 +70,13 @@ lv_obj_t *g_weather_icon_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_settings_diag_label = nullptr;
 lv_obj_t *g_settings_display_label = nullptr;
+lv_obj_t *g_settings_system_label = nullptr;
+lv_obj_t *g_settings_wifi_label = nullptr;
+lv_obj_t *g_settings_mqtt_label = nullptr;
+lv_obj_t *g_settings_controller_label = nullptr;
+lv_obj_t *g_settings_espnow_label = nullptr;
+lv_obj_t *g_settings_config_label = nullptr;
+lv_obj_t *g_settings_errors_label = nullptr;
 lv_obj_t *g_timeout_slider = nullptr;
 lv_obj_t *g_brightness_slider = nullptr;
 lv_obj_t *g_dim_slider = nullptr;
@@ -89,10 +96,21 @@ uint8_t g_brightness_pct = 100;
 uint8_t g_screensaver_brightness_pct = 16;
 thermostat::DisplayModel g_preview_model;
 thermostat::TemperatureUnit g_preview_unit = thermostat::TemperatureUnit::Celsius;
+FurnaceMode g_preview_mode = FurnaceMode::Off;
 float g_preview_indoor_c = 22.2f;
 float g_preview_humidity = 43.0f;
 float g_preview_outdoor_c = 9.0f;
 const char *g_preview_weather_condition = "Cloudy";
+
+FurnaceStateCode preview_state_code() {
+  if (g_preview_mode == FurnaceMode::Heat) {
+    return (g_preview_indoor_c < g_setpoint_c) ? FurnaceStateCode::HeatOn : FurnaceStateCode::HeatMode;
+  }
+  if (g_preview_mode == FurnaceMode::Cool) {
+    return (g_preview_indoor_c > g_setpoint_c) ? FurnaceStateCode::CoolOn : FurnaceStateCode::CoolMode;
+  }
+  return FurnaceStateCode::Idle;
+}
 
 void init_styles() {
   if (g_styles_ready) {
@@ -205,7 +223,7 @@ void update_labels() {
   const std::string humidity_text = g_preview_model.format_indoor_humidity_text();
   const std::string weather_text = g_preview_model.format_weather_text();
   const std::string status_text =
-      thermostat::furnace_state_text(FurnaceStateCode::CoolMode, true, false, false);
+      thermostat::furnace_state_text(preview_state_code(), true, false, false);
 
   if (g_home_date_label != nullptr) {
     lv_label_set_text(g_home_date_label, "Sunday, Feb 22");
@@ -223,17 +241,72 @@ void update_labels() {
   }
   lv_label_set_text(g_screen_time_label, "12:34 PM");
 
-  char display_cfg[512];
-  snprintf(display_cfg, sizeof(display_cfg),
-           "SIM DATA (Preview)\n"
-           "IP Address: 192.168.1.77\n"
-           "MAC Address: AA:BB:CC:DD:EE:FF\n"
-           "WiFi SSID: lab-2g\n"
-           "WiFi Channel: 6\n"
-           "WiFi RSSI: -58 dBm\n"
-           "MQTT Host: mqtt.lan:1883\n"
-           "MQTT Base Topic: thermostat/furnace-display");
-  lv_label_set_text(g_settings_display_label, display_cfg);
+  char system_text[256];
+  snprintf(system_text, sizeof(system_text),
+           "fw: 0.9.0-preview+18\n"
+           "build: native-ui-preview\n"
+           "boot_count: 14\n"
+           "reset: software\n"
+           "uptime_s: %lu",
+           static_cast<unsigned long>(SDL_GetTicks() / 1000U));
+
+  char wifi_text[256];
+  snprintf(wifi_text, sizeof(wifi_text),
+           "connected: yes\n"
+           "ip: 192.168.1.77\n"
+           "ssid: lab-2g\n"
+           "mac: AA:BB:CC:DD:EE:FF\n"
+           "channel: 6\n"
+           "rssi_dbm: -58");
+
+  char mqtt_text[256];
+  snprintf(mqtt_text, sizeof(mqtt_text),
+           "connected: yes\n"
+           "state: 0\n"
+           "host: mqtt.lan:1883\n"
+           "user: (none)\n"
+           "password: unset\n"
+           "client_id: esp32-furnace-thermostat\n"
+           "base_topic: thermostat/furnace-display\n"
+           "last_cmd_ago_s: 7");
+
+  char controller_text[96];
+  snprintf(controller_text, sizeof(controller_text),
+           "last_hb_ago_s: 2\n"
+           "timeout_ms: 30000");
+
+  char espnow_text[160];
+  snprintf(espnow_text, sizeof(espnow_text),
+           "channel: 6\n"
+           "peer_mac: 24:6F:28:AA:BB:CC\n"
+           "tx_ok: 122\n"
+           "tx_fail: 1");
+
+  char config_text[192];
+  snprintf(config_text, sizeof(config_text),
+           "temp_unit: %s\n"
+           "temp_comp_c: -0.3\n"
+           "display_timeout_s: %lu\n"
+           "brightness_pct: %u\n"
+           "saver_pct: %u",
+           g_preview_unit == thermostat::TemperatureUnit::Fahrenheit ? "F" : "C",
+           static_cast<unsigned long>(g_display_timeout_s),
+           static_cast<unsigned>(g_brightness_pct),
+           static_cast<unsigned>(g_screensaver_brightness_pct));
+
+  const char *errors_text =
+      "mqtt: none\n"
+      "ota: none\n"
+      "espnow: none";
+
+  if (g_settings_system_label != nullptr) lv_label_set_text(g_settings_system_label, system_text);
+  if (g_settings_wifi_label != nullptr) lv_label_set_text(g_settings_wifi_label, wifi_text);
+  if (g_settings_mqtt_label != nullptr) lv_label_set_text(g_settings_mqtt_label, mqtt_text);
+  if (g_settings_controller_label != nullptr) lv_label_set_text(g_settings_controller_label, controller_text);
+  if (g_settings_espnow_label != nullptr) lv_label_set_text(g_settings_espnow_label, espnow_text);
+  if (g_settings_config_label != nullptr) lv_label_set_text(g_settings_config_label, config_text);
+  if (g_settings_errors_label != nullptr) lv_label_set_text(g_settings_errors_label, errors_text);
+  if (g_settings_display_label != nullptr) lv_label_set_text(g_settings_display_label, system_text);
   if (g_timeout_slider != nullptr && !lv_obj_has_state(g_timeout_slider, LV_STATE_PRESSED)) {
     lv_slider_set_value(g_timeout_slider, static_cast<int32_t>(g_display_timeout_s), LV_ANIM_OFF);
   }
@@ -245,32 +318,7 @@ void update_labels() {
                         LV_ANIM_OFF);
   }
 
-  char diag[1024];
-  snprintf(diag, sizeof(diag),
-           "SIM DATA (Preview)\n"
-           "Version: 0.9.0-preview+18\n"
-           "Build: native-ui-preview\n"
-           "Boot Count: 14   Reset: software\n"
-           "Uptime: %lus\n"
-           "Temp Unit: %s   Temp Comp: -0.3 C\n"
-           "Display Timeout: %lus\n"
-           "Brightness: %u%%   Screensaver: %u%%\n"
-           "Controller Timeout: 30000 ms\n"
-           "MQTT Connected: yes   MQTT State: 0\n"
-           "MQTT Client: esp32-furnace-thermostat\n"
-           "ESP-NOW Channel: 6\n"
-           "ESP-NOW Peer: 24:6F:28:AA:BB:CC\n"
-           "ESP-NOW TX OK/Fail: 122/1\n"
-           "Last MQTT Cmd: 7s ago\n"
-           "Last Controller HB: 2s ago\n"
-           "Raw Indoor Label: %s",
-           static_cast<unsigned long>(SDL_GetTicks() / 1000U),
-           g_preview_unit == thermostat::TemperatureUnit::Fahrenheit ? "F" : "C",
-           static_cast<unsigned long>(g_display_timeout_s),
-           static_cast<unsigned>(g_brightness_pct),
-           static_cast<unsigned>(g_screensaver_brightness_pct),
-           indoor_text.c_str());
-  lv_label_set_text(g_settings_diag_label, diag);
+  if (g_settings_diag_label != nullptr) lv_label_set_text(g_settings_diag_label, errors_text);
 }
 
 void on_tab_changed(lv_event_t *e) {
@@ -312,6 +360,13 @@ void on_unit_changed(lv_event_t *e) {
   thermostat::ui::set_temperature_unit_button_state(unit);
 }
 
+void on_mode_changed(lv_event_t *e) {
+  if (e == nullptr) return;
+  const auto mode = static_cast<FurnaceMode>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+  g_preview_mode = mode;
+  thermostat::ui::set_mode_button_state(mode);
+}
+
 uint32_t snap_to_step(uint32_t value, uint32_t step, uint32_t min_v, uint32_t max_v) {
   if (value < min_v) value = min_v;
   if (value > max_v) value = max_v;
@@ -350,6 +405,7 @@ void create_ui() {
   callbacks.on_tab_changed = on_tab_changed;
   callbacks.on_setpoint_up = on_setpoint_up;
   callbacks.on_setpoint_down = on_setpoint_down;
+  callbacks.on_mode = on_mode_changed;
   callbacks.on_unit = on_unit_changed;
   callbacks.on_timeout_slider = on_timeout_slider;
   callbacks.on_brightness_slider = on_brightness_slider;
@@ -374,10 +430,18 @@ void create_ui() {
   g_screen_time_label = handles.screen_time_label;
   g_settings_diag_label = handles.settings_diag_label;
   g_settings_display_label = handles.settings_display_label;
+  g_settings_system_label = handles.settings_system_label;
+  g_settings_wifi_label = handles.settings_wifi_label;
+  g_settings_mqtt_label = handles.settings_mqtt_label;
+  g_settings_controller_label = handles.settings_controller_label;
+  g_settings_espnow_label = handles.settings_espnow_label;
+  g_settings_config_label = handles.settings_config_label;
+  g_settings_errors_label = handles.settings_errors_label;
   g_timeout_slider = handles.timeout_slider;
   g_brightness_slider = handles.brightness_slider;
   g_dim_slider = handles.dim_slider;
 
+  thermostat::ui::set_mode_button_state(g_preview_mode);
   thermostat::ui::set_temperature_unit_button_state(g_preview_unit);
   show_page(PreviewPage::Home);
   update_labels();

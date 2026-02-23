@@ -723,23 +723,65 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_scroll_dir(settings_network, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(settings_network, LV_SCROLLBAR_MODE_AUTO);
 
-  lv_obj_t *net_title = lv_label_create(settings_network);
-  lv_label_set_text(net_title, "Network");
-  style_label(net_title, font26());
+  lv_obj_t *system_title = lv_label_create(settings_network);
+  lv_label_set_text(system_title, "System");
+  style_label(system_title, font26());
+  out_handles->settings_system_label = lv_label_create(settings_network);
+  lv_obj_set_width(out_handles->settings_system_label, 320);
+  lv_label_set_long_mode(out_handles->settings_system_label, LV_LABEL_LONG_WRAP);
+  style_label(out_handles->settings_system_label, LV_FONT_DEFAULT);
 
-  out_handles->settings_display_label = lv_label_create(settings_network);
-  lv_obj_set_width(out_handles->settings_display_label, 320);
-  lv_label_set_long_mode(out_handles->settings_display_label, LV_LABEL_LONG_WRAP);
-  style_label(out_handles->settings_display_label, font20());
+  lv_obj_t *wifi_title = lv_label_create(settings_network);
+  lv_label_set_text(wifi_title, "WiFi");
+  style_label(wifi_title, font26());
+  out_handles->settings_wifi_label = lv_label_create(settings_network);
+  lv_obj_set_width(out_handles->settings_wifi_label, 320);
+  lv_label_set_long_mode(out_handles->settings_wifi_label, LV_LABEL_LONG_WRAP);
+  style_label(out_handles->settings_wifi_label, LV_FONT_DEFAULT);
 
-  lv_obj_t *about_title = lv_label_create(settings_network);
-  lv_label_set_text(about_title, "About");
-  style_label(about_title, font26());
+  lv_obj_t *mqtt_title = lv_label_create(settings_network);
+  lv_label_set_text(mqtt_title, "MQTT");
+  style_label(mqtt_title, font26());
+  out_handles->settings_mqtt_label = lv_label_create(settings_network);
+  lv_obj_set_width(out_handles->settings_mqtt_label, 320);
+  lv_label_set_long_mode(out_handles->settings_mqtt_label, LV_LABEL_LONG_WRAP);
+  style_label(out_handles->settings_mqtt_label, LV_FONT_DEFAULT);
 
-  out_handles->settings_diag_label = lv_label_create(settings_network);
-  lv_obj_set_width(out_handles->settings_diag_label, 320);
-  lv_label_set_long_mode(out_handles->settings_diag_label, LV_LABEL_LONG_WRAP);
-  style_label(out_handles->settings_diag_label, font20());
+  lv_obj_t *controller_title = lv_label_create(settings_network);
+  lv_label_set_text(controller_title, "Controller");
+  style_label(controller_title, font26());
+  out_handles->settings_controller_label = lv_label_create(settings_network);
+  lv_obj_set_width(out_handles->settings_controller_label, 320);
+  lv_label_set_long_mode(out_handles->settings_controller_label, LV_LABEL_LONG_WRAP);
+  style_label(out_handles->settings_controller_label, LV_FONT_DEFAULT);
+
+  lv_obj_t *espnow_title = lv_label_create(settings_network);
+  lv_label_set_text(espnow_title, "ESP-NOW");
+  style_label(espnow_title, font26());
+  out_handles->settings_espnow_label = lv_label_create(settings_network);
+  lv_obj_set_width(out_handles->settings_espnow_label, 320);
+  lv_label_set_long_mode(out_handles->settings_espnow_label, LV_LABEL_LONG_WRAP);
+  style_label(out_handles->settings_espnow_label, LV_FONT_DEFAULT);
+
+  lv_obj_t *config_title = lv_label_create(settings_network);
+  lv_label_set_text(config_title, "Config");
+  style_label(config_title, font26());
+  out_handles->settings_config_label = lv_label_create(settings_network);
+  lv_obj_set_width(out_handles->settings_config_label, 320);
+  lv_label_set_long_mode(out_handles->settings_config_label, LV_LABEL_LONG_WRAP);
+  style_label(out_handles->settings_config_label, LV_FONT_DEFAULT);
+
+  lv_obj_t *errors_title = lv_label_create(settings_network);
+  lv_label_set_text(errors_title, "Errors");
+  style_label(errors_title, font26());
+  out_handles->settings_errors_label = lv_label_create(settings_network);
+  lv_obj_set_width(out_handles->settings_errors_label, 320);
+  lv_label_set_long_mode(out_handles->settings_errors_label, LV_LABEL_LONG_WRAP);
+  style_label(out_handles->settings_errors_label, LV_FONT_DEFAULT);
+
+  // Backward-compatible handles used by existing runtime/sim code.
+  out_handles->settings_display_label = out_handles->settings_system_label;
+  out_handles->settings_diag_label = out_handles->settings_errors_label;
 
   lv_obj_t *screensaver_root = make_transparent(out_handles->screensaver_page, LV_PCT(100), LV_PCT(100));
   out_handles->screen_time_label = lv_label_create(screensaver_root);
