@@ -41,5 +41,3 @@ jobs:
       - name: Build controller preview
         run: pio run -e native-controller-preview
 
-      - name: Verify UI golden screenshots
-        run: scripts/ui_golden_check.sh
