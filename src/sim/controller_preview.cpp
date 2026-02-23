@@ -129,7 +129,6 @@ bool g_espnow_command_enabled = true;
 thermostat::ControllerRelayIo g_relay_io;
 
 // Simulated state
-float g_simulated_indoor_c = 20.0f;
 uint32_t g_start_time_ms = 0;
 
 // Simulated weather
@@ -231,6 +230,32 @@ void publish_controller_extras() {
   g_mqtt.publish(ctrl_topic("state/failsafe"), rt.failsafe_active() ? "1" : "0", true);
 }
 
+// Parse sensor topic: {base}/sensor/{mac}/{suffix}
+// Returns true if topic matches, populating mac_out and suffix_out.
+bool parse_sensor_topic(const std::string &base, const std::string &topic,
+                        std::string &mac_out, std::string &suffix_out) {
+  const std::string prefix = base + "/sensor/";
+  if (topic.compare(0, prefix.size(), prefix) != 0) return false;
+  // MAC is 17 chars "AA:BB:CC:DD:EE:FF" followed by "/"
+  if (topic.size() < prefix.size() + 18) return false;
+  if (topic[prefix.size() + 17] != '/') return false;
+  mac_out = topic.substr(prefix.size(), 17);
+  suffix_out = topic.substr(prefix.size() + 18);
+  return !suffix_out.empty();
+}
+
+// Parse "AA:BB:CC:DD:EE:FF" into 6-byte array
+bool parse_mac_string(const std::string &mac_str, uint8_t out[6]) {
+  if (mac_str.size() != 17) return false;
+  unsigned int b[6];
+  if (sscanf(mac_str.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
+             &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
+    return false;
+  }
+  for (int i = 0; i < 6; ++i) out[i] = static_cast<uint8_t>(b[i]);
+  return true;
+}
+
 void on_mqtt_message(const std::string &topic, const std::string &payload) {
   const uint32_t now = SDL_GetTicks();
 
@@ -238,6 +263,23 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   if (topic.find("cmd/") != std::string::npos ||
       topic.find("packed_command") != std::string::npos) {
     g_last_mqtt_command_ms = now;
+  }
+
+  // MQTT sensor intake: {base}/sensor/{mac}/temp_c or humidity
+  std::string sensor_mac, sensor_suffix;
+  if (parse_sensor_topic(kControllerBaseTopic, topic, sensor_mac, sensor_suffix)) {
+    uint8_t parsed_mac[6];
+    if (parse_mac_string(sensor_mac, parsed_mac)) {
+      const float fval = static_cast<float>(atof(payload.c_str()));
+      if (sensor_suffix == "temp_c") {
+        g_app->on_indoor_temperature_c(fval, parsed_mac);
+        printf("[MQTT RX] sensor/%s/temp_c = %.2f\n", sensor_mac.c_str(),
+               static_cast<double>(fval));
+      } else if (sensor_suffix == "humidity") {
+        g_app->on_indoor_humidity(fval, parsed_mac);
+      }
+    }
+    return;
   }
 
   // Handle display's packed command (primary communication path)
@@ -344,6 +386,10 @@ void ensure_mqtt_connected() {
   g_mqtt.subscribe(ctrl_topic("cmd/target_temp_c"));
   g_mqtt.subscribe(ctrl_topic("cmd/filter_reset"));
   g_mqtt.subscribe(display_topic("state/packed_command"));
+
+  // Subscribe to sensor intake topics from display nodes
+  g_mqtt.subscribe(ctrl_topic("sensor/+/temp_c"));
+  g_mqtt.subscribe(ctrl_topic("sensor/+/humidity"));
 
   publish_controller_extras();
 }
@@ -479,7 +525,7 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   draw_text(g_font_small, x + 10, ly, buf, kColorYellow);
   ly += line_height;
 
-  snprintf(buf, sizeof(buf), "Indoor: %.1f C", g_simulated_indoor_c);
+  snprintf(buf, sizeof(buf), "Indoor: %.1f C", g_app->indoor_temperature_c());
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
   ly += line_height;
 
@@ -834,28 +880,12 @@ void tick_controller() {
       (static_cast<uint32_t>(now - g_last_mqtt_command_ms) < kMqttPrimaryHoldMs);
   g_espnow_command_enabled = !mqtt_primary_active;
 
-  // Feed simulated indoor temperature into the app — ControllerApp::tick()
-  // uses compute_hvac_calls() with proper deadband/overrun logic.
-  g_app->on_indoor_temperature_c(g_simulated_indoor_c);
+  // Indoor temperature now arrives via MQTT sensor intake from the display sim.
   g_app->tick(now);
 
   // Apply relay IO interlock layer on top of runtime demand
   auto snap = g_app->runtime().snapshot();
   g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
-
-  // Simulate temperature drift based on actual relay output (post-interlock)
-  const auto &relay_out = g_relay_io.latched_output();
-  if (relay_out.heat) {
-    g_simulated_indoor_c += 0.005f;  // Faster heating for demo
-  } else if (relay_out.cool) {
-    g_simulated_indoor_c -= 0.005f;  // Faster cooling for demo
-  } else {
-    const float outdoor = 15.0f;
-    g_simulated_indoor_c += (outdoor - g_simulated_indoor_c) * 0.0002f;
-  }
-
-  if (g_simulated_indoor_c < 5.0f) g_simulated_indoor_c = 5.0f;
-  if (g_simulated_indoor_c > 40.0f) g_simulated_indoor_c = 40.0f;
 
   // Publish relay/uptime extras periodically
   if (g_mqtt_connected && (now - g_last_state_publish_ms) > 5000) {
