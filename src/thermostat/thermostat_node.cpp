@@ -14,6 +14,7 @@ bool ThermostatNode::begin() {
   transport_.set_callbacks(&ThermostatNode::on_heartbeat_static,
                            &ThermostatNode::on_telemetry_static,
                            this);
+  transport_.set_weather_callback(&ThermostatNode::on_weather_static);
   const bool ok = transport_.begin(transport_config_);
   if (ok) {
 #if defined(ARDUINO)
@@ -54,6 +55,20 @@ void ThermostatNode::on_telemetry(const ThermostatControllerTelemetry &telemetry
 #else
   app_.on_controller_telemetry(0, telemetry);
 #endif
+}
+
+void ThermostatNode::on_weather_static(float outdoor_temp_c, const char *condition,
+                                        void *ctx) {
+  if (ctx == nullptr) {
+    return;
+  }
+  static_cast<ThermostatNode *>(ctx)->on_weather(outdoor_temp_c, condition);
+}
+
+void ThermostatNode::on_weather(float outdoor_temp_c, const char *condition) {
+  if (weather_cb_ != nullptr) {
+    weather_cb_(outdoor_temp_c, condition, weather_cb_ctx_);
+  }
 }
 
 }  // namespace thermostat

@@ -66,6 +66,16 @@ std::string display_topic(const char *suffix) {
 // SimControllerTransport: bridges ControllerApp telemetry to MQTT topics
 class SimControllerTransport : public thermostat::IControllerTransport {
  public:
+  void publish_weather(float outdoor_temp_c, const char *condition) override {
+    if (!g_mqtt_connected) return;
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(outdoor_temp_c));
+    g_mqtt.publish(ctrl_topic("state/outdoor_temp_c"), buf, true);
+    g_mqtt.publish(ctrl_topic("state/outdoor_condition"),
+                   condition != nullptr ? condition : "", true);
+  }
+
   void publish_telemetry(const thermostat::ControllerTelemetry &t) override {
     if (!g_mqtt_connected) return;
 
@@ -118,6 +128,14 @@ thermostat::ControllerRelayIo g_relay_io;
 // Simulated state
 float g_simulated_indoor_c = 20.0f;
 uint32_t g_start_time_ms = 0;
+
+// Simulated weather
+float g_simulated_outdoor_c = 15.0f;
+constexpr const char *kWeatherConditions[] = {
+    "Sunny", "Cloudy", "Rain", "Snow", "Fog", "Lightning"};
+constexpr int kWeatherConditionCount = 6;
+int g_weather_index = 1;  // Start at Cloudy
+bool g_weather_enabled = false;
 
 const char *mode_name(FurnaceMode mode) {
   switch (mode) {
@@ -483,6 +501,17 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
   ly += line_height;
 
+  // Weather
+  ly += 5;
+  if (g_weather_enabled) {
+    snprintf(buf, sizeof(buf), "Weather: %.1f C, %s",
+             static_cast<double>(g_simulated_outdoor_c), kWeatherConditions[g_weather_index]);
+    draw_text(g_font_small, x + 10, ly, buf, kColorLightBlue);
+  } else {
+    draw_text(g_font_small, x + 10, ly, "Weather: (disabled)", 0xFF888888);
+  }
+  ly += line_height;
+
   // MQTT status
   ly += 5;
   snprintf(buf, sizeof(buf), "MQTT: %s", g_mqtt_connected ? "Connected" : "Disconnected");
@@ -589,10 +618,10 @@ void draw_controls_panel(int x, int y, int w, int h) {
   const int line_height = 16;
   int ly = y + 35;
 
-  draw_text(g_font_small, x + 10, ly, "H/C/O - Mode (ESP-NOW)", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "F - Cycle fan", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "+/- Setpoint", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "L - Lockout  Q - Quit", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "H/C/O - Mode  F - Fan", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "+/- Setpoint  L - Lock", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "W - Weather  [/] - Temp", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "Q - Quit", kColorWhite); ly += line_height;
   if (!g_espnow_command_enabled) {
     draw_text(g_font_small, x + 10, ly, "MQTT hold: keys blocked", kColorYellow);
   }
@@ -720,6 +749,34 @@ void handle_keypress(SDL_Keycode key) {
     case SDLK_l:
       g_app->set_hvac_lockout(!g_app->runtime().hvac_lockout());
       publish_controller_extras();
+      break;
+
+    case SDLK_w: {
+      g_weather_enabled = true;
+      g_weather_index = (g_weather_index + 1) % kWeatherConditionCount;
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      printf("[SIM] Weather: %s, Outdoor: %.1f C\n",
+             kWeatherConditions[g_weather_index], static_cast<double>(g_simulated_outdoor_c));
+      break;
+    }
+
+    case SDLK_RIGHTBRACKET:
+      g_weather_enabled = true;
+      g_simulated_outdoor_c += 2.0f;
+      if (g_simulated_outdoor_c > 50.0f) g_simulated_outdoor_c = 50.0f;
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      printf("[SIM] Outdoor temp: %.1f C\n", static_cast<double>(g_simulated_outdoor_c));
+      break;
+
+    case SDLK_LEFTBRACKET:
+      g_weather_enabled = true;
+      g_simulated_outdoor_c -= 2.0f;
+      if (g_simulated_outdoor_c < -40.0f) g_simulated_outdoor_c = -40.0f;
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      printf("[SIM] Outdoor temp: %.1f C\n", static_cast<double>(g_simulated_outdoor_c));
       break;
 
     case SDLK_q:

@@ -740,6 +740,19 @@ bool fetch_pirateweather_current(float lat, float lon, float *temp_c_out, String
 }
 
 void poll_weather(uint32_t now_ms) {
+  // If controller is providing weather via ESP-NOW, update globals and skip self-polling.
+  if (g_runtime != nullptr && g_runtime->has_controller_weather()) {
+    if (!g_have_weather_data || g_runtime->last_controller_weather_ms() == 0) {
+      g_runtime->set_last_controller_weather_ms(now_ms);
+      g_have_weather_data = true;
+    }
+    // Only fall back to self-polling if no controller weather for 30 minutes.
+    constexpr uint32_t kControllerWeatherTimeoutMs = 30UL * 60UL * 1000UL;
+    if ((now_ms - g_runtime->last_controller_weather_ms()) < kControllerWeatherTimeoutMs) {
+      return;
+    }
+  }
+
   if (WiFi.status() != WL_CONNECTED) return;
   if (g_cfg_pirateweather_api_key.length() == 0 || g_cfg_pirateweather_zip.length() == 0) {
     g_have_weather_data = false;
@@ -1127,25 +1140,11 @@ void mqtt_publish_discovery() {
 
   const String base = g_cfg_mqtt_base_topic;
   const String node = g_cfg_shared_device_id;
-  const String config_topic = g_cfg_discovery_prefix + "/climate/" + node +
-                              "/config";
+
+  // Climate entity is now published by the controller. Display publishes only
+  // display-specific entities (timeout, brightness, diagnostics).
 
   char payload[1500];
-  snprintf(
-      payload, sizeof(payload),
-      "{\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\",\"mode_cmd_t\":\"%s/cmd/"
-      "mode\",\"mode_stat_t\":\"%s/state/mode\",\"temp_cmd_t\":\"%s/cmd/target_temp_c\","
-      "\"temp_stat_t\":\"%s/state/target_temp_c\",\"curr_temp_t\":\"%s/state/current_temp_c\","
-      "\"fan_mode_cmd_t\":\"%s/cmd/fan_mode\",\"fan_mode_stat_t\":\"%s/state/fan_mode\","
-      "\"curr_hum_t\":\"%s/state/current_humidity\",\"modes\":[\"off\",\"heat\",\"cool\"],"
-      "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],\"avty_t\":\"%s/state/availability\","
-      "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"min_temp\":5,\"max_temp\":35,"
-      "\"temp_step\":0.5,\"temp_unit\":\"C\",\"dev\":{\"ids\":[\"%s\"],"
-      "\"name\":\"Wireless Thermostat System\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      node.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(),
-      base.c_str(), base.c_str(), base.c_str(), node.c_str());
-  g_mqtt.publish(config_topic.c_str(), payload, true);
-
   const String timeout_config = g_cfg_discovery_prefix + "/number/" + node +
                                 "_display_timeout/config";
   snprintf(payload, sizeof(payload),

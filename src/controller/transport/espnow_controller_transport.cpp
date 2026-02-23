@@ -12,9 +12,20 @@
 namespace thermostat {
 
 namespace {
-bool is_broadcast_mac(const uint8_t mac[6]) {
-  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  return memcmp(mac, kBroadcast, sizeof(kBroadcast)) == 0;
+bool is_registered_peer(const EspNowControllerConfig &config, const uint8_t mac[6]) {
+  for (int i = 0; i < config.peer_count; ++i) {
+    if (memcmp(config.peer_macs[i], mac, 6) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool is_all_zero_mac(const uint8_t mac[6]) {
+  for (int i = 0; i < 6; ++i) {
+    if (mac[i] != 0) return false;
+  }
+  return true;
 }
 }  // namespace
 
@@ -38,18 +49,22 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   esp_now_register_send_cb(
       reinterpret_cast<esp_now_send_cb_t>(&EspNowControllerTransport::on_send_static));
 
-  esp_now_peer_info_t peer_info;
-  memset(&peer_info, 0, sizeof(peer_info));
-  memcpy(peer_info.peer_addr, config_.peer_mac, sizeof(peer_info.peer_addr));
-  peer_info.channel = config_.channel;
-  peer_info.encrypt = config_.encrypted;
-  if (peer_info.encrypt) {
-    memcpy(peer_info.lmk, config_.lmk, sizeof(peer_info.lmk));
-  }
+  for (int i = 0; i < config_.peer_count; ++i) {
+    if (is_all_zero_mac(config_.peer_macs[i])) {
+      continue;
+    }
+    esp_now_peer_info_t peer_info;
+    memset(&peer_info, 0, sizeof(peer_info));
+    memcpy(peer_info.peer_addr, config_.peer_macs[i], sizeof(peer_info.peer_addr));
+    peer_info.channel = config_.channel;
+    peer_info.encrypt = config_.encrypted;
+    if (peer_info.encrypt) {
+      memcpy(peer_info.lmk, config_.lmk, sizeof(peer_info.lmk));
+    }
 
-  if (esp_now_add_peer(&peer_info) != ESP_OK) {
-    initialized_ = false;
-    return false;
+    if (esp_now_add_peer(&peer_info) != ESP_OK) {
+      // Continue — register as many peers as possible
+    }
   }
 
   instance_ = this;
@@ -92,6 +107,19 @@ void EspNowControllerTransport::set_callbacks(CommandWordCallback command_cb,
   callback_context_ = callback_context;
 }
 
+void EspNowControllerTransport::send_to_all_peers(const uint8_t *data, size_t len) {
+#if defined(ARDUINO)
+  for (int i = 0; i < config_.peer_count; ++i) {
+    if (!is_all_zero_mac(config_.peer_macs[i])) {
+      esp_now_send(config_.peer_macs[i], data, len);
+    }
+  }
+#else
+  (void)data;
+  (void)len;
+#endif
+}
+
 void EspNowControllerTransport::publish_telemetry(
     const ControllerTelemetry &telemetry) {
   if (!initialized_) {
@@ -120,9 +148,26 @@ void EspNowControllerTransport::publish_telemetry(
       telemetry.filter_runtime_hours < 0.0f ? 0.0f : telemetry.filter_runtime_hours;
   pkt.filter_runtime_seconds = static_cast<uint32_t>(clamped_hours * 3600.0f);
 
-#if defined(ARDUINO)
-  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
-#endif
+  send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+}
+
+void EspNowControllerTransport::publish_weather(float outdoor_temp_c,
+                                                 const char *condition) {
+  if (!initialized_) {
+    return;
+  }
+
+  WeatherDataPacket pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  pkt.header.type = static_cast<uint8_t>(PacketType::WeatherData);
+  pkt.header.version = kEspNowProtocolVersion;
+  pkt.outdoor_temp_c = outdoor_temp_c;
+  if (condition != nullptr) {
+    strncpy(pkt.condition, condition, sizeof(pkt.condition) - 1);
+    pkt.condition[sizeof(pkt.condition) - 1] = '\0';
+  }
+
+  send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 void EspNowControllerTransport::on_recv_static(const void *recv_info,
@@ -156,13 +201,14 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
   if (data == nullptr || len < static_cast<int>(sizeof(PacketHeader))) {
     return;
   }
-  if (src_mac != nullptr && !is_broadcast_mac(config_.peer_mac) &&
-      memcmp(src_mac, config_.peer_mac, 6) != 0) {
+  // Accept packets from any registered peer, or all if no peers configured
+  if (src_mac != nullptr && config_.peer_count > 0 &&
+      !is_registered_peer(config_, src_mac)) {
     return;
   }
 
   const auto *header = reinterpret_cast<const PacketHeader *>(data);
-  if (header->version != kEspNowProtocolVersion) {
+  if (!is_compatible_protocol_version(header->version)) {
     return;
   }
 
@@ -181,7 +227,7 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
     case PacketType::CommandWord:
       if (len >= static_cast<int>(sizeof(CommandWordPacket)) && command_cb_ != nullptr) {
         const auto *pkt = reinterpret_cast<const CommandWordPacket *>(data);
-        command_cb_(pkt->packed_word, callback_context_);
+        command_cb_(pkt->packed_word, src_mac, callback_context_);
       }
       break;
 
@@ -221,9 +267,7 @@ void EspNowControllerTransport::send_heartbeat(uint32_t now_ms) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.toggle = heartbeat_toggle_ ? 1 : 0;
 
-#if defined(ARDUINO)
-  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
-#endif
+  send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 }  // namespace thermostat

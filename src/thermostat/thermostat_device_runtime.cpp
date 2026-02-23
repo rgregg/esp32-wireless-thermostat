@@ -4,9 +4,21 @@ namespace thermostat {
 
 ThermostatDeviceRuntime::ThermostatDeviceRuntime(
     const ThermostatDeviceRuntimeConfig &config)
-    : config_(config), node_(config.app, config.transport), display_(node_.app()) {}
+    : config_(config), node_(config.app, config.transport), display_(node_.app()) {
+  node_.set_weather_callback(&ThermostatDeviceRuntime::on_weather_from_controller, this);
+}
 
 bool ThermostatDeviceRuntime::begin() { return node_.begin(); }
+
+void ThermostatDeviceRuntime::on_weather_from_controller(float outdoor_temp_c,
+                                                          const char *condition,
+                                                          void *ctx) {
+  if (ctx == nullptr) return;
+  auto *self = static_cast<ThermostatDeviceRuntime *>(ctx);
+  self->display_.on_outdoor_weather_update(outdoor_temp_c, std::string(condition));
+  self->last_controller_weather_ms_ = 0;  // mark as received; firmware sets actual timestamp
+  self->has_controller_weather_ = true;
+}
 
 void ThermostatDeviceRuntime::tick(uint32_t now_ms) {
   node_.tick(now_ms);

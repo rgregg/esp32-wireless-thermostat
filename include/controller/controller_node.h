@@ -22,13 +22,14 @@ class ControllerNode {
   EspNowControllerTransport &transport() { return transport_; }
 
  private:
-  static void on_command_word_static(uint32_t packed_word, void *ctx);
+  static void on_command_word_static(uint32_t packed_word, const uint8_t *src_mac,
+                                     void *ctx);
   static void on_heartbeat_static(uint32_t now_ms, void *ctx);
   static void on_indoor_temp_static(float value, void *ctx);
   static void on_indoor_humidity_static(float value, void *ctx);
   static void on_thermostat_ack_static(uint16_t seq, void *ctx);
 
-  void on_command_word(uint32_t packed_word);
+  void on_command_word(uint32_t packed_word, const uint8_t *src_mac);
   void on_heartbeat(uint32_t now_ms);
   void on_indoor_temp(float value);
   void on_indoor_humidity(float value);

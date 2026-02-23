@@ -1,5 +1,7 @@
 #include "controller/controller_app.h"
 
+#include <string.h>
+
 #include "espnow_cmd_word.h"
 
 #if defined(ARDUINO)
@@ -35,9 +37,10 @@ void ControllerApp::on_heartbeat(uint32_t now_ms) {
   runtime_.note_heartbeat(now_ms);
 }
 
-CommandApplyResult ControllerApp::on_command_word(uint32_t packed_word) {
+CommandApplyResult ControllerApp::on_command_word(uint32_t packed_word,
+                                                  const uint8_t *source_mac) {
   const CommandWord cmd = espnow_cmd::decode(packed_word);
-  const CommandApplyResult result = runtime_.apply_remote_command(cmd);
+  const CommandApplyResult result = runtime_.apply_remote_command(cmd, source_mac);
   if (result.accepted) {
     publish();
   }
@@ -198,6 +201,17 @@ void ControllerApp::persist_indoor_fallback() const {
   prefs.putFloat("indoor_h", indoor_humidity_pct_);
   prefs.end();
 #endif
+}
+
+void ControllerApp::set_outdoor_weather(float temp_c, const char *condition) {
+  outdoor_temp_c_ = temp_c;
+  has_outdoor_weather_ = true;
+  if (condition != nullptr) {
+    strncpy(outdoor_condition_, condition, sizeof(outdoor_condition_) - 1);
+    outdoor_condition_[sizeof(outdoor_condition_) - 1] = '\0';
+  } else {
+    outdoor_condition_[0] = '\0';
+  }
 }
 
 }  // namespace thermostat

@@ -220,6 +220,33 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     state_updated = true;
   }
 
+  // Weather from controller (simulates ESP-NOW WeatherData packet)
+  static float s_ctrl_outdoor_c = 0.0f;
+  static std::string s_ctrl_condition;
+  static bool s_ctrl_weather_received = false;
+
+  if (topic == controller_topic("state/outdoor_temp_c")) {
+    s_ctrl_outdoor_c = static_cast<float>(atof(payload.c_str()));
+    if (s_ctrl_weather_received) {
+      g_preview_outdoor_c = s_ctrl_outdoor_c;
+      g_preview_weather_condition = s_ctrl_condition;
+      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_condition);
+    }
+    s_ctrl_weather_received = true;
+    return;
+  }
+  if (topic == controller_topic("state/outdoor_condition")) {
+    s_ctrl_condition = payload;
+    if (s_ctrl_weather_received) {
+      g_preview_weather_condition = s_ctrl_condition;
+      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_condition);
+      printf("[MQTT RX] Weather from controller: %.1f C, %s\n",
+             static_cast<double>(s_ctrl_outdoor_c), s_ctrl_condition.c_str());
+    }
+    s_ctrl_weather_received = true;
+    return;
+  }
+
   if (!state_updated) return;
 
   // Always note heartbeat when we receive any controller state

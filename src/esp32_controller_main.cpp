@@ -14,8 +14,10 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <esp_system.h>
@@ -52,6 +54,9 @@ uint32_t g_ctrl_reboot_at_ms = 0;
 constexpr uint32_t kCtrlNetworkRetryMs = 5000;
 constexpr uint32_t kCtrlMqttPublishMs = 10000;
 constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
+constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
+constexpr uint32_t kCtrlHttpTimeoutMs = 8000;
+uint32_t g_ctrl_last_weather_poll_ms = 0;
 
 #ifndef THERMOSTAT_CONTROLLER_WIFI_SSID
 #define THERMOSTAT_CONTROLLER_WIFI_SSID ""
@@ -97,6 +102,10 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 #define THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC "FF:FF:FF:FF:FF:FF"
 #endif
 
+#ifndef THERMOSTAT_CONTROLLER_ESPNOW_PEER_MACS
+#define THERMOSTAT_CONTROLLER_ESPNOW_PEER_MACS ""
+#endif
+
 #ifndef THERMOSTAT_CONTROLLER_ESPNOW_LMK
 #define THERMOSTAT_CONTROLLER_ESPNOW_LMK "a1b2c3d4e5f60718293a4b5c6d7e8f90"
 #endif
@@ -117,6 +126,14 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 #define THERMOSTAT_FIRMWARE_VERSION "dev"
 #endif
 
+#ifndef THERMOSTAT_CONTROLLER_PIRATEWEATHER_API_KEY
+#define THERMOSTAT_CONTROLLER_PIRATEWEATHER_API_KEY ""
+#endif
+
+#ifndef THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP
+#define THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP ""
+#endif
+
 Preferences g_ctrl_cfg;
 bool g_ctrl_cfg_ready = false;
 String g_cfg_ctrl_wifi_ssid = THERMOSTAT_CONTROLLER_WIFI_SSID;
@@ -133,7 +150,10 @@ String g_cfg_ctrl_ota_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
 String g_cfg_ctrl_ota_password = THERMOSTAT_CONTROLLER_OTA_PASSWORD;
 uint8_t g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
 String g_cfg_ctrl_espnow_peer_mac = THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC;
+String g_cfg_ctrl_espnow_peer_macs = THERMOSTAT_CONTROLLER_ESPNOW_PEER_MACS;
 String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
+String g_cfg_ctrl_pirateweather_api_key = THERMOSTAT_CONTROLLER_PIRATEWEATHER_API_KEY;
+String g_cfg_ctrl_pirateweather_zip = THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP;
 bool g_ctrl_mqtt_reconfigure_required = false;
 bool g_ctrl_wifi_reconnect_required = false;
 bool g_ctrl_cfg_reboot_required = false;
@@ -187,7 +207,10 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_ota_password = g_ctrl_cfg.getString("ota_pwd", g_cfg_ctrl_ota_password);
   g_cfg_ctrl_espnow_channel = static_cast<uint8_t>(g_ctrl_cfg.getUChar("esp_ch", g_cfg_ctrl_espnow_channel));
   g_cfg_ctrl_espnow_peer_mac = g_ctrl_cfg.getString("esp_peer", g_cfg_ctrl_espnow_peer_mac);
+  g_cfg_ctrl_espnow_peer_macs = g_ctrl_cfg.getString("esp_peers", g_cfg_ctrl_espnow_peer_macs);
   g_cfg_ctrl_espnow_lmk = g_ctrl_cfg.getString("esp_lmk", g_cfg_ctrl_espnow_lmk);
+  g_cfg_ctrl_pirateweather_api_key = g_ctrl_cfg.getString("pw_key", g_cfg_ctrl_pirateweather_api_key);
+  g_cfg_ctrl_pirateweather_zip = g_ctrl_cfg.getString("pw_zip", g_cfg_ctrl_pirateweather_zip);
 }
 
 String ctrl_topic_for(const char *suffix) {
@@ -278,7 +301,10 @@ void ctrl_publish_all_cfg_state() {
   ctrl_publish_cfg_value("ota_password", g_cfg_ctrl_ota_password);
   ctrl_publish_cfg_value("espnow_channel", String(g_cfg_ctrl_espnow_channel));
   ctrl_publish_cfg_value("espnow_peer_mac", g_cfg_ctrl_espnow_peer_mac);
+  ctrl_publish_cfg_value("espnow_peer_macs", g_cfg_ctrl_espnow_peer_macs);
   ctrl_publish_cfg_value("espnow_lmk", g_cfg_ctrl_espnow_lmk);
+  ctrl_publish_cfg_value("pirateweather_api_key", g_cfg_ctrl_pirateweather_api_key);
+  ctrl_publish_cfg_value("pirateweather_zip", g_cfg_ctrl_pirateweather_zip);
   ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0");
 }
 
@@ -351,10 +377,22 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_ctrl_espnow_peer_mac = value;
     g_ctrl_cfg.putString("esp_peer", value);
     g_ctrl_cfg_reboot_required = true;
+  } else if (key == "espnow_peer_macs") {
+    g_cfg_ctrl_espnow_peer_macs = value;
+    g_ctrl_cfg.putString("esp_peers", value);
+    g_ctrl_cfg_reboot_required = true;
   } else if (key == "espnow_lmk") {
     g_cfg_ctrl_espnow_lmk = value;
     g_ctrl_cfg.putString("esp_lmk", value);
     g_ctrl_cfg_reboot_required = true;
+  } else if (key == "pirateweather_api_key") {
+    g_cfg_ctrl_pirateweather_api_key = value;
+    g_ctrl_cfg.putString("pw_key", value);
+    g_ctrl_last_weather_poll_ms = 0;
+  } else if (key == "pirateweather_zip") {
+    g_cfg_ctrl_pirateweather_zip = value;
+    g_ctrl_cfg.putString("pw_zip", value);
+    g_ctrl_last_weather_poll_ms = 0;
   } else {
     known = false;
   }
@@ -448,6 +486,180 @@ bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
   return true;
 }
 
+// --- Weather polling (PirateWeather API) ---
+
+String ctrl_normalize_zip(const String &raw_zip) {
+  String out;
+  out.reserve(5);
+  for (size_t i = 0; i < raw_zip.length(); ++i) {
+    const char c = raw_zip[i];
+    if (c == '-') break;
+    if (c >= '0' && c <= '9') {
+      if (out.length() < 5) out += c;
+    }
+  }
+  return out.length() == 5 ? out : String("");
+}
+
+bool ctrl_json_extract_string(const String &json, const char *key, String *out,
+                               int from_index = 0) {
+  if (out == nullptr || key == nullptr) return false;
+  const String token = "\"" + String(key) + "\"";
+  const int key_index = json.indexOf(token, from_index);
+  if (key_index < 0) return false;
+  const int colon_index = json.indexOf(':', key_index + token.length());
+  if (colon_index < 0) return false;
+  int value_start = colon_index + 1;
+  while (value_start < static_cast<int>(json.length()) && json[value_start] == ' ')
+    ++value_start;
+  if (value_start >= static_cast<int>(json.length()) || json[value_start] != '"')
+    return false;
+  ++value_start;
+  String value;
+  bool escaped = false;
+  for (int i = value_start; i < static_cast<int>(json.length()); ++i) {
+    const char c = json[i];
+    if (c == '"' && !escaped) { *out = value; return true; }
+    if (escaped) { escaped = false; } else if (c == '\\') { escaped = true; continue; }
+    value += c;
+  }
+  return false;
+}
+
+bool ctrl_json_extract_float(const String &json, const char *key, float *out,
+                              int from_index = 0) {
+  if (out == nullptr || key == nullptr) return false;
+  const String token = "\"" + String(key) + "\"";
+  const int key_index = json.indexOf(token, from_index);
+  if (key_index < 0) return false;
+  const int colon_index = json.indexOf(':', key_index + token.length());
+  if (colon_index < 0) return false;
+  int value_start = colon_index + 1;
+  while (value_start < static_cast<int>(json.length()) && json[value_start] == ' ')
+    ++value_start;
+  if (value_start >= static_cast<int>(json.length())) return false;
+  bool quoted = json[value_start] == '"';
+  if (quoted) ++value_start;
+  int value_end = value_start;
+  while (value_end < static_cast<int>(json.length())) {
+    const char c = json[value_end];
+    if (quoted) { if (c == '"') break; }
+    else if (c == ',' || c == '}' || c == ' ') break;
+    ++value_end;
+  }
+  if (value_end <= value_start) return false;
+  *out = static_cast<float>(atof(json.substring(value_start, value_end).c_str()));
+  return true;
+}
+
+String ctrl_map_pirateweather_icon(const String &icon) {
+  if (icon == "clear-day") return "Sunny";
+  if (icon == "clear-night") return "Night";
+  if (icon == "partly-cloudy-day") return "Partly Cloudy";
+  if (icon == "partly-cloudy-night") return "Night Cloudy";
+  if (icon == "cloudy") return "Cloudy";
+  if (icon == "fog") return "Fog";
+  if (icon == "rain") return "Rain";
+  if (icon == "snow") return "Snow";
+  if (icon == "sleet") return "Sleet";
+  if (icon == "wind") return "Windy";
+  if (icon == "hail") return "Hail";
+  if (icon == "thunderstorm") return "Lightning";
+  return icon.length() > 0 ? icon : String("Unknown");
+}
+
+bool ctrl_fetch_zip_coordinates(const String &zip, float *lat_out, float *lon_out) {
+  if (lat_out == nullptr || lon_out == nullptr || zip.length() == 0) return false;
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  const String url = "https://api.zippopotam.us/us/" + zip;
+  if (!http.begin(client, url)) return false;
+  http.setTimeout(kCtrlHttpTimeoutMs);
+  const int status = http.GET();
+  if (status != 200) { http.end(); return false; }
+  const String body = http.getString();
+  http.end();
+  float lat = 0.0f, lon = 0.0f;
+  if (!ctrl_json_extract_float(body, "latitude", &lat) ||
+      !ctrl_json_extract_float(body, "longitude", &lon)) {
+    return false;
+  }
+  *lat_out = lat;
+  *lon_out = lon;
+  return true;
+}
+
+bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
+                                       String *condition_out) {
+  if (temp_c_out == nullptr || condition_out == nullptr ||
+      g_cfg_ctrl_pirateweather_api_key.length() == 0) {
+    return false;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  char coord[40];
+  snprintf(coord, sizeof(coord), "%.5f,%.5f",
+           static_cast<double>(lat), static_cast<double>(lon));
+  const String url = "https://api.pirateweather.net/forecast/" +
+                     g_cfg_ctrl_pirateweather_api_key + "/" + String(coord) +
+                     "?units=si&exclude=minutely,hourly,daily,alerts";
+  if (!http.begin(client, url)) return false;
+  http.setTimeout(kCtrlHttpTimeoutMs);
+  const int status = http.GET();
+  if (status != 200) { http.end(); return false; }
+  const String body = http.getString();
+  http.end();
+  const int current_idx = body.indexOf("\"currently\"");
+  if (current_idx < 0) return false;
+  float temp_c = 0.0f;
+  String icon;
+  if (!ctrl_json_extract_float(body, "temperature", &temp_c, current_idx)) return false;
+  if (!ctrl_json_extract_string(body, "icon", &icon, current_idx)) icon = "Unknown";
+  *temp_c_out = temp_c;
+  *condition_out = ctrl_map_pirateweather_icon(icon);
+  return true;
+}
+
+void ctrl_poll_weather(uint32_t now_ms) {
+  if (WiFi.status() != WL_CONNECTED || g_controller == nullptr) return;
+  if (g_cfg_ctrl_pirateweather_api_key.length() == 0 ||
+      g_cfg_ctrl_pirateweather_zip.length() == 0) {
+    return;
+  }
+  if (g_ctrl_last_weather_poll_ms != 0 &&
+      (now_ms - g_ctrl_last_weather_poll_ms) < kCtrlWeatherPollMs) {
+    return;
+  }
+  g_ctrl_last_weather_poll_ms = now_ms;
+
+  const String zip = ctrl_normalize_zip(g_cfg_ctrl_pirateweather_zip);
+  if (zip.length() == 0) return;
+
+  float lat = 0.0f, lon = 0.0f;
+  if (!ctrl_fetch_zip_coordinates(zip, &lat, &lon)) return;
+
+  float outdoor_temp_c = 0.0f;
+  String condition;
+  if (!ctrl_fetch_pirateweather_current(lat, lon, &outdoor_temp_c, &condition)) return;
+
+  // Store in app for MQTT publishing
+  g_controller->app().set_outdoor_weather(outdoor_temp_c, condition.c_str());
+
+  // Send to all connected displays via ESP-NOW
+  g_controller->transport().publish_weather(outdoor_temp_c, condition.c_str());
+
+  // Publish to MQTT
+  if (g_ctrl_mqtt.connected()) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.1f", outdoor_temp_c);
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/weather_condition").c_str(),
+                        condition.c_str(), true);
+  }
+}
+
 void ctrl_publish_discovery() {
   if (!g_ctrl_mqtt.connected() || g_ctrl_mqtt_discovery_sent) {
     return;
@@ -483,12 +695,28 @@ void ctrl_publish_discovery() {
   const String reboot_topic =
       String("homeassistant/button/") + dev_id + "_controller_reboot/config";
 
-  char payload[768];
+  const String climate_topic = String("homeassistant/climate/") + dev_id + "/config";
+
+  char payload[1500];
+  snprintf(
+      payload, sizeof(payload),
+      "{\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\",\"mode_cmd_t\":\"%s/cmd/"
+      "mode\",\"mode_stat_t\":\"%s/state/mode\",\"temp_cmd_t\":\"%s/cmd/target_temp_c\","
+      "\"temp_stat_t\":\"%s/state/target_temp_c\",\"curr_temp_t\":\"%s/state/current_temp_c\","
+      "\"fan_mode_cmd_t\":\"%s/cmd/fan_mode\",\"fan_mode_stat_t\":\"%s/state/fan_mode\","
+      "\"curr_hum_t\":\"%s/state/current_humidity\",\"modes\":[\"off\",\"heat\",\"cool\"],"
+      "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],\"avty_t\":\"%s/state/availability\","
+      "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"min_temp\":5,\"max_temp\":35,"
+      "\"temp_step\":0.5,\"temp_unit\":\"C\",\"dev\":{\"ids\":[\"%s\"],"
+      "\"name\":\"Wireless Thermostat System\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
+      dev_id.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(),
+      base.c_str(), base.c_str(), base.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(climate_topic.c_str(), payload, true);
+
   snprintf(payload, sizeof(payload),
            "{\"name\":\"HVAC Lockout\",\"uniq_id\":\"%s_lockout\",\"cmd_t\":\"%s/cmd/lockout\","
            "\"stat_t\":\"%s/state/lockout\",\"pl_on\":\"1\",\"pl_off\":\"0\","
-           "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
-           "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
+           "\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(switch_topic.c_str(), payload, true);
 
@@ -626,7 +854,11 @@ void ctrl_web_handle_config_get() {
   body += "\"ota_password\":\"" + String(g_cfg_ctrl_ota_password.length() > 0 ? "set" : "unset") + "\",";
   body += "\"espnow_channel\":" + String(g_cfg_ctrl_espnow_channel) + ",";
   body += "\"espnow_peer_mac\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_mac) + "\",";
+  body += "\"espnow_peer_macs\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_macs) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_ctrl_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"pirateweather_api_key\":\"" +
+          String(g_cfg_ctrl_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"pirateweather_zip\":\"" + ctrl_json_escape(g_cfg_ctrl_pirateweather_zip) + "\",";
   body += "\"reboot_required\":" + String(g_ctrl_cfg_reboot_required ? "true" : "false");
   body += "},\"display\":{";
   body += "\"availability\":\"" + ctrl_json_escape(g_disp_availability) + "\",";
@@ -698,6 +930,8 @@ void ctrl_web_handle_root() {
           String(g_cfg_ctrl_espnow_channel) + "\"><br>";
   html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" + g_cfg_ctrl_espnow_peer_mac +
           "\"><br>";
+  html += "espnow_peer_macs: <input name=\"espnow_peer_macs\" title=\"Comma-separated MACs: AA:BB:CC:DD:EE:FF,11:22:33:44:55:66\" value=\"" + g_cfg_ctrl_espnow_peer_macs +
+          "\"><br>";
   html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
   html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
 
@@ -712,8 +946,11 @@ void ctrl_web_handle_root() {
   html += "</fieldset>";
 
   html += "<fieldset><legend>Weather</legend>";
-  html += "<p>Controller has no local weather settings.</p>";
-  html += "</fieldset>";
+  html += "<form method=\"post\" action=\"/config\">";
+  html += "pirateweather_api_key: <input name=\"pirateweather_api_key\" value=\"\"><br>";
+  html += "pirateweather_zip: <input name=\"pirateweather_zip\" pattern=\"^[0-9]{5}(-[0-9]{4})?$\" title=\"US ZIP format: 12345 or 12345-6789\" value=\"" +
+          g_cfg_ctrl_pirateweather_zip + "\"><br>";
+  html += "<button type=\"submit\">Save Weather</button></form></fieldset>";
 
   html += "<fieldset><legend>Miscellaneous</legend>";
   html += "<form method=\"post\" action=\"/config\">";
@@ -825,6 +1062,13 @@ void ctrl_publish_runtime_state() {
   g_ctrl_mqtt.publish(ctrl_topic_for("state/fan_mode").c_str(), fan, true);
   snprintf(buf, sizeof(buf), "%.1f", rt.target_temperature_c());
   g_ctrl_mqtt.publish(ctrl_topic_for("state/target_temp_c").c_str(), buf, true);
+  const auto &app = g_controller->app();
+  if (app.has_indoor_temperature()) {
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_temperature_c()));
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/current_temp_c").c_str(), buf, true);
+  }
+  snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_humidity_pct()));
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/current_humidity").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%.2f", rt.filter_runtime_hours());
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_runtime_hours").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(rt.furnace_state()));
@@ -865,6 +1109,12 @@ void ctrl_publish_runtime_state() {
                       true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/error_espnow").c_str(),
                       g_ctrl_last_espnow_error.c_str(), true);
+  if (app.has_outdoor_weather()) {
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.outdoor_temp_c()));
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_condition").c_str(),
+                        app.outdoor_condition(), true);
+  }
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
 }
@@ -1126,16 +1376,58 @@ void setup() {
   controller_cfg.fan_circulate_duration_min = 10;
 
   thermostat::EspNowControllerConfig transport_cfg;
-  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  memcpy(transport_cfg.peer_mac, kBroadcast, sizeof(kBroadcast));
   transport_cfg.channel = g_cfg_ctrl_espnow_channel;
   transport_cfg.heartbeat_interval_ms = 10000;
-  ctrl_parse_mac(g_cfg_ctrl_espnow_peer_mac.c_str(), transport_cfg.peer_mac);
+  transport_cfg.peer_count = 0;
+
+  // Parse comma-separated peer MACs (new multi-peer config)
+  if (g_cfg_ctrl_espnow_peer_macs.length() > 0) {
+    String macs = g_cfg_ctrl_espnow_peer_macs;
+    while (macs.length() > 0 && transport_cfg.peer_count < thermostat::kMaxEspNowPeers) {
+      int comma = macs.indexOf(',');
+      String one_mac;
+      if (comma >= 0) {
+        one_mac = macs.substring(0, comma);
+        macs = macs.substring(comma + 1);
+      } else {
+        one_mac = macs;
+        macs = "";
+      }
+      one_mac.trim();
+      if (one_mac.length() >= 17) {
+        uint8_t parsed[6];
+        if (ctrl_parse_mac(one_mac.c_str(), parsed)) {
+          memcpy(transport_cfg.peer_macs[transport_cfg.peer_count], parsed, 6);
+          ++transport_cfg.peer_count;
+        }
+      }
+    }
+  }
+
+  // Fall back to single peer_mac for backward compatibility
+  if (transport_cfg.peer_count == 0) {
+    uint8_t single_peer[6];
+    if (ctrl_parse_mac(g_cfg_ctrl_espnow_peer_mac.c_str(), single_peer)) {
+      memcpy(transport_cfg.peer_macs[0], single_peer, 6);
+      transport_cfg.peer_count = 1;
+    }
+  }
+
   uint8_t lmk[16] = {0};
   if (ctrl_parse_lmk_hex(g_cfg_ctrl_espnow_lmk.c_str(), lmk) &&
-      !ctrl_is_broadcast_mac(transport_cfg.peer_mac)) {
-    memcpy(transport_cfg.lmk, lmk, sizeof(lmk));
-    transport_cfg.encrypted = true;
+      transport_cfg.peer_count > 0) {
+    // Only enable encryption if we have non-broadcast peers
+    bool has_unicast = false;
+    for (int i = 0; i < transport_cfg.peer_count; ++i) {
+      if (!ctrl_is_broadcast_mac(transport_cfg.peer_macs[i])) {
+        has_unicast = true;
+        break;
+      }
+    }
+    if (has_unicast) {
+      memcpy(transport_cfg.lmk, lmk, sizeof(lmk));
+      transport_cfg.encrypted = true;
+    }
   }
 
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);
@@ -1170,6 +1462,7 @@ void loop() {
         g_ctrl_mqtt.connected() &&
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
+    ctrl_poll_weather(now);
     if (g_ctrl_mqtt.connected()) {
       if (!g_ctrl_have_lockout || g_ctrl_last_lockout != snap.hvac_lockout ||
           (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
