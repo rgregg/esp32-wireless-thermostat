@@ -19,6 +19,7 @@
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <esp_system.h>
+#include "ota_web_updater.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
 thermostat::ControllerRelayIo g_relay_io;
@@ -678,7 +679,7 @@ void ctrl_web_handle_root() {
   String html;
   html.reserve(12288);
   html += "<html><body><h1>System Config (Controller + Display)</h1>";
-  html += "<p><a href=\"/config\">JSON config</a></p>";
+  html += "<p><a href=\"/config\">JSON config</a> | <a href=\"/update\">Firmware Update</a></p>";
   html += "<h2>Controller</h2>";
   html += "<fieldset><legend>Networking Settings</legend>";
   html += "<form method=\"post\" action=\"/config\">";
@@ -796,6 +797,7 @@ void ctrl_ensure_web_ready() {
     g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
+    ota_web_setup(g_ctrl_web);
     g_ctrl_web.begin();
     g_ctrl_web_started = true;
   }
@@ -1146,6 +1148,7 @@ void setup() {
   g_ctrl_last_espnow_error = ok ? "none" : "begin_failed";
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
+  ota_rollback_begin();
 }
 
 void loop() {
@@ -1175,6 +1178,7 @@ void loop() {
       }
     }
   }
+  ota_rollback_check(WiFi.status() == WL_CONNECTED && g_ctrl_mqtt.connected());
   delay(100);
 }
 #endif

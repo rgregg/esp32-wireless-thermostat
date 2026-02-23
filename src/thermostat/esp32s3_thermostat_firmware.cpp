@@ -19,6 +19,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <esp_system.h>
+#include "ota_web_updater.h"
 
 #include "thermostat/thermostat_device_runtime.h"
 #include "thermostat/thermostat_screen_controller.h"
@@ -946,7 +947,7 @@ void web_handle_root() {
   String html;
   html.reserve(8192);
   html += "<html><body><h1>Thermostat Display Config</h1>";
-  html += "<p><a href=\"/config\">JSON config</a> | <a href=\"/screenshot\">Screenshot</a></p>";
+  html += "<p><a href=\"/config\">JSON config</a> | <a href=\"/screenshot\">Screenshot</a> | <a href=\"/update\">Firmware Update</a></p>";
 
   html += "<fieldset><legend>Networking Settings</legend>";
   html += "<form method=\"post\" action=\"/config\">";
@@ -1019,6 +1020,7 @@ void ensure_web_ready() {
     g_web.on("/config", HTTP_POST, web_handle_config_post);
     g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
     g_web.on("/screenshot", HTTP_GET, web_handle_screenshot);
+    ota_web_setup(g_web);
     g_web.begin();
     g_web_started = true;
   }
@@ -2161,6 +2163,7 @@ void thermostat_firmware_setup() {
   g_runtime->set_local_temperature_compensation_c(g_cfg_temp_comp_c);
   g_runtime->set_temperature_unit(g_cfg_temp_unit_f ? TemperatureUnit::Fahrenheit
                                                     : TemperatureUnit::Celsius);
+  ota_rollback_begin();
 }
 
 void thermostat_firmware_loop() {
@@ -2200,6 +2203,7 @@ void thermostat_firmware_loop() {
   ensure_mqtt_connected(now);
   g_mqtt.loop();
   poll_weather(now);
+  ota_rollback_check(WiFi.status() == WL_CONNECTED && g_mqtt.connected());
 
   if (g_mqtt.connected() && (now - g_last_mqtt_publish_ms) >= kMqttPublishMs) {
     g_last_mqtt_publish_ms = now;
