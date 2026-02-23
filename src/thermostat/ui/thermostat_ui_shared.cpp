@@ -15,6 +15,7 @@ extern "C" const lv_font_t thermostat_font_montserrat_40;
 extern "C" const lv_font_t thermostat_font_montserrat_48;
 extern "C" const lv_font_t thermostat_font_montserrat_80;
 extern "C" const lv_font_t thermostat_font_montserrat_120;
+extern "C" const lv_font_t thermostat_font_mdi_weather_30;
 
 namespace {
 
@@ -376,7 +377,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   out_handles->weather_icon_label = lv_label_create(weather_row);
   lv_label_set_text(out_handles->weather_icon_label, LV_SYMBOL_IMAGE);
-  style_label(out_handles->weather_icon_label, LV_FONT_DEFAULT);
+  style_label(out_handles->weather_icon_label, font_mdi_weather_30());
   lv_obj_set_style_text_align(out_handles->weather_icon_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   out_handles->weather_label = lv_label_create(weather_row);
@@ -819,6 +820,35 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 void set_mode_button_state(FurnaceMode mode) { apply_mode_state(mode); }
 void set_fan_button_state(FanMode mode) { apply_fan_state(mode); }
 void set_temperature_unit_button_state(TemperatureUnit unit) { apply_temperature_unit_state(unit); }
+
+const lv_font_t *font_mdi_weather_30() { return &thermostat_font_mdi_weather_30; }
+
+const char *weather_icon_symbol(WeatherIcon icon) {
+  // MDI codepoints encoded as UTF-8.  Each Supplementary Plane codepoint
+  // (U+F0xxx) encodes to a 4-byte UTF-8 sequence.
+  switch (icon) {
+    case WeatherIcon::Sunny:        return "\xF3\xB0\x96\x99";  // U+F0599 weather-sunny
+    case WeatherIcon::PartlyCloudy: return "\xF3\xB0\x96\x95";  // U+F0595 weather-partly-cloudy
+    case WeatherIcon::Cloudy:       return "\xF3\xB0\x96\x90";  // U+F0590 weather-cloudy
+    case WeatherIcon::Rain:         return "\xF3\xB0\x96\x97";  // U+F0597 weather-rainy
+    case WeatherIcon::RainHeavy:    return "\xF3\xB0\x96\x96";  // U+F0596 weather-pouring
+    case WeatherIcon::RainLight:    return "\xF3\xB0\x96\x97";  // U+F0597 weather-rainy
+    case WeatherIcon::Lightning:    return "\xF3\xB0\x96\x93";  // U+F0593 weather-lightning
+    case WeatherIcon::Snow:         return "\xF3\xB0\x96\x98";  // U+F0598 weather-snowy
+    case WeatherIcon::SnowLight:    return "\xF3\xB0\x96\x98";  // U+F0598 weather-snowy
+    case WeatherIcon::Sleet:        return "\xF3\xB0\x96\x98";  // U+F0598 weather-snowy
+    case WeatherIcon::Hail:         return "\xF3\xB0\x96\x92";  // U+F0592 weather-hail
+    case WeatherIcon::Windy:        return "\xF3\xB0\x96\x9D";  // U+F059D weather-windy
+    case WeatherIcon::Fog:          return "\xF3\xB0\x96\x91";  // U+F0591 weather-fog
+    case WeatherIcon::Haze:         return "\xF3\xB0\x96\x91";  // U+F0591 weather-fog
+    case WeatherIcon::Dust:         return "\xF3\xB0\x96\x9D";  // U+F059D weather-windy
+    case WeatherIcon::Dry:          return "\xF3\xB0\x96\x99";  // U+F0599 weather-sunny
+    case WeatherIcon::Night:        return "\xF3\xB0\x96\x94";  // U+F0594 weather-night
+    case WeatherIcon::NightCloudy:  return "\xF3\xB0\x96\x94";  // U+F0594 weather-night
+    case WeatherIcon::Unknown:      return "\xF3\xB0\x96\x90";  // U+F0590 weather-cloudy
+  }
+  return "\xF3\xB0\x96\x90";  // fallback: cloudy
+}
 
 void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv_obj_t *indoor_label,
                                uint32_t minute_index) {

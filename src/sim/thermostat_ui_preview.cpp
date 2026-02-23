@@ -422,7 +422,7 @@ void update_labels() {
       g_display_app->status_text(now, kControllerConnectionTimeoutMs);
 
   // Weather icon from display app
-  const char *weather_icon = LV_SYMBOL_IMAGE;
+  const char *weather_icon = thermostat::ui::weather_icon_symbol(g_display_app->weather_icon());
 
   // Live clock
   time_t raw_time;

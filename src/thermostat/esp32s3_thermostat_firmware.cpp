@@ -222,6 +222,7 @@ lv_obj_t *g_indoor_label = nullptr;
 lv_obj_t *g_humidity_label = nullptr;
 lv_obj_t *g_setpoint_label = nullptr;
 lv_obj_t *g_weather_label = nullptr;
+lv_obj_t *g_weather_icon_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_screen_weather_label = nullptr;
 lv_obj_t *g_screen_indoor_label = nullptr;
@@ -1691,6 +1692,10 @@ void refresh_ui() {
   lv_label_set_text(g_humidity_label, g_runtime->indoor_humidity_text().c_str());
   lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
   lv_label_set_text(g_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
+  if (g_weather_icon_label != nullptr && g_have_weather_data) {
+    lv_label_set_text(g_weather_icon_label,
+                      thermostat::ui::weather_icon_symbol(g_runtime->weather_icon()));
+  }
 
   lv_label_set_text(g_screen_time_label, current_time_text().c_str());
   if (g_screen_weather_label != nullptr) {
@@ -1976,6 +1981,7 @@ void create_ui() {
   g_humidity_label = handles.humidity_label;
   g_setpoint_label = handles.setpoint_label;
   g_weather_label = handles.weather_label;
+  g_weather_icon_label = handles.weather_icon_label;
   g_screen_time_label = handles.screen_time_label;
   g_screen_weather_label = handles.screen_weather_label;
   g_screen_indoor_label = handles.screen_indoor_label;
