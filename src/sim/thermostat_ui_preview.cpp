@@ -108,6 +108,10 @@ bool g_mqtt_connected = false;
 uint32_t g_last_mqtt_connect_attempt_ms = 0;
 bool g_mqtt_first_attempt = true;
 
+// Heartbeat interval (matches EspNowThermostatTransport default)
+constexpr uint32_t kHeartbeatIntervalMs = 10000;
+uint32_t g_last_heartbeat_ms = 0;
+
 // Simulated sensor/weather values
 float g_preview_indoor_c = 22.2f;
 float g_preview_humidity = 43.0f;
@@ -174,53 +178,56 @@ constexpr uint32_t kControllerConnectionTimeoutMs = 30000;
 void on_mqtt_message(const std::string &topic, const std::string &payload) {
   const uint32_t now = SDL_GetTicks();
 
-  // Handle controller telemetry sequence (packed telemetry from ControllerApp)
-  if (topic == controller_topic("state/telemetry_seq")) {
-    // Build ThermostatControllerTelemetry from the individual state topics
-    // The telemetry_seq topic signals a new telemetry frame
-    // We assemble it from the retained state topics we've been tracking
-    return;
+  // Accumulate controller state from individual MQTT topics.
+  // The telemetry_seq topic carries the sequence number that ThermostatApp
+  // uses for dedup — only feed telemetry to the app when seq changes.
+  static FurnaceStateCode s_state = FurnaceStateCode::Error;
+  static bool s_lockout = false;
+  static uint8_t s_mode_code = 0;
+  static uint8_t s_fan_code = 0;
+  static float s_setpoint_c = 20.0f;
+  static uint32_t s_filter_seconds = 0;
+  static uint16_t s_seq = 0;
+  static bool s_seq_received = false;
+
+  bool state_updated = false;
+
+  if (topic == controller_topic("state/furnace_state")) {
+    s_state = static_cast<FurnaceStateCode>(atoi(payload.c_str()));
+    state_updated = true;
+  } else if (topic == controller_topic("state/lockout")) {
+    s_lockout = (payload == "1");
+    state_updated = true;
+  } else if (topic == controller_topic("state/mode")) {
+    if (payload == "heat") s_mode_code = 1;
+    else if (payload == "cool") s_mode_code = 2;
+    else s_mode_code = 0;
+    state_updated = true;
+  } else if (topic == controller_topic("state/fan_mode")) {
+    if (payload == "on") s_fan_code = 1;
+    else if (payload == "circulate") s_fan_code = 2;
+    else s_fan_code = 0;
+    state_updated = true;
+  } else if (topic == controller_topic("state/target_temp_c")) {
+    s_setpoint_c = static_cast<float>(atof(payload.c_str()));
+    state_updated = true;
+  } else if (topic == controller_topic("state/filter_runtime_hours")) {
+    s_filter_seconds = static_cast<uint32_t>(atof(payload.c_str()) * 3600.0f);
+    state_updated = true;
+  } else if (topic == controller_topic("state/telemetry_seq")) {
+    s_seq = static_cast<uint16_t>(atoi(payload.c_str()));
+    s_seq_received = true;
+    state_updated = true;
   }
 
-  // Handle individual controller state updates — assemble into telemetry
-  if (topic == controller_topic("state/furnace_state") ||
-      topic == controller_topic("state/lockout") ||
-      topic == controller_topic("state/mode") ||
-      topic == controller_topic("state/fan_mode") ||
-      topic == controller_topic("state/target_temp_c") ||
-      topic == controller_topic("state/filter_runtime_hours") ||
-      topic == controller_topic("state/telemetry_seq")) {
+  if (!state_updated) return;
 
-    // Track state for telemetry assembly (stored in static locals)
-    static FurnaceStateCode s_state = FurnaceStateCode::Error;
-    static bool s_lockout = false;
-    static uint8_t s_mode_code = 0;
-    static uint8_t s_fan_code = 0;
-    static float s_setpoint_c = 20.0f;
-    static uint32_t s_filter_seconds = 0;
-    static uint16_t s_seq = 0;
+  // Always note heartbeat when we receive any controller state
+  g_therm_app->on_controller_heartbeat(now);
 
-    if (topic == controller_topic("state/furnace_state")) {
-      s_state = static_cast<FurnaceStateCode>(atoi(payload.c_str()));
-    } else if (topic == controller_topic("state/lockout")) {
-      s_lockout = (payload == "1");
-    } else if (topic == controller_topic("state/mode")) {
-      if (payload == "heat") s_mode_code = 1;
-      else if (payload == "cool") s_mode_code = 2;
-      else s_mode_code = 0;
-    } else if (topic == controller_topic("state/fan_mode")) {
-      if (payload == "on") s_fan_code = 1;
-      else if (payload == "circulate") s_fan_code = 2;
-      else s_fan_code = 0;
-    } else if (topic == controller_topic("state/target_temp_c")) {
-      s_setpoint_c = static_cast<float>(atof(payload.c_str()));
-    } else if (topic == controller_topic("state/filter_runtime_hours")) {
-      s_filter_seconds = static_cast<uint32_t>(atof(payload.c_str()) * 3600.0f);
-    } else if (topic == controller_topic("state/telemetry_seq")) {
-      s_seq = static_cast<uint16_t>(atoi(payload.c_str()));
-    }
-
-    // Feed assembled telemetry to the app
+  // Only feed full telemetry once we have a valid sequence number,
+  // so ThermostatApp's dedup logic works correctly.
+  if (s_seq_received) {
     thermostat::ThermostatControllerTelemetry telemetry;
     telemetry.seq = s_seq;
     telemetry.state = s_state;
@@ -231,11 +238,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     telemetry.filter_runtime_seconds = s_filter_seconds;
 
     g_therm_app->on_controller_telemetry(now, telemetry);
-    g_therm_app->on_controller_heartbeat(now);
-
-    // Sync display app state from updated app
     g_display_app->sync_from_app();
-    return;
   }
 }
 
@@ -954,7 +957,20 @@ int main(int argc, char **argv) {
     ensure_mqtt_connected();
     g_mqtt.loop();
     process_events();
-    g_screen.tick(SDL_GetTicks());
+
+    // Periodic heartbeat: re-publish last command so the controller
+    // doesn't trip its failsafe timer (mirrors ESP-NOW heartbeat).
+    const uint32_t now = SDL_GetTicks();
+    if (g_mqtt_connected && g_therm_app->has_last_packed_command() &&
+        (now - g_last_heartbeat_ms) >= kHeartbeatIntervalMs) {
+      g_last_heartbeat_ms = now;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%lu",
+               static_cast<unsigned long>(g_therm_app->last_packed_command()));
+      g_mqtt.publish(display_topic("state/packed_command"), buf, true);
+    }
+
+    g_screen.tick(now);
     show_page(g_screen.current_page());
     tick_lvgl();
     render();
