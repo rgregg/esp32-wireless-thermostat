@@ -3,6 +3,7 @@
 #if defined(THERMOSTAT_RUN_TESTS)
 
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -70,6 +71,16 @@ class AssertionError : public std::runtime_error {
     const auto _b = (B);                                                        \
     if (!(_a == _b)) {                                                          \
       throw thermostat_tests::AssertionError(std::string("assert eq failed: ") + #A + " != " + #B); \
+    }                                                                           \
+  } while (0)
+
+#define ASSERT_STR_EQ(A, B)                                                     \
+  do {                                                                          \
+    const char *_a = (A);                                                       \
+    const char *_b = (B);                                                       \
+    if (std::strcmp(_a, _b) != 0) {                                             \
+      throw thermostat_tests::AssertionError(                                   \
+          std::string("assert str eq failed: \"") + _a + "\" != \"" + _b + "\""); \
     }                                                                           \
   } while (0)
 

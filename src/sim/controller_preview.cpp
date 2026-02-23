@@ -9,6 +9,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 
+#include "controller/controller_relay_io.h"
 #include "controller/controller_runtime.h"
 #include "espnow_cmd_word.h"
 #include "sim_mqtt_client.h"
@@ -59,16 +60,17 @@ uint32_t g_last_mqtt_connect_attempt_ms = 0;
 bool g_mqtt_first_attempt = true;
 uint32_t g_last_state_publish_ms = 0;
 
+// MQTT primary-hold (matches esp32_controller_main.cpp)
+constexpr uint32_t kMqttPrimaryHoldMs = 30000;
+uint32_t g_last_mqtt_command_ms = 0;
+bool g_espnow_command_enabled = true;
+
+// Relay IO interlock layer
+thermostat::ControllerRelayIo g_relay_io;
+
 // Simulated state
 float g_simulated_indoor_c = 20.0f;
 uint32_t g_start_time_ms = 0;
-
-// Track interlock states for display
-uint32_t g_last_heat_off_ms = 0;
-uint32_t g_last_cool_off_ms = 0;
-uint32_t g_last_state_change_ms = 0;
-bool g_was_heating = false;
-bool g_was_cooling = false;
 
 std::string ctrl_topic(const char *suffix) {
   return std::string(kControllerBaseTopic) + "/" + suffix;
@@ -158,6 +160,12 @@ void publish_controller_state() {
 
 void on_mqtt_message(const std::string &topic, const std::string &payload) {
   const uint32_t now = SDL_GetTicks();
+
+  // Stamp MQTT command time for primary-hold logic
+  if (topic.find("cmd/") != std::string::npos ||
+      topic.find("packed_command") != std::string::npos) {
+    g_last_mqtt_command_ms = now;
+  }
 
   // Handle display's packed command (primary communication path)
   if (topic == display_topic("state/packed_command")) {
@@ -466,6 +474,21 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   snprintf(buf, sizeof(buf), "MQTT: %s", g_mqtt_connected ? "Connected" : "Disconnected");
   draw_text(g_font_small, x + 10, ly, buf,
             g_mqtt_connected ? kColorGreen : kColorRed);
+  ly += line_height;
+
+  // MQTT primary-hold / ESP-NOW status
+  const uint32_t diag_now = SDL_GetTicks();
+  const bool mqtt_primary_active =
+      g_mqtt_connected &&
+      (static_cast<uint32_t>(diag_now - g_last_mqtt_command_ms) < kMqttPrimaryHoldMs);
+  if (mqtt_primary_active) {
+    uint32_t remaining_s = (kMqttPrimaryHoldMs -
+        (diag_now - g_last_mqtt_command_ms)) / 1000;
+    snprintf(buf, sizeof(buf), "MQTT Primary: ACTIVE (%lus)", static_cast<unsigned long>(remaining_s));
+    draw_text(g_font_small, x + 10, ly, buf, kColorYellow);
+  } else {
+    draw_text(g_font_small, x + 10, ly, "ESP-NOW: enabled", kColorGreen);
+  }
 }
 
 void draw_timing_panel(int x, int y, int w, int h) {
@@ -526,6 +549,20 @@ void draw_timing_panel(int x, int y, int w, int h) {
   snprintf(buf, sizeof(buf), "Failsafe timeout: %lu sec",
            static_cast<unsigned long>(g_config.failsafe_timeout_ms / 1000));
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
+  ly += line_height;
+
+  // Relay IO interlock status
+  ly += 5;
+  draw_text(g_font_small, x + 10, ly, "Relay IO Interlock:", kColorYellow);
+  ly += line_height;
+  if (g_relay_io.has_pending()) {
+    uint32_t remaining = g_relay_io.pending_wait_remaining_ms(now);
+    snprintf(buf, sizeof(buf), "  Pending: %s (%lu ms)",
+             g_relay_io.pending_name(), static_cast<unsigned long>(remaining));
+    draw_text(g_font_small, x + 10, ly, buf, kColorRed);
+  } else {
+    draw_text(g_font_small, x + 10, ly, "  Clear", kColorGreen);
+  }
 }
 
 void draw_controls_panel(int x, int y, int w, int h) {
@@ -538,13 +575,13 @@ void draw_controls_panel(int x, int y, int w, int h) {
   const int line_height = 16;
   int ly = y + 35;
 
-  draw_text(g_font_small, x + 10, ly, "H - Heat mode", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "C - Cool mode", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "O - Off mode", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "H/C/O - Mode (ESP-NOW)", kColorWhite); ly += line_height;
   draw_text(g_font_small, x + 10, ly, "F - Cycle fan", kColorWhite); ly += line_height;
   draw_text(g_font_small, x + 10, ly, "+/- Setpoint", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "L - Lockout", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "Q - Quit", kColorWhite);
+  draw_text(g_font_small, x + 10, ly, "L - Lockout  Q - Quit", kColorWhite); ly += line_height;
+  if (!g_espnow_command_enabled) {
+    draw_text(g_font_small, x + 10, ly, "MQTT hold: keys blocked", kColorYellow);
+  }
 }
 
 void draw_header() {
@@ -579,26 +616,21 @@ void render_board() {
   // Relay panel background
   draw_filled_rect(20, 280, 420, 130, kColorPanelBg);
   draw_rect_outline(20, 280, 420, 130, kColorLightBlue);
-  draw_text(g_font_medium, 30, 285, "RELAY OUTPUTS", kColorLightBlue);
+  draw_text(g_font_medium, 30, 285, "RELAY OUTPUTS (IO layer)", kColorLightBlue);
 
-  // Calculate interlock states
-  // Note: The actual interlock logic is in ControllerRuntime - we're just visualizing it
-  bool heat_blocked = false;
-  bool cool_blocked = false;
+  // Use relay IO layer's latched output (what would actually reach GPIO)
+  const auto &relay_out = g_relay_io.latched_output();
+  bool io_pending = g_relay_io.has_pending();
 
-  // If we were just cooling, heat might be blocked
-  if (g_was_cooling && !g_runtime->cool_demand()) {
-    heat_blocked = true;  // Simplified - actual logic is in ControllerRuntime
-  }
-  // If we were just heating, cool might be blocked
-  if (g_was_heating && !g_runtime->heat_demand()) {
-    cool_blocked = true;
-  }
+  // A relay is "blocked" if the runtime demands it but the IO layer hasn't engaged it yet
+  bool heat_blocked = g_runtime->heat_demand() && !relay_out.heat && io_pending;
+  bool cool_blocked = g_runtime->cool_demand() && !relay_out.cool && io_pending;
+  bool fan_blocked = g_runtime->fan_demand() && !relay_out.fan && io_pending;
 
-  draw_relay_block(relay_start_x, relay_y, "HEAT", g_runtime->heat_demand(), heat_blocked && !g_runtime->heat_demand());
-  draw_relay_block(relay_start_x + relay_spacing, relay_y, "COOL", g_runtime->cool_demand(), cool_blocked && !g_runtime->cool_demand());
-  draw_relay_block(relay_start_x + relay_spacing * 2, relay_y, "FAN", g_runtime->fan_demand(), false);
-  draw_relay_block(relay_start_x + relay_spacing * 3, relay_y, "SPARE", false, false);
+  draw_relay_block(relay_start_x, relay_y, "HEAT", relay_out.heat, heat_blocked);
+  draw_relay_block(relay_start_x + relay_spacing, relay_y, "COOL", relay_out.cool, cool_blocked);
+  draw_relay_block(relay_start_x + relay_spacing * 2, relay_y, "FAN", relay_out.fan, fan_blocked);
+  draw_relay_block(relay_start_x + relay_spacing * 3, relay_y, "SPARE", relay_out.spare, false);
 
   // Controls panel
   draw_controls_panel(20, 420, 200, 70);
@@ -611,6 +643,14 @@ void render_board() {
 }
 
 void send_simulated_command(FurnaceMode mode, FanMode fan, float setpoint) {
+  if (!g_espnow_command_enabled) {
+    uint32_t remaining = kMqttPrimaryHoldMs -
+        (SDL_GetTicks() - g_last_mqtt_command_ms);
+    printf("[ESP-NOW] Command BLOCKED — MQTT primary hold active (%lu s remaining)\n",
+           static_cast<unsigned long>(remaining / 1000));
+    return;
+  }
+
   static uint16_t seq = 0;
   ++seq;
 
@@ -698,9 +738,11 @@ void process_events() {
 void tick_controller() {
   const uint32_t now = SDL_GetTicks();
 
-  // Track relay state changes for interlock visualization
-  g_was_heating = g_runtime->heat_demand();
-  g_was_cooling = g_runtime->cool_demand();
+  // Evaluate MQTT primary-hold (matches esp32_controller_main.cpp)
+  const bool mqtt_primary_active =
+      g_mqtt_connected &&
+      (static_cast<uint32_t>(now - g_last_mqtt_command_ms) < kMqttPrimaryHoldMs);
+  g_espnow_command_enabled = !mqtt_primary_active;
 
   const float target = g_runtime->target_temperature_c();
   const float deadband = 0.5f;
@@ -721,10 +763,15 @@ void tick_controller() {
 
   g_runtime->tick(input);
 
-  // Simulate temperature drift
-  if (g_runtime->heat_demand()) {
+  // Apply relay IO interlock layer on top of runtime demand
+  auto snap = g_runtime->snapshot();
+  g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
+
+  // Simulate temperature drift based on actual relay output (post-interlock)
+  const auto &relay_out = g_relay_io.latched_output();
+  if (relay_out.heat) {
     g_simulated_indoor_c += 0.005f;  // Faster heating for demo
-  } else if (g_runtime->cool_demand()) {
+  } else if (relay_out.cool) {
     g_simulated_indoor_c -= 0.005f;  // Faster cooling for demo
   } else {
     const float outdoor = 15.0f;
@@ -836,6 +883,7 @@ int main(int /* argc */, char ** /* argv */) {
   g_config.min_idle_time_ms = 3000;           // 3 seconds
 
   g_runtime = new thermostat::ControllerRuntime(g_config);
+  g_relay_io.begin();
   g_start_time_ms = SDL_GetTicks();
 
   g_runtime->note_heartbeat(SDL_GetTicks());

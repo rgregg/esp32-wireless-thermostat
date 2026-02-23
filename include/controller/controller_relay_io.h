@@ -26,6 +26,25 @@ class ControllerRelayIo {
 
   const RelayDemand &latched_output() const { return output_; }
 
+  bool has_pending() const { return pending_ != RelaySelect::None; }
+
+  uint32_t pending_wait_remaining_ms(uint32_t now_ms) const {
+    if (pending_ == RelaySelect::None) return 0;
+    const uint32_t wait = wait_ms_for(pending_);
+    const uint32_t elapsed = now_ms - pending_since_ms_;
+    return (elapsed < wait) ? (wait - elapsed) : 0;
+  }
+
+  const char *pending_name() const {
+    switch (pending_) {
+      case RelaySelect::Heat: return "HEAT";
+      case RelaySelect::Cool: return "COOL";
+      case RelaySelect::Fan: return "FAN";
+      case RelaySelect::Spare: return "SPARE";
+      default: return "NONE";
+    }
+  }
+
  private:
   enum class RelaySelect : uint8_t {
     None = 0,
