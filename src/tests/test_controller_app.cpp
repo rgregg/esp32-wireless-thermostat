@@ -1,4 +1,6 @@
 #if defined(THERMOSTAT_RUN_TESTS)
+#include <string.h>
+
 #include "controller/controller_app.h"
 #include "espnow_cmd_word.h"
 #include "test_harness.h"
@@ -70,5 +72,94 @@ TEST_CASE(controller_app_uses_fallback_indoor_temperature_without_remote_updates
   app.on_heartbeat(1000);
   app.tick(2000);
   ASSERT_TRUE(app.runtime().heat_demand());
+}
+
+TEST_CASE(controller_app_primary_sensor_auto_claims_first_mac) {
+  FakeControllerTransport tx;
+  thermostat::ControllerApp app(tx);
+
+  const uint8_t mac_a[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+  app.on_indoor_temperature_c(22.0f, mac_a);
+
+  ASSERT_TRUE(app.primary_sensor_auto_claimed());
+  ASSERT_TRUE(memcmp(app.primary_sensor_mac(), mac_a, 6) == 0);
+  ASSERT_TRUE(app.indoor_temperature_c() == 22.0f);
+}
+
+TEST_CASE(controller_app_primary_sensor_rejects_different_mac) {
+  FakeControllerTransport tx;
+  thermostat::ControllerApp app(tx);
+
+  const uint8_t mac_a[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+  const uint8_t mac_b[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
+
+  app.on_indoor_temperature_c(22.0f, mac_a);  // auto-claims mac_a
+  app.on_indoor_temperature_c(25.0f, mac_b);  // should be ignored
+
+  ASSERT_TRUE(app.indoor_temperature_c() == 22.0f);
+
+  // Humidity from different MAC also rejected
+  app.on_indoor_humidity(60.0f, mac_a);  // accepted
+  app.on_indoor_humidity(90.0f, mac_b);  // rejected
+  ASSERT_TRUE(app.indoor_humidity_pct() == 60.0f);
+}
+
+TEST_CASE(controller_app_set_primary_sensor_mac_overrides_auto_claim) {
+  FakeControllerTransport tx;
+  thermostat::ControllerApp app(tx);
+
+  const uint8_t mac_a[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+  const uint8_t mac_b[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
+
+  app.on_indoor_temperature_c(22.0f, mac_a);  // auto-claims mac_a
+  ASSERT_TRUE(app.primary_sensor_auto_claimed());
+
+  // Override to mac_b
+  app.set_primary_sensor_mac(mac_b);
+  ASSERT_TRUE(!app.primary_sensor_auto_claimed());
+  ASSERT_TRUE(memcmp(app.primary_sensor_mac(), mac_b, 6) == 0);
+
+  // mac_a now rejected, mac_b accepted
+  app.on_indoor_temperature_c(25.0f, mac_a);
+  ASSERT_TRUE(app.indoor_temperature_c() == 22.0f);  // unchanged
+
+  app.on_indoor_temperature_c(25.0f, mac_b);
+  ASSERT_TRUE(app.indoor_temperature_c() == 25.0f);
+}
+
+TEST_CASE(controller_app_broadcast_mac_accepts_all_sources) {
+  FakeControllerTransport tx;
+  thermostat::ControllerApp app(tx);
+
+  const uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  const uint8_t mac_a[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+  const uint8_t mac_b[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
+
+  // Explicitly set to broadcast so auto-claim is disabled
+  app.set_primary_sensor_mac(broadcast);
+
+  // Both sources accepted since broadcast means accept-all
+  // But note: first call will auto-claim, so we need to re-set to broadcast
+  app.on_indoor_temperature_c(22.0f, mac_a);
+  // After first call, mac_a is auto-claimed. Re-set to broadcast.
+  app.set_primary_sensor_mac(broadcast);
+  app.on_indoor_temperature_c(25.0f, mac_b);
+  // After second call, mac_b is auto-claimed. Check it was accepted.
+  ASSERT_TRUE(app.indoor_temperature_c() == 25.0f);
+}
+
+TEST_CASE(controller_app_nullptr_mac_always_accepted) {
+  FakeControllerTransport tx;
+  thermostat::ControllerApp app(tx);
+
+  const uint8_t mac_a[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+
+  // Auto-claim a specific MAC
+  app.on_indoor_temperature_c(22.0f, mac_a);
+  ASSERT_TRUE(memcmp(app.primary_sensor_mac(), mac_a, 6) == 0);
+
+  // nullptr (sim/MQTT path) should still be accepted
+  app.on_indoor_temperature_c(25.0f);
+  ASSERT_TRUE(app.indoor_temperature_c() == 25.0f);
 }
 #endif

@@ -45,8 +45,12 @@ class ControllerApp {
   float outdoor_temp_c() const { return outdoor_temp_c_; }
   const char *outdoor_condition() const { return outdoor_condition_; }
 
-  void on_indoor_temperature_c(float temp_c);
-  void on_indoor_humidity(float humidity_pct);
+  void on_indoor_temperature_c(float temp_c, const uint8_t *src_mac = nullptr);
+  void on_indoor_humidity(float humidity_pct, const uint8_t *src_mac = nullptr);
+
+  void set_primary_sensor_mac(const uint8_t *mac);
+  const uint8_t *primary_sensor_mac() const { return primary_sensor_mac_; }
+  bool primary_sensor_auto_claimed() const { return primary_sensor_auto_claimed_; }
 
   // Automatic HVAC calls derived from mode + setpoint + indoor temperature.
   void tick(uint32_t now_ms);
@@ -85,6 +89,9 @@ class ControllerApp {
   uint16_t last_acked_seq_ = 0;
   bool has_last_published_ = false;
   ControllerTelemetry last_published_{};
+
+  uint8_t primary_sensor_mac_[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  bool primary_sensor_auto_claimed_ = false;
 
   bool has_outdoor_weather_ = false;
   float outdoor_temp_c_ = 0.0f;

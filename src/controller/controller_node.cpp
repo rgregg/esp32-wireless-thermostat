@@ -36,18 +36,20 @@ void ControllerNode::on_heartbeat_static(uint32_t now_ms, void *ctx) {
   static_cast<ControllerNode *>(ctx)->on_heartbeat(now_ms);
 }
 
-void ControllerNode::on_indoor_temp_static(float value, void *ctx) {
+void ControllerNode::on_indoor_temp_static(float value, const uint8_t *src_mac,
+                                            void *ctx) {
   if (ctx == nullptr) {
     return;
   }
-  static_cast<ControllerNode *>(ctx)->on_indoor_temp(value);
+  static_cast<ControllerNode *>(ctx)->on_indoor_temp(value, src_mac);
 }
 
-void ControllerNode::on_indoor_humidity_static(float value, void *ctx) {
+void ControllerNode::on_indoor_humidity_static(float value, const uint8_t *src_mac,
+                                                void *ctx) {
   if (ctx == nullptr) {
     return;
   }
-  static_cast<ControllerNode *>(ctx)->on_indoor_humidity(value);
+  static_cast<ControllerNode *>(ctx)->on_indoor_humidity(value, src_mac);
 }
 
 void ControllerNode::on_thermostat_ack_static(uint16_t seq, void *ctx) {
@@ -68,12 +70,12 @@ void ControllerNode::on_heartbeat(uint32_t now_ms) {
   app_.on_heartbeat(now_ms);
 }
 
-void ControllerNode::on_indoor_temp(float value) {
-  app_.on_indoor_temperature_c(value);
+void ControllerNode::on_indoor_temp(float value, const uint8_t *src_mac) {
+  app_.on_indoor_temperature_c(value, src_mac);
 }
 
-void ControllerNode::on_indoor_humidity(float value) {
-  app_.on_indoor_humidity(value);
+void ControllerNode::on_indoor_humidity(float value, const uint8_t *src_mac) {
+  app_.on_indoor_humidity(value, src_mac);
 }
 
 void ControllerNode::on_thermostat_ack(uint16_t seq) {

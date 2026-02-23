@@ -234,7 +234,7 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
     case PacketType::IndoorTemperature:
       if (len >= static_cast<int>(sizeof(FloatValuePacket)) && indoor_temp_cb_ != nullptr) {
         const auto *pkt = reinterpret_cast<const FloatValuePacket *>(data);
-        indoor_temp_cb_(pkt->value, callback_context_);
+        indoor_temp_cb_(pkt->value, src_mac, callback_context_);
       }
       break;
 
@@ -242,7 +242,7 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
       if (len >= static_cast<int>(sizeof(FloatValuePacket)) &&
           indoor_humidity_cb_ != nullptr) {
         const auto *pkt = reinterpret_cast<const FloatValuePacket *>(data);
-        indoor_humidity_cb_(pkt->value, callback_context_);
+        indoor_humidity_cb_(pkt->value, src_mac, callback_context_);
       }
       break;
 

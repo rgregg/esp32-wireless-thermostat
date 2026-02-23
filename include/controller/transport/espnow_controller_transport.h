@@ -20,7 +20,7 @@ struct EspNowControllerConfig {
 
 using CommandWordCallback = void (*)(uint32_t packed_word, const uint8_t *src_mac, void *ctx);
 using HeartbeatCallback = void (*)(uint32_t now_ms, void *ctx);
-using IndoorValueCallback = void (*)(float value, void *ctx);
+using IndoorValueCallback = void (*)(float value, const uint8_t *src_mac, void *ctx);
 using ThermostatAckCallback = void (*)(uint16_t seq, void *ctx);
 
 class EspNowControllerTransport final : public IControllerTransport {

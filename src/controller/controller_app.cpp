@@ -10,6 +10,15 @@
 
 namespace thermostat {
 
+namespace {
+bool is_broadcast_mac(const uint8_t mac[6]) {
+  for (int i = 0; i < 6; ++i) {
+    if (mac[i] != 0xFF) return false;
+  }
+  return true;
+}
+}  // namespace
+
 ControllerApp::ControllerApp(IControllerTransport &transport,
                              const ControllerConfig &config)
     : transport_(transport), config_(config), runtime_(config) {
@@ -65,16 +74,43 @@ void ControllerApp::reset_remote_command_sequence() {
   runtime_.reset_remote_command_sequence();
 }
 
-void ControllerApp::on_indoor_temperature_c(float temp_c) {
+void ControllerApp::on_indoor_temperature_c(float temp_c, const uint8_t *src_mac) {
+  if (src_mac != nullptr) {
+    if (is_broadcast_mac(primary_sensor_mac_)) {
+      // Auto-claim: first ESP-NOW source becomes primary
+      memcpy(primary_sensor_mac_, src_mac, 6);
+      primary_sensor_auto_claimed_ = true;
+    } else if (memcmp(src_mac, primary_sensor_mac_, 6) != 0) {
+      return;  // Not the primary sensor — ignore
+    }
+  }
   indoor_temp_c_ = temp_c;
   has_indoor_temp_ = true;
   persist_indoor_fallback();
 }
 
-void ControllerApp::on_indoor_humidity(float humidity_pct) {
+void ControllerApp::on_indoor_humidity(float humidity_pct, const uint8_t *src_mac) {
+  if (src_mac != nullptr) {
+    if (is_broadcast_mac(primary_sensor_mac_)) {
+      memcpy(primary_sensor_mac_, src_mac, 6);
+      primary_sensor_auto_claimed_ = true;
+    } else if (memcmp(src_mac, primary_sensor_mac_, 6) != 0) {
+      return;
+    }
+  }
   indoor_humidity_pct_ = humidity_pct;
   has_indoor_humidity_ = true;
   persist_indoor_fallback();
+}
+
+void ControllerApp::set_primary_sensor_mac(const uint8_t *mac) {
+  if (mac != nullptr) {
+    memcpy(primary_sensor_mac_, mac, 6);
+  } else {
+    // Reset to broadcast (accept all)
+    memset(primary_sensor_mac_, 0xFF, 6);
+  }
+  primary_sensor_auto_claimed_ = false;
 }
 
 void ControllerApp::tick(uint32_t now_ms) {
