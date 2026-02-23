@@ -37,9 +37,9 @@ std::string DisplayModel::format_setpoint_text() const {
   char buf[16];
   const float v = to_user_temperature(local_setpoint_c_);
   if (unit_ == TemperatureUnit::Fahrenheit) {
-    snprintf(buf, sizeof(buf), "%.0f\xC2\xB0", std::round(v));
+    snprintf(buf, sizeof(buf), "%.0f", std::round(v));
   } else {
-    snprintf(buf, sizeof(buf), "%.1f\xC2\xB0", v);
+    snprintf(buf, sizeof(buf), "%.1f", v);
   }
   return std::string(buf);
 }
@@ -51,9 +51,9 @@ std::string DisplayModel::format_indoor_temperature_text() const {
   char buf[16];
   const float v = to_user_temperature(indoor_temp_c_);
   if (unit_ == TemperatureUnit::Fahrenheit) {
-    snprintf(buf, sizeof(buf), "%.0f\xC2\xB0", std::round(v));
+    snprintf(buf, sizeof(buf), "%.0f", std::round(v));
   } else {
-    snprintf(buf, sizeof(buf), "%.1f\xC2\xB0", v);
+    snprintf(buf, sizeof(buf), "%.1f", v);
   }
   return std::string(buf);
 }

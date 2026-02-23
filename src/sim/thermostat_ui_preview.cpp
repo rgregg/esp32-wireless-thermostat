@@ -10,6 +10,8 @@
 #include <SDL2/SDL.h>
 #include <lvgl.h>
 
+#include "thermostat/display_model.h"
+#include "thermostat/thermostat_ui_state.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
 
 namespace {
@@ -85,6 +87,12 @@ float g_setpoint_c = 21.5f;
 uint32_t g_display_timeout_s = 300;
 uint8_t g_brightness_pct = 100;
 uint8_t g_screensaver_brightness_pct = 16;
+thermostat::DisplayModel g_preview_model;
+thermostat::TemperatureUnit g_preview_unit = thermostat::TemperatureUnit::Celsius;
+float g_preview_indoor_c = 22.2f;
+float g_preview_humidity = 43.0f;
+float g_preview_outdoor_c = 9.0f;
+const char *g_preview_weather_condition = "Cloudy";
 
 void init_styles() {
   if (g_styles_ready) {
@@ -185,20 +193,31 @@ void show_page(PreviewPage page) {
 
 void update_labels() {
   const char *weather_icon = LV_SYMBOL_IMAGE;
-  const char *raw_indoor_text = "72\xC2\xB0";
-  char setpoint[32];
-  snprintf(setpoint, sizeof(setpoint), "%.1f C", g_setpoint_c);
+  g_preview_model.set_temperature_unit(g_preview_unit);
+  g_preview_model.set_local_setpoint_c(g_setpoint_c);
+  g_preview_model.set_local_indoor_temperature_c(g_preview_indoor_c);
+  g_preview_model.set_local_indoor_humidity(g_preview_humidity);
+  g_preview_model.set_outdoor_temperature_c(g_preview_outdoor_c);
+  g_preview_model.set_weather_condition(g_preview_weather_condition);
+
+  const std::string setpoint_text = g_preview_model.format_setpoint_text();
+  const std::string indoor_text = g_preview_model.format_indoor_temperature_text();
+  const std::string humidity_text = g_preview_model.format_indoor_humidity_text();
+  const std::string weather_text = g_preview_model.format_weather_text();
+  const std::string status_text =
+      thermostat::furnace_state_text(FurnaceStateCode::CoolMode, true, false, false);
+
   if (g_home_date_label != nullptr) {
     lv_label_set_text(g_home_date_label, "Sunday, Feb 22");
   }
   if (g_home_time_label != nullptr) {
     lv_label_set_text(g_home_time_label, "12:34 PM");
   }
-  lv_label_set_text(g_setpoint_label, setpoint);
-  lv_label_set_text(g_status_label, "Heating");
-  lv_label_set_text(g_indoor_label, raw_indoor_text);
-  lv_label_set_text(g_humidity_label, "43% Humidity");
-  lv_label_set_text(g_weather_label, "Cloudy 9 C");
+  lv_label_set_text(g_setpoint_label, setpoint_text.c_str());
+  lv_label_set_text(g_status_label, status_text.c_str());
+  lv_label_set_text(g_indoor_label, indoor_text.c_str());
+  lv_label_set_text(g_humidity_label, humidity_text.c_str());
+  lv_label_set_text(g_weather_label, weather_text.c_str());
   if (g_weather_icon_label != nullptr) {
     lv_label_set_text(g_weather_icon_label, weather_icon);
   }
@@ -233,7 +252,7 @@ void update_labels() {
            "Build: native-ui-preview\n"
            "Boot Count: 14   Reset: software\n"
            "Uptime: %lus\n"
-           "Temp Unit: C   Temp Comp: -0.3 C\n"
+           "Temp Unit: %s   Temp Comp: -0.3 C\n"
            "Display Timeout: %lus\n"
            "Brightness: %u%%   Screensaver: %u%%\n"
            "Controller Timeout: 30000 ms\n"
@@ -246,10 +265,11 @@ void update_labels() {
            "Last Controller HB: 2s ago\n"
            "Raw Indoor Label: %s",
            static_cast<unsigned long>(SDL_GetTicks() / 1000U),
+           g_preview_unit == thermostat::TemperatureUnit::Fahrenheit ? "F" : "C",
            static_cast<unsigned long>(g_display_timeout_s),
            static_cast<unsigned>(g_brightness_pct),
            static_cast<unsigned>(g_screensaver_brightness_pct),
-           raw_indoor_text);
+           indoor_text.c_str());
   lv_label_set_text(g_settings_diag_label, diag);
 }
 
@@ -271,17 +291,25 @@ void on_tab_changed(lv_event_t *e) {
 }
 
 void on_setpoint_up(lv_event_t *) {
-  g_setpoint_c += 0.5f;
-  if (g_setpoint_c > 35.0f) {
-    g_setpoint_c = 35.0f;
-  }
+  const float step = (g_preview_unit == thermostat::TemperatureUnit::Fahrenheit) ? 1.0f : 0.5f;
+  const float user_val = g_preview_model.to_user_temperature(g_setpoint_c);
+  g_setpoint_c = g_preview_model.to_celsius_from_user(user_val + step);
+  if (g_setpoint_c > 35.0f) g_setpoint_c = 35.0f;
 }
 
 void on_setpoint_down(lv_event_t *) {
-  g_setpoint_c -= 0.5f;
-  if (g_setpoint_c < 5.0f) {
-    g_setpoint_c = 5.0f;
-  }
+  const float step = (g_preview_unit == thermostat::TemperatureUnit::Fahrenheit) ? 1.0f : 0.5f;
+  const float user_val = g_preview_model.to_user_temperature(g_setpoint_c);
+  g_setpoint_c = g_preview_model.to_celsius_from_user(user_val - step);
+  if (g_setpoint_c < 5.0f) g_setpoint_c = 5.0f;
+}
+
+void on_unit_changed(lv_event_t *e) {
+  if (e == nullptr) return;
+  const auto unit =
+      static_cast<thermostat::TemperatureUnit>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+  g_preview_unit = unit;
+  thermostat::ui::set_temperature_unit_button_state(unit);
 }
 
 uint32_t snap_to_step(uint32_t value, uint32_t step, uint32_t min_v, uint32_t max_v) {
@@ -322,6 +350,7 @@ void create_ui() {
   callbacks.on_tab_changed = on_tab_changed;
   callbacks.on_setpoint_up = on_setpoint_up;
   callbacks.on_setpoint_down = on_setpoint_down;
+  callbacks.on_unit = on_unit_changed;
   callbacks.on_timeout_slider = on_timeout_slider;
   callbacks.on_brightness_slider = on_brightness_slider;
   callbacks.on_dim_slider = on_dim_slider;
@@ -349,6 +378,7 @@ void create_ui() {
   g_brightness_slider = handles.brightness_slider;
   g_dim_slider = handles.dim_slider;
 
+  thermostat::ui::set_temperature_unit_button_state(g_preview_unit);
   show_page(PreviewPage::Home);
   update_labels();
 }

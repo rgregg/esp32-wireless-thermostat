@@ -11,11 +11,11 @@ TEST_CASE(display_model_units_and_weather) {
   m.set_outdoor_temperature_c(0.0f);
   m.set_weather_condition("Partly Cloudy");
 
-  ASSERT_TRUE(m.format_setpoint_text() == "68\xC2\xB0");
+  ASSERT_TRUE(m.format_setpoint_text() == "68");
   ASSERT_TRUE(m.weather_icon() == thermostat::WeatherIcon::PartlyCloudy);
 
   m.set_temperature_unit(thermostat::TemperatureUnit::Celsius);
-  ASSERT_TRUE(m.format_setpoint_text() == "20.0\xC2\xB0");
+  ASSERT_TRUE(m.format_setpoint_text() == "20.0");
 }
 
 TEST_CASE(display_model_nan_indoor_temperature_uses_na_fallback) {
