@@ -36,10 +36,35 @@ Primary specification and parity guide:
   - `pio run -e native`
 - Host test build:
   - `pio run -e native-tests`
+- Desktop thermostat UI preview build:
+  - `pio run -e native-ui-preview`
 - ESP32 controller firmware:
   - `pio run -e esp32-furnace-controller`
 - ESP32-S3 display firmware:
   - `pio run -e esp32-furnace-thermostat`
+
+## UI Preview (No Hardware)
+- Build:
+  - `pio run -e native-ui-preview`
+- Run:
+  - `./.pio/build/native-ui-preview/program`
+- Capture page screenshots (home/fan/mode/settings):
+  - `./.pio/build/native-ui-preview/program --capture-dir .tmp/ui-capture`
+- Verify UI screenshots against golden baselines:
+  - `scripts/ui_golden_check.sh`
+- Update golden baselines after intentional UI changes:
+  - `scripts/ui_golden_check.sh --update`
+- Requirements:
+  - SDL2 development libraries available via `pkg-config` (example on macOS: `brew install sdl2`)
+- Notes:
+  - The preview mirrors thermostat screen layout and interactions for UI iteration.
+  - Hardware-specific behavior (RGB timing, touch controller, ESP-NOW, sensor buses) is not simulated.
+
+## UI Fonts
+- Shared thermostat UI uses generated Montserrat assets from one source TTF (`third_party/fonts/Montserrat-Regular.ttf`).
+- Sizes are parity-aligned with the ESPHome design: `20/26/28/30/40/48/80/120`.
+- Regenerate fonts with:
+  - `scripts/generate_ui_fonts.sh`
 
 ## Run Tests
 - `./.pio/build/native-tests/program`

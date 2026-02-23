@@ -27,3 +27,9 @@ jobs:
 
       - name: Build thermostat firmware
         run: pio run -e esp32-furnace-thermostat
+
+      - name: Build UI preview
+        run: pio run -e native-ui-preview
+
+      - name: Verify UI golden screenshots
+        run: scripts/ui_golden_check.sh

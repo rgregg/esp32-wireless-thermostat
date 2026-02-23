@@ -31,6 +31,9 @@ void DisplayModel::set_weather_condition(const std::string &value) {
 }
 
 std::string DisplayModel::format_setpoint_text() const {
+  if (std::isnan(local_setpoint_c_)) {
+    return "N/A";
+  }
   char buf[16];
   const float v = to_user_temperature(local_setpoint_c_);
   if (unit_ == TemperatureUnit::Fahrenheit) {
@@ -42,6 +45,9 @@ std::string DisplayModel::format_setpoint_text() const {
 }
 
 std::string DisplayModel::format_indoor_temperature_text() const {
+  if (std::isnan(indoor_temp_c_)) {
+    return "N/A";
+  }
   char buf[16];
   const float v = to_user_temperature(indoor_temp_c_);
   if (unit_ == TemperatureUnit::Fahrenheit) {
@@ -53,6 +59,9 @@ std::string DisplayModel::format_indoor_temperature_text() const {
 }
 
 std::string DisplayModel::format_indoor_humidity_text() const {
+  if (std::isnan(indoor_humidity_)) {
+    return "";
+  }
   char buf[24];
   snprintf(buf, sizeof(buf), "%.0f%% humidity", indoor_humidity_);
   return std::string(buf);

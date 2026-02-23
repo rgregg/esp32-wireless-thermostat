@@ -22,6 +22,7 @@
 
 #include "thermostat/thermostat_device_runtime.h"
 #include "thermostat/thermostat_screen_controller.h"
+#include "thermostat/ui/thermostat_ui_shared.h"
 #include "management_paths.h"
 
 #include <Adafruit_AHTX0.h>
@@ -225,6 +226,9 @@ lv_obj_t *g_settings_diag_label = nullptr;
 lv_obj_t *g_settings_display_label = nullptr;
 
 lv_obj_t *g_setpoint_column = nullptr;
+lv_obj_t *g_timeout_slider = nullptr;
+lv_obj_t *g_brightness_slider = nullptr;
+lv_obj_t *g_dim_slider = nullptr;
 
 uint32_t g_last_ui_tick_ms = 0;
 uint32_t g_last_runtime_tick_ms = 0;
@@ -1780,7 +1784,22 @@ void refresh_ui() {
     display_text += "%";
     lv_label_set_text(g_settings_display_label, display_text.c_str());
   }
+  if (g_timeout_slider != nullptr && !lv_obj_has_state(g_timeout_slider, LV_STATE_PRESSED)) {
+    lv_slider_set_value(g_timeout_slider, static_cast<int32_t>(g_display_timeout_ms / 1000UL),
+                        LV_ANIM_OFF);
+  }
+  if (g_brightness_slider != nullptr && !lv_obj_has_state(g_brightness_slider, LV_STATE_PRESSED)) {
+    lv_slider_set_value(g_brightness_slider, static_cast<int32_t>(g_cfg_backlight_active_pct),
+                        LV_ANIM_OFF);
+  }
+  if (g_dim_slider != nullptr && !lv_obj_has_state(g_dim_slider, LV_STATE_PRESSED)) {
+    lv_slider_set_value(g_dim_slider, static_cast<int32_t>(g_cfg_backlight_screensaver_pct),
+                        LV_ANIM_OFF);
+  }
 
+  thermostat::ui::set_mode_button_state(g_runtime->local_mode());
+  thermostat::ui::set_fan_button_state(g_runtime->local_fan_mode());
+  thermostat::ui::set_temperature_unit_button_state(g_runtime->temperature_unit());
   g_screen.on_mode_changed(g_runtime->local_mode());
   if (g_setpoint_column != nullptr) {
     if (g_screen.setpoint_visible()) {
@@ -1860,211 +1879,77 @@ void apply_runtime_u32_setting(const char *key, uint32_t value) {
   }
 }
 
-void btn_timeout_down_cb(lv_event_t *) {
-  uint32_t seconds = g_display_timeout_ms / 1000UL;
-  seconds = (seconds <= 30U) ? 30U : (seconds - 30U);
+uint32_t snap_to_step(uint32_t value, uint32_t step, uint32_t min_v, uint32_t max_v) {
+  if (value < min_v) value = min_v;
+  if (value > max_v) value = max_v;
+  const uint32_t snapped = ((value + (step / 2U)) / step) * step;
+  if (snapped < min_v) return min_v;
+  if (snapped > max_v) return max_v;
+  return snapped;
+}
+
+void timeout_slider_cb(lv_event_t *e) {
+  lv_obj_t *slider = lv_event_get_target(e);
+  if (slider == nullptr) return;
+  uint32_t seconds = static_cast<uint32_t>(lv_slider_get_value(slider));
+  seconds = snap_to_step(seconds, 30U, 30U, 600U);
+  lv_slider_set_value(slider, static_cast<int32_t>(seconds), LV_ANIM_OFF);
   apply_runtime_u32_setting("display_timeout_s", seconds);
 }
 
-void btn_timeout_up_cb(lv_event_t *) {
-  uint32_t seconds = g_display_timeout_ms / 1000UL;
-  seconds = (seconds >= 600U) ? 600U : (seconds + 30U);
-  apply_runtime_u32_setting("display_timeout_s", seconds);
-}
-
-void btn_brightness_down_cb(lv_event_t *) {
-  uint32_t percent = g_cfg_backlight_active_pct;
-  percent = (percent <= 5U) ? 0U : (percent - 5U);
+void brightness_slider_cb(lv_event_t *e) {
+  lv_obj_t *slider = lv_event_get_target(e);
+  if (slider == nullptr) return;
+  uint32_t percent = static_cast<uint32_t>(lv_slider_get_value(slider));
+  percent = snap_to_step(percent, 5U, 0U, 100U);
+  lv_slider_set_value(slider, static_cast<int32_t>(percent), LV_ANIM_OFF);
   apply_runtime_u32_setting("backlight_active_pct", percent);
 }
 
-void btn_brightness_up_cb(lv_event_t *) {
-  uint32_t percent = g_cfg_backlight_active_pct;
-  percent = (percent >= 95U) ? 100U : (percent + 5U);
-  apply_runtime_u32_setting("backlight_active_pct", percent);
-}
-
-void btn_dim_down_cb(lv_event_t *) {
-  uint32_t percent = g_cfg_backlight_screensaver_pct;
-  percent = (percent <= 5U) ? 0U : (percent - 5U);
+void dim_slider_cb(lv_event_t *e) {
+  lv_obj_t *slider = lv_event_get_target(e);
+  if (slider == nullptr) return;
+  uint32_t percent = static_cast<uint32_t>(lv_slider_get_value(slider));
+  percent = snap_to_step(percent, 5U, 0U, 100U);
+  lv_slider_set_value(slider, static_cast<int32_t>(percent), LV_ANIM_OFF);
   apply_runtime_u32_setting("backlight_screensaver_pct", percent);
-}
-
-void btn_dim_up_cb(lv_event_t *) {
-  uint32_t percent = g_cfg_backlight_screensaver_pct;
-  percent = (percent >= 95U) ? 100U : (percent + 5U);
-  apply_runtime_u32_setting("backlight_screensaver_pct", percent);
-}
-
-lv_obj_t *make_page() {
-  lv_obj_t *p = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(p, kDisplayWidth, kDisplayHeight - 50);
-  lv_obj_set_pos(p, 0, 50);
-  return p;
 }
 
 void create_ui() {
-  g_tabs = lv_btnmatrix_create(lv_scr_act());
-  static const char *tab_map[] = {"HOME", "FAN", "MODE", "SETTINGS", ""};
-  lv_btnmatrix_set_map(g_tabs, tab_map);
-  lv_obj_set_size(g_tabs, kDisplayWidth, 50);
-  lv_obj_add_event_cb(g_tabs, tab_event_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+  thermostat::ui::UiCallbacks callbacks{};
+  callbacks.on_tab_changed = tab_event_cb;
+  callbacks.on_setpoint_up = btn_setpoint_up_cb;
+  callbacks.on_setpoint_down = btn_setpoint_down_cb;
+  callbacks.on_mode = btn_mode_cb;
+  callbacks.on_fan = btn_fan_cb;
+  callbacks.on_unit = btn_unit_cb;
+  callbacks.on_sync = btn_sync_cb;
+  callbacks.on_filter_reset = btn_filter_reset_cb;
+  callbacks.on_timeout_slider = timeout_slider_cb;
+  callbacks.on_brightness_slider = brightness_slider_cb;
+  callbacks.on_dim_slider = dim_slider_cb;
 
-  g_home_page = make_page();
-  g_fan_page = make_page();
-  g_mode_page = make_page();
-  g_settings_page = make_page();
-  g_screensaver_page = make_page();
+  thermostat::ui::UiHandles handles{};
+  thermostat::ui::build_thermostat_ui(callbacks, &handles);
 
-  g_status_label = lv_label_create(g_home_page);
-  lv_obj_align(g_status_label, LV_ALIGN_TOP_LEFT, 20, 20);
-
-  g_indoor_label = lv_label_create(g_home_page);
-  lv_obj_align(g_indoor_label, LV_ALIGN_TOP_LEFT, 20, 60);
-
-  g_humidity_label = lv_label_create(g_home_page);
-  lv_obj_align(g_humidity_label, LV_ALIGN_TOP_LEFT, 20, 100);
-
-  g_weather_label = lv_label_create(g_home_page);
-  lv_obj_align(g_weather_label, LV_ALIGN_TOP_LEFT, 20, 140);
-
-  g_setpoint_column = lv_obj_create(g_home_page);
-  lv_obj_set_size(g_setpoint_column, 120, 240);
-  lv_obj_align(g_setpoint_column, LV_ALIGN_TOP_RIGHT, -20, 20);
-
-  lv_obj_t *btn_up = lv_btn_create(g_setpoint_column);
-  lv_obj_set_size(btn_up, 90, 50);
-  lv_obj_align(btn_up, LV_ALIGN_TOP_MID, 0, 10);
-  lv_obj_add_event_cb(btn_up, btn_setpoint_up_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(btn_up), "+");
-
-  g_setpoint_label = lv_label_create(g_setpoint_column);
-  lv_obj_align(g_setpoint_label, LV_ALIGN_TOP_MID, 0, 80);
-
-  lv_obj_t *btn_down = lv_btn_create(g_setpoint_column);
-  lv_obj_set_size(btn_down, 90, 50);
-  lv_obj_align(btn_down, LV_ALIGN_TOP_MID, 0, 130);
-  lv_obj_add_event_cb(btn_down, btn_setpoint_down_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(btn_down), "-");
-
-  lv_obj_t *fan_auto = lv_btn_create(g_fan_page);
-  lv_obj_set_size(fan_auto, 220, 60);
-  lv_obj_align(fan_auto, LV_ALIGN_TOP_MID, 0, 20);
-  lv_obj_add_event_cb(fan_auto, btn_fan_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(FanMode::Automatic)));
-  lv_label_set_text(lv_label_create(fan_auto), "Automatic");
-
-  lv_obj_t *fan_on = lv_btn_create(g_fan_page);
-  lv_obj_set_size(fan_on, 220, 60);
-  lv_obj_align(fan_on, LV_ALIGN_TOP_MID, 0, 100);
-  lv_obj_add_event_cb(fan_on, btn_fan_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(FanMode::AlwaysOn)));
-  lv_label_set_text(lv_label_create(fan_on), "Always On");
-
-  lv_obj_t *fan_circ = lv_btn_create(g_fan_page);
-  lv_obj_set_size(fan_circ, 220, 60);
-  lv_obj_align(fan_circ, LV_ALIGN_TOP_MID, 0, 180);
-  lv_obj_add_event_cb(fan_circ, btn_fan_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(FanMode::Circulate)));
-  lv_label_set_text(lv_label_create(fan_circ), "Circulate");
-
-  lv_obj_t *mode_heat = lv_btn_create(g_mode_page);
-  lv_obj_set_size(mode_heat, 220, 60);
-  lv_obj_align(mode_heat, LV_ALIGN_TOP_MID, 0, 20);
-  lv_obj_add_event_cb(mode_heat, btn_mode_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(FurnaceMode::Heat)));
-  lv_label_set_text(lv_label_create(mode_heat), "Heat");
-
-  lv_obj_t *mode_cool = lv_btn_create(g_mode_page);
-  lv_obj_set_size(mode_cool, 220, 60);
-  lv_obj_align(mode_cool, LV_ALIGN_TOP_MID, 0, 100);
-  lv_obj_add_event_cb(mode_cool, btn_mode_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(FurnaceMode::Cool)));
-  lv_label_set_text(lv_label_create(mode_cool), "Cool");
-
-  lv_obj_t *mode_off = lv_btn_create(g_mode_page);
-  lv_obj_set_size(mode_off, 220, 60);
-  lv_obj_align(mode_off, LV_ALIGN_TOP_MID, 0, 180);
-  lv_obj_add_event_cb(mode_off, btn_mode_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(FurnaceMode::Off)));
-  lv_label_set_text(lv_label_create(mode_off), "Off");
-
-  lv_obj_t *unit_f = lv_btn_create(g_settings_page);
-  lv_obj_set_size(unit_f, 180, 50);
-  lv_obj_align(unit_f, LV_ALIGN_TOP_LEFT, 20, 20);
-  lv_obj_add_event_cb(unit_f, btn_unit_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(TemperatureUnit::Fahrenheit)));
-  lv_label_set_text(lv_label_create(unit_f), "Fahrenheit");
-
-  lv_obj_t *unit_c = lv_btn_create(g_settings_page);
-  lv_obj_set_size(unit_c, 180, 50);
-  lv_obj_align(unit_c, LV_ALIGN_TOP_LEFT, 220, 20);
-  lv_obj_add_event_cb(unit_c, btn_unit_cb, LV_EVENT_CLICKED,
-                      reinterpret_cast<void *>(static_cast<uintptr_t>(TemperatureUnit::Celsius)));
-  lv_label_set_text(lv_label_create(unit_c), "Celsius");
-
-  lv_obj_t *sync_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(sync_btn, 180, 50);
-  lv_obj_align(sync_btn, LV_ALIGN_TOP_LEFT, 20, 100);
-  lv_obj_add_event_cb(sync_btn, btn_sync_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(sync_btn), "Sync");
-
-  lv_obj_t *filter_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(filter_btn, 180, 50);
-  lv_obj_align(filter_btn, LV_ALIGN_TOP_LEFT, 220, 100);
-  lv_obj_add_event_cb(filter_btn, btn_filter_reset_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(filter_btn), "Filter Reset");
-
-  lv_obj_t *timeout_down_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(timeout_down_btn, 80, 44);
-  lv_obj_align(timeout_down_btn, LV_ALIGN_TOP_LEFT, 20, 180);
-  lv_obj_add_event_cb(timeout_down_btn, btn_timeout_down_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(timeout_down_btn), "T-");
-
-  lv_obj_t *timeout_up_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(timeout_up_btn, 80, 44);
-  lv_obj_align(timeout_up_btn, LV_ALIGN_TOP_LEFT, 110, 180);
-  lv_obj_add_event_cb(timeout_up_btn, btn_timeout_up_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(timeout_up_btn), "T+");
-
-  lv_obj_t *brightness_down_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(brightness_down_btn, 80, 44);
-  lv_obj_align(brightness_down_btn, LV_ALIGN_TOP_LEFT, 220, 180);
-  lv_obj_add_event_cb(brightness_down_btn, btn_brightness_down_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(brightness_down_btn), "B-");
-
-  lv_obj_t *brightness_up_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(brightness_up_btn, 80, 44);
-  lv_obj_align(brightness_up_btn, LV_ALIGN_TOP_LEFT, 310, 180);
-  lv_obj_add_event_cb(brightness_up_btn, btn_brightness_up_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(brightness_up_btn), "B+");
-
-  lv_obj_t *dim_down_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(dim_down_btn, 80, 44);
-  lv_obj_align(dim_down_btn, LV_ALIGN_TOP_LEFT, 420, 180);
-  lv_obj_add_event_cb(dim_down_btn, btn_dim_down_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(dim_down_btn), "S-");
-
-  lv_obj_t *dim_up_btn = lv_btn_create(g_settings_page);
-  lv_obj_set_size(dim_up_btn, 80, 44);
-  lv_obj_align(dim_up_btn, LV_ALIGN_TOP_LEFT, 510, 180);
-  lv_obj_add_event_cb(dim_up_btn, btn_dim_up_cb, LV_EVENT_CLICKED, nullptr);
-  lv_label_set_text(lv_label_create(dim_up_btn), "S+");
-
-  g_settings_display_label = lv_label_create(g_settings_page);
-  lv_obj_set_width(g_settings_display_label, 760);
-  lv_obj_align(g_settings_display_label, LV_ALIGN_TOP_LEFT, 20, 232);
-  lv_label_set_long_mode(g_settings_display_label, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(g_settings_display_label, "Display settings...");
-
-  g_settings_diag_label = lv_label_create(g_settings_page);
-  lv_obj_set_width(g_settings_diag_label, 760);
-  lv_obj_align(g_settings_diag_label, LV_ALIGN_TOP_LEFT, 20, 280);
-  lv_label_set_long_mode(g_settings_diag_label, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(g_settings_diag_label, "Diagnostics...");
-
-  g_screen_time_label = lv_label_create(g_screensaver_page);
-  lv_obj_align(g_screen_time_label, LV_ALIGN_CENTER, 0, 0);
+  g_tabs = handles.tabs;
+  g_home_page = handles.home_page;
+  g_fan_page = handles.fan_page;
+  g_mode_page = handles.mode_page;
+  g_settings_page = handles.settings_page;
+  g_screensaver_page = handles.screensaver_page;
+  g_status_label = handles.status_label;
+  g_indoor_label = handles.indoor_label;
+  g_humidity_label = handles.humidity_label;
+  g_setpoint_label = handles.setpoint_label;
+  g_weather_label = handles.weather_label;
+  g_screen_time_label = handles.screen_time_label;
+  g_settings_diag_label = handles.settings_diag_label;
+  g_settings_display_label = handles.settings_display_label;
+  g_timeout_slider = handles.timeout_slider;
+  g_brightness_slider = handles.brightness_slider;
+  g_dim_slider = handles.dim_slider;
+  g_setpoint_column = handles.setpoint_column;
 
   show_page(ThermostatPage::Home);
 }

@@ -2,6 +2,7 @@
 #include "thermostat/display_model.h"
 #include "test_harness.h"
 #include "thermostat/thermostat_ui_state.h"
+#include <math.h>
 
 TEST_CASE(display_model_units_and_weather) {
   thermostat::DisplayModel m;
@@ -15,6 +16,12 @@ TEST_CASE(display_model_units_and_weather) {
 
   m.set_temperature_unit(thermostat::TemperatureUnit::Celsius);
   ASSERT_TRUE(m.format_setpoint_text() == "20.0\xC2\xB0");
+}
+
+TEST_CASE(display_model_nan_indoor_temperature_uses_na_fallback) {
+  thermostat::DisplayModel m;
+  m.set_local_indoor_temperature_c(NAN);
+  ASSERT_TRUE(m.format_indoor_temperature_text() == "N/A");
 }
 
 TEST_CASE(ui_state_text_mapping) {
