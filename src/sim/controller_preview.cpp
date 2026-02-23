@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "controller/controller_runtime.h"
 #include "espnow_cmd_word.h"
 #include "sim_mqtt_client.h"
+#include "sim_weather_client.h"
 #include "thermostat/thermostat_state.h"
 
 namespace {
@@ -137,6 +139,13 @@ constexpr int kWeatherConditionCount = 6;
 int g_weather_index = 1;  // Start at Cloudy
 bool g_weather_enabled = false;
 
+// Real weather polling via PirateWeather API
+constexpr uint32_t kWeatherPollMs = 15UL * 60UL * 1000UL;  // 15 minutes
+std::string g_pirateweather_api_key;
+std::string g_pirateweather_zip;
+uint32_t g_last_weather_poll_ms = 0;
+bool g_weather_api_configured = false;
+
 const char *mode_name(FurnaceMode mode) {
   switch (mode) {
     case FurnaceMode::Off: return "OFF";
@@ -183,6 +192,42 @@ const char *hvac_state_name(FurnaceStateCode state) {
     case FurnaceStateCode::FanOn: return "Fan Running";
     case FurnaceStateCode::Error: return "ERROR";
     default: return "Unknown";
+  }
+}
+
+void load_dotenv() {
+  std::ifstream file(".env");
+  if (!file.is_open()) return;
+
+  std::string line;
+  while (std::getline(file, line)) {
+    // Skip empty lines and comments
+    size_t start = line.find_first_not_of(" \t");
+    if (start == std::string::npos || line[start] == '#') continue;
+
+    size_t eq = line.find('=', start);
+    if (eq == std::string::npos) continue;
+
+    std::string key = line.substr(start, eq - start);
+    std::string value = line.substr(eq + 1);
+
+    // Trim trailing whitespace from key
+    size_t end = key.find_last_not_of(" \t");
+    if (end != std::string::npos) key.erase(end + 1);
+
+    // Trim leading/trailing whitespace and optional quotes from value
+    start = value.find_first_not_of(" \t");
+    if (start != std::string::npos) value = value.substr(start);
+    end = value.find_last_not_of(" \t\r\n");
+    if (end != std::string::npos) value.erase(end + 1);
+    if (value.size() >= 2 &&
+        ((value.front() == '"' && value.back() == '"') ||
+         (value.front() == '\'' && value.back() == '\''))) {
+      value = value.substr(1, value.size() - 2);
+    }
+
+    // Don't overwrite existing env vars (0 = no overwrite)
+    setenv(key.c_str(), value.c_str(), 0);
   }
 }
 
@@ -504,8 +549,11 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   // Weather
   ly += 5;
   if (g_weather_enabled) {
+    const char *cond = g_app->has_outdoor_weather()
+                           ? g_app->outdoor_condition()
+                           : kWeatherConditions[g_weather_index];
     snprintf(buf, sizeof(buf), "Weather: %.1f C, %s",
-             static_cast<double>(g_simulated_outdoor_c), kWeatherConditions[g_weather_index]);
+             static_cast<double>(g_simulated_outdoor_c), cond);
     draw_text(g_font_small, x + 10, ly, buf, kColorLightBlue);
   } else {
     draw_text(g_font_small, x + 10, ly, "Weather: (disabled)", 0xFF888888);
@@ -916,6 +964,44 @@ void shutdown() {
   g_app = nullptr;
 }
 
+void poll_weather() {
+  if (!g_weather_api_configured || g_app == nullptr) return;
+
+  const uint32_t now = SDL_GetTicks();
+  if (g_last_weather_poll_ms != 0 &&
+      (now - g_last_weather_poll_ms) < kWeatherPollMs) {
+    return;
+  }
+  g_last_weather_poll_ms = now;
+
+  printf("[Weather] Fetching weather for ZIP %s...\n", g_pirateweather_zip.c_str());
+
+  auto result = sim::fetch_weather(g_pirateweather_api_key, g_pirateweather_zip);
+  if (!result.ok) {
+    printf("[Weather] Fetch failed\n");
+    return;
+  }
+
+  printf("[Weather] %.1f C, %s\n",
+         static_cast<double>(result.temp_c), result.condition.c_str());
+
+  // Update simulator state
+  g_weather_enabled = true;
+  g_simulated_outdoor_c = result.temp_c;
+
+  // Find matching condition index for diagnostics panel display
+  for (int i = 0; i < kWeatherConditionCount; ++i) {
+    if (result.condition == kWeatherConditions[i]) {
+      g_weather_index = i;
+      break;
+    }
+  }
+
+  // Push into app and publish via MQTT
+  g_app->set_outdoor_weather(result.temp_c, result.condition.c_str());
+  g_transport.publish_weather(result.temp_c, result.condition.c_str());
+}
+
 }  // namespace
 
 int main(int /* argc */, char ** /* argv */) {
@@ -940,12 +1026,28 @@ int main(int /* argc */, char ** /* argv */) {
 
   g_mqtt.set_message_callback(on_mqtt_message);
 
+  load_dotenv();
+
+  // Check for PirateWeather API credentials
+  const char *pw_key = getenv("PIRATEWEATHER_API_KEY");
+  const char *pw_zip = getenv("PIRATEWEATHER_ZIP");
+  if (pw_key != nullptr && pw_key[0] != '\0' &&
+      pw_zip != nullptr && pw_zip[0] != '\0') {
+    g_pirateweather_api_key = pw_key;
+    g_pirateweather_zip = pw_zip;
+    g_weather_api_configured = true;
+    printf("PirateWeather API configured (ZIP: %s)\n", pw_zip);
+  } else {
+    printf("PirateWeather not configured (set PIRATEWEATHER_API_KEY and PIRATEWEATHER_ZIP)\n");
+  }
+
   printf("ESP32 Controller Simulator\n");
   printf("Connecting to MQTT broker at %s:%d\n", kMqttHost, kMqttPort);
 
   while (g_running) {
     ensure_mqtt_connected();
     g_mqtt.loop();
+    poll_weather();
     process_events();
     tick_controller();
     render_board();

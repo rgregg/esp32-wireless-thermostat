@@ -6,6 +6,7 @@
 
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
+#include "controller/pirateweather.h"
 #include "command_builder.h"
 #include "espnow_cmd_word.h"
 #include "management_paths.h"
@@ -488,110 +489,23 @@ bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
 
 // --- Weather polling (PirateWeather API) ---
 
-String ctrl_normalize_zip(const String &raw_zip) {
-  String out;
-  out.reserve(5);
-  for (size_t i = 0; i < raw_zip.length(); ++i) {
-    const char c = raw_zip[i];
-    if (c == '-') break;
-    if (c >= '0' && c <= '9') {
-      if (out.length() < 5) out += c;
-    }
-  }
-  return out.length() == 5 ? out : String("");
-}
-
-bool ctrl_json_extract_string(const String &json, const char *key, String *out,
-                               int from_index = 0) {
-  if (out == nullptr || key == nullptr) return false;
-  const String token = "\"" + String(key) + "\"";
-  const int key_index = json.indexOf(token, from_index);
-  if (key_index < 0) return false;
-  const int colon_index = json.indexOf(':', key_index + token.length());
-  if (colon_index < 0) return false;
-  int value_start = colon_index + 1;
-  while (value_start < static_cast<int>(json.length()) && json[value_start] == ' ')
-    ++value_start;
-  if (value_start >= static_cast<int>(json.length()) || json[value_start] != '"')
-    return false;
-  ++value_start;
-  String value;
-  bool escaped = false;
-  for (int i = value_start; i < static_cast<int>(json.length()); ++i) {
-    const char c = json[i];
-    if (c == '"' && !escaped) { *out = value; return true; }
-    if (escaped) { escaped = false; } else if (c == '\\') { escaped = true; continue; }
-    value += c;
-  }
-  return false;
-}
-
-bool ctrl_json_extract_float(const String &json, const char *key, float *out,
-                              int from_index = 0) {
-  if (out == nullptr || key == nullptr) return false;
-  const String token = "\"" + String(key) + "\"";
-  const int key_index = json.indexOf(token, from_index);
-  if (key_index < 0) return false;
-  const int colon_index = json.indexOf(':', key_index + token.length());
-  if (colon_index < 0) return false;
-  int value_start = colon_index + 1;
-  while (value_start < static_cast<int>(json.length()) && json[value_start] == ' ')
-    ++value_start;
-  if (value_start >= static_cast<int>(json.length())) return false;
-  bool quoted = json[value_start] == '"';
-  if (quoted) ++value_start;
-  int value_end = value_start;
-  while (value_end < static_cast<int>(json.length())) {
-    const char c = json[value_end];
-    if (quoted) { if (c == '"') break; }
-    else if (c == ',' || c == '}' || c == ' ') break;
-    ++value_end;
-  }
-  if (value_end <= value_start) return false;
-  *out = static_cast<float>(atof(json.substring(value_start, value_end).c_str()));
-  return true;
-}
-
-String ctrl_map_pirateweather_icon(const String &icon) {
-  if (icon == "clear-day") return "Sunny";
-  if (icon == "clear-night") return "Night";
-  if (icon == "partly-cloudy-day") return "Partly Cloudy";
-  if (icon == "partly-cloudy-night") return "Night Cloudy";
-  if (icon == "cloudy") return "Cloudy";
-  if (icon == "fog") return "Fog";
-  if (icon == "rain") return "Rain";
-  if (icon == "snow") return "Snow";
-  if (icon == "sleet") return "Sleet";
-  if (icon == "wind") return "Windy";
-  if (icon == "hail") return "Hail";
-  if (icon == "thunderstorm") return "Lightning";
-  return icon.length() > 0 ? icon : String("Unknown");
-}
-
-bool ctrl_fetch_zip_coordinates(const String &zip, float *lat_out, float *lon_out) {
-  if (lat_out == nullptr || lon_out == nullptr || zip.length() == 0) return false;
+bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out) {
+  if (lat_out == nullptr || lon_out == nullptr || zip[0] == '\0') return false;
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  const String url = "https://api.zippopotam.us/us/" + zip;
-  if (!http.begin(client, url)) return false;
+  const std::string url = pirateweather::geocode_url(zip);
+  if (!http.begin(client, url.c_str())) return false;
   http.setTimeout(kCtrlHttpTimeoutMs);
   const int status = http.GET();
   if (status != 200) { http.end(); return false; }
   const String body = http.getString();
   http.end();
-  float lat = 0.0f, lon = 0.0f;
-  if (!ctrl_json_extract_float(body, "latitude", &lat) ||
-      !ctrl_json_extract_float(body, "longitude", &lon)) {
-    return false;
-  }
-  *lat_out = lat;
-  *lon_out = lon;
-  return true;
+  return pirateweather::parse_geocode_response(body.c_str(), lat_out, lon_out);
 }
 
 bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
-                                       String *condition_out) {
+                                       char *condition_out, size_t condition_len) {
   if (temp_c_out == nullptr || condition_out == nullptr ||
       g_cfg_ctrl_pirateweather_api_key.length() == 0) {
     return false;
@@ -599,27 +513,16 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  char coord[40];
-  snprintf(coord, sizeof(coord), "%.5f,%.5f",
-           static_cast<double>(lat), static_cast<double>(lon));
-  const String url = "https://api.pirateweather.net/forecast/" +
-                     g_cfg_ctrl_pirateweather_api_key + "/" + String(coord) +
-                     "?units=si&exclude=minutely,hourly,daily,alerts";
-  if (!http.begin(client, url)) return false;
+  const std::string url = pirateweather::forecast_url(
+      g_cfg_ctrl_pirateweather_api_key.c_str(), lat, lon);
+  if (!http.begin(client, url.c_str())) return false;
   http.setTimeout(kCtrlHttpTimeoutMs);
   const int status = http.GET();
   if (status != 200) { http.end(); return false; }
   const String body = http.getString();
   http.end();
-  const int current_idx = body.indexOf("\"currently\"");
-  if (current_idx < 0) return false;
-  float temp_c = 0.0f;
-  String icon;
-  if (!ctrl_json_extract_float(body, "temperature", &temp_c, current_idx)) return false;
-  if (!ctrl_json_extract_string(body, "icon", &icon, current_idx)) icon = "Unknown";
-  *temp_c_out = temp_c;
-  *condition_out = ctrl_map_pirateweather_icon(icon);
-  return true;
+  return pirateweather::parse_forecast_response(body.c_str(), temp_c_out,
+                                                condition_out, condition_len);
 }
 
 void ctrl_poll_weather(uint32_t now_ms) {
@@ -634,21 +537,23 @@ void ctrl_poll_weather(uint32_t now_ms) {
   }
   g_ctrl_last_weather_poll_ms = now_ms;
 
-  const String zip = ctrl_normalize_zip(g_cfg_ctrl_pirateweather_zip);
-  if (zip.length() == 0) return;
+  const std::string zip = pirateweather::normalize_zip(
+      g_cfg_ctrl_pirateweather_zip.c_str());
+  if (zip.empty()) return;
 
   float lat = 0.0f, lon = 0.0f;
-  if (!ctrl_fetch_zip_coordinates(zip, &lat, &lon)) return;
+  if (!ctrl_fetch_zip_coordinates(zip.c_str(), &lat, &lon)) return;
 
   float outdoor_temp_c = 0.0f;
-  String condition;
-  if (!ctrl_fetch_pirateweather_current(lat, lon, &outdoor_temp_c, &condition)) return;
+  char condition[64] = {0};
+  if (!ctrl_fetch_pirateweather_current(lat, lon, &outdoor_temp_c,
+                                        condition, sizeof(condition))) return;
 
   // Store in app for MQTT publishing
-  g_controller->app().set_outdoor_weather(outdoor_temp_c, condition.c_str());
+  g_controller->app().set_outdoor_weather(outdoor_temp_c, condition);
 
   // Send to all connected displays via ESP-NOW
-  g_controller->transport().publish_weather(outdoor_temp_c, condition.c_str());
+  g_controller->transport().publish_weather(outdoor_temp_c, condition);
 
   // Publish to MQTT
   if (g_ctrl_mqtt.connected()) {
@@ -656,7 +561,7 @@ void ctrl_poll_weather(uint32_t now_ms) {
     snprintf(buf, sizeof(buf), "%.1f", outdoor_temp_c);
     g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
     g_ctrl_mqtt.publish(ctrl_topic_for("state/weather_condition").c_str(),
-                        condition.c_str(), true);
+                        condition, true);
   }
 }
 
