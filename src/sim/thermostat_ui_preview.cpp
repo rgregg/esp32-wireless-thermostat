@@ -433,54 +433,80 @@ void update_labels() {
   }
 
   char system_text[256];
-  snprintf(system_text, sizeof(system_text),
-           "fw: 0.9.0-preview+18\n"
-           "build: native-ui-preview\n"
-           "boot_count: 14\n"
-           "reset: software\n"
-           "uptime_s: %lu",
-           static_cast<unsigned long>(SDL_GetTicks() / 1000U));
+  {
+#ifdef THERMOSTAT_FIRMWARE_VERSION
+    const char *fw_version = THERMOSTAT_FIRMWARE_VERSION;
+#else
+    const char *fw_version = "dev";
+#endif
+    snprintf(system_text, sizeof(system_text),
+             "fw: %s\n"
+             "build: native-ui-preview\n"
+             "boot_count: 1\n"
+             "reset: sim\n"
+             "uptime_s: %lu",
+             fw_version,
+             static_cast<unsigned long>(now / 1000U));
+  }
 
   char wifi_text[256];
   snprintf(wifi_text, sizeof(wifi_text),
-           "connected: yes\n"
-           "ip: 192.168.1.77\n"
-           "ssid: lab-2g\n"
-           "mac: AA:BB:CC:DD:EE:FF\n"
-           "channel: 6\n"
-           "rssi_dbm: -58");
+           "connected: n/a (sim)\n"
+           "ip: n/a\n"
+           "ssid: n/a\n"
+           "mac: n/a\n"
+           "channel: n/a\n"
+           "rssi_dbm: n/a");
 
   char mqtt_text[256];
-  snprintf(mqtt_text, sizeof(mqtt_text),
-           "connected: yes\n"
-           "state: 0\n"
-           "host: mqtt.lan:1883\n"
-           "user: (none)\n"
-           "password: unset\n"
-           "client_id: esp32-furnace-thermostat\n"
-           "base_topic: thermostat/furnace-display\n"
-           "last_cmd_ago_s: 7");
+  {
+    uint32_t cmd_ago_s = g_last_heartbeat_ms == 0 ? 0 : (now - g_last_heartbeat_ms) / 1000;
+    snprintf(mqtt_text, sizeof(mqtt_text),
+             "connected: %s\n"
+             "state: 0\n"
+             "host: %s:%d\n"
+             "user: (none)\n"
+             "password: unset\n"
+             "client_id: %s\n"
+             "base_topic: %s\n"
+             "last_cmd_ago_s: %lu",
+             g_mqtt_connected ? "yes" : "no",
+             kMqttHost, kMqttPort,
+             kMqttClientId,
+             kDisplayBaseTopic,
+             static_cast<unsigned long>(cmd_ago_s));
+  }
 
   char controller_text[96];
-  snprintf(controller_text, sizeof(controller_text),
-           "last_hb_ago_s: 2\n"
-           "timeout_ms: 30000");
+  {
+    uint32_t hb_ms = g_therm_app->last_controller_heartbeat_ms();
+    uint32_t hb_ago_s = (hb_ms == 0) ? 0 : (now - hb_ms) / 1000;
+    bool connected = g_therm_app->controller_connected(now, kControllerConnectionTimeoutMs);
+    snprintf(controller_text, sizeof(controller_text),
+             "connected: %s\n"
+             "last_hb_ago_s: %lu\n"
+             "timeout_ms: %lu",
+             connected ? "yes" : "no",
+             static_cast<unsigned long>(hb_ago_s),
+             static_cast<unsigned long>(kControllerConnectionTimeoutMs));
+  }
 
   char espnow_text[160];
   snprintf(espnow_text, sizeof(espnow_text),
-           "channel: 6\n"
-           "peer_mac: 24:6F:28:AA:BB:CC\n"
-           "tx_ok: 122\n"
-           "tx_fail: 1");
+           "channel: n/a (sim)\n"
+           "peer_mac: n/a\n"
+           "tx_ok: n/a\n"
+           "tx_fail: n/a");
 
   char config_text[192];
   snprintf(config_text, sizeof(config_text),
            "temp_unit: %s\n"
-           "temp_comp_c: -0.3\n"
+           "temp_comp_c: %.1f\n"
            "display_timeout_s: %lu\n"
            "brightness_pct: %u\n"
            "saver_pct: %u",
            g_display_app->temperature_unit() == thermostat::TemperatureUnit::Fahrenheit ? "F" : "C",
+           static_cast<double>(g_display_app->local_temperature_compensation_c()),
            static_cast<unsigned long>(g_display_timeout_s),
            static_cast<unsigned>(g_brightness_pct),
            static_cast<unsigned>(g_screensaver_brightness_pct));
