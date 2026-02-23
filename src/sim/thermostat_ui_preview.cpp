@@ -11,6 +11,7 @@
 #include <lvgl.h>
 
 #include "thermostat/display_model.h"
+#include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/thermostat_ui_state.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
 
@@ -68,6 +69,8 @@ lv_obj_t *g_setpoint_label = nullptr;
 lv_obj_t *g_weather_label = nullptr;
 lv_obj_t *g_weather_icon_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
+lv_obj_t *g_screen_weather_label = nullptr;
+lv_obj_t *g_screen_indoor_label = nullptr;
 lv_obj_t *g_settings_diag_label = nullptr;
 lv_obj_t *g_settings_display_label = nullptr;
 lv_obj_t *g_settings_system_label = nullptr;
@@ -81,15 +84,7 @@ lv_obj_t *g_timeout_slider = nullptr;
 lv_obj_t *g_brightness_slider = nullptr;
 lv_obj_t *g_dim_slider = nullptr;
 
-enum class PreviewPage : uint8_t {
-  Home = 0,
-  Fan = 1,
-  Mode = 2,
-  Settings = 3,
-  Screensaver = 4,
-};
-
-PreviewPage g_current_page = PreviewPage::Home;
+thermostat::ThermostatScreenController g_screen;
 float g_setpoint_c = 21.5f;
 uint32_t g_display_timeout_s = 300;
 uint8_t g_brightness_pct = 100;
@@ -182,8 +177,7 @@ void mouse_read_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
   data->point.y = g_mouse.y;
 }
 
-void show_page(PreviewPage page) {
-  g_current_page = page;
+void show_page(thermostat::ThermostatPage page) {
   lv_obj_add_flag(g_home_page, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(g_fan_page, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(g_mode_page, LV_OBJ_FLAG_HIDDEN);
@@ -191,23 +185,40 @@ void show_page(PreviewPage page) {
   lv_obj_add_flag(g_screensaver_page, LV_OBJ_FLAG_HIDDEN);
 
   switch (page) {
-    case PreviewPage::Home:
+    case thermostat::ThermostatPage::Home:
       lv_obj_clear_flag(g_home_page, LV_OBJ_FLAG_HIDDEN);
       break;
-    case PreviewPage::Fan:
+    case thermostat::ThermostatPage::Fan:
       lv_obj_clear_flag(g_fan_page, LV_OBJ_FLAG_HIDDEN);
       break;
-    case PreviewPage::Mode:
+    case thermostat::ThermostatPage::Mode:
       lv_obj_clear_flag(g_mode_page, LV_OBJ_FLAG_HIDDEN);
       break;
-    case PreviewPage::Settings:
+    case thermostat::ThermostatPage::Settings:
       lv_obj_clear_flag(g_settings_page, LV_OBJ_FLAG_HIDDEN);
       break;
-    case PreviewPage::Screensaver:
+    case thermostat::ThermostatPage::Screensaver:
       lv_obj_clear_flag(g_screensaver_page, LV_OBJ_FLAG_HIDDEN);
       break;
   }
+
+  if (g_tabs != nullptr) {
+    if (page == thermostat::ThermostatPage::Screensaver) {
+      lv_obj_add_flag(g_tabs, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_clear_flag(g_tabs, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
+
+void activate_screensaver() {
+  const uint32_t now = SDL_GetTicks();
+  const uint32_t timeout_ms = g_display_timeout_s * 1000U;
+  g_screen.on_user_interaction(now - timeout_ms - 1U);
+  g_screen.tick(now);
+}
+
+void wake_screensaver() { g_screen.on_user_interaction(SDL_GetTicks()); }
 
 void update_labels() {
   const char *weather_icon = LV_SYMBOL_IMAGE;
@@ -240,6 +251,16 @@ void update_labels() {
     lv_label_set_text(g_weather_icon_label, weather_icon);
   }
   lv_label_set_text(g_screen_time_label, "12:34 PM");
+  if (g_screen_weather_label != nullptr) {
+    lv_label_set_text(g_screen_weather_label, weather_text.c_str());
+  }
+  if (g_screen_indoor_label != nullptr) {
+    lv_label_set_text(g_screen_indoor_label, indoor_text.c_str());
+  }
+  if (g_screen.screensaver_active()) {
+    thermostat::ui::update_screensaver_layout(g_screen_time_label, g_screen_weather_label,
+                                              g_screen_indoor_label, SDL_GetTicks() / 60000U);
+  }
 
   char system_text[256];
   snprintf(system_text, sizeof(system_text),
@@ -327,15 +348,17 @@ void on_tab_changed(lv_event_t *e) {
   if (txt == nullptr) {
     return;
   }
+  const uint32_t now = SDL_GetTicks();
   if (strcmp(txt, "HOME") == 0) {
-    show_page(PreviewPage::Home);
+    g_screen.on_tab_selected(thermostat::ThermostatPage::Home, now);
   } else if (strcmp(txt, "FAN") == 0) {
-    show_page(PreviewPage::Fan);
+    g_screen.on_tab_selected(thermostat::ThermostatPage::Fan, now);
   } else if (strcmp(txt, "MODE") == 0) {
-    show_page(PreviewPage::Mode);
+    g_screen.on_tab_selected(thermostat::ThermostatPage::Mode, now);
   } else if (strcmp(txt, "SETTINGS") == 0) {
-    show_page(PreviewPage::Settings);
+    g_screen.on_tab_selected(thermostat::ThermostatPage::Settings, now);
   }
+  show_page(g_screen.current_page());
 }
 
 void on_setpoint_up(lv_event_t *) {
@@ -365,6 +388,7 @@ void on_mode_changed(lv_event_t *e) {
   const auto mode = static_cast<FurnaceMode>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
   g_preview_mode = mode;
   thermostat::ui::set_mode_button_state(mode);
+  g_screen.on_mode_changed(mode);
 }
 
 uint32_t snap_to_step(uint32_t value, uint32_t step, uint32_t min_v, uint32_t max_v) {
@@ -382,6 +406,7 @@ void on_timeout_slider(lv_event_t *e) {
   g_display_timeout_s =
       snap_to_step(static_cast<uint32_t>(lv_slider_get_value(slider)), 30U, 30U, 600U);
   lv_slider_set_value(slider, static_cast<int32_t>(g_display_timeout_s), LV_ANIM_OFF);
+  g_screen.set_display_timeout_ms(g_display_timeout_s * 1000U);
 }
 
 void on_brightness_slider(lv_event_t *e) {
@@ -428,6 +453,8 @@ void create_ui() {
   g_weather_label = handles.weather_label;
   g_weather_icon_label = handles.weather_icon_label;
   g_screen_time_label = handles.screen_time_label;
+  g_screen_weather_label = handles.screen_weather_label;
+  g_screen_indoor_label = handles.screen_indoor_label;
   g_settings_diag_label = handles.settings_diag_label;
   g_settings_display_label = handles.settings_display_label;
   g_settings_system_label = handles.settings_system_label;
@@ -443,7 +470,11 @@ void create_ui() {
 
   thermostat::ui::set_mode_button_state(g_preview_mode);
   thermostat::ui::set_temperature_unit_button_state(g_preview_unit);
-  show_page(PreviewPage::Home);
+  const uint32_t now = SDL_GetTicks();
+  g_screen.on_boot(now);
+  g_screen.on_mode_changed(g_preview_mode);
+  g_screen.set_display_timeout_ms(g_display_timeout_s * 1000U);
+  show_page(g_screen.current_page());
   update_labels();
 }
 
@@ -517,6 +548,13 @@ void process_events() {
       g_mouse.pressed = true;
       g_mouse.x = e.button.x;
       g_mouse.y = e.button.y;
+      g_screen.on_user_interaction(SDL_GetTicks());
+    } else if (e.type == SDL_KEYDOWN) {
+      if (e.key.keysym.sym == SDLK_s) {
+        activate_screensaver();
+      } else if (e.key.keysym.sym == SDLK_w) {
+        wake_screensaver();
+      }
     } else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
       g_mouse.pressed = false;
       g_mouse.x = e.button.x;
@@ -600,13 +638,15 @@ void run_for_ticks(uint32_t ms) {
   const uint32_t start = SDL_GetTicks();
   while (SDL_GetTicks() - start < ms) {
     process_events();
+    g_screen.tick(SDL_GetTicks());
+    show_page(g_screen.current_page());
     tick_lvgl();
     render();
     SDL_Delay(5);
   }
 }
 
-bool capture_page(PreviewPage page, const char *name) {
+bool capture_page(thermostat::ThermostatPage page, const char *name) {
   show_page(page);
   run_for_ticks(120);
   const std::string out = g_capture_dir + "/" + std::string(name) + ".bmp";
@@ -621,10 +661,12 @@ bool capture_baselines() {
   }
 
   bool ok = true;
-  ok = ok && capture_page(PreviewPage::Home, "home");
-  ok = ok && capture_page(PreviewPage::Fan, "fan");
-  ok = ok && capture_page(PreviewPage::Mode, "mode");
-  ok = ok && capture_page(PreviewPage::Settings, "settings");
+  ok = ok && capture_page(thermostat::ThermostatPage::Home, "home");
+  ok = ok && capture_page(thermostat::ThermostatPage::Fan, "fan");
+  ok = ok && capture_page(thermostat::ThermostatPage::Mode, "mode");
+  ok = ok && capture_page(thermostat::ThermostatPage::Settings, "settings");
+  activate_screensaver();
+  ok = ok && capture_page(thermostat::ThermostatPage::Screensaver, "screensaver");
   return ok;
 }
 
@@ -668,8 +710,12 @@ int main(int argc, char **argv) {
     return ok ? 0 : 1;
   }
 
+  fprintf(stdout, "Simulator controls: S=activate screensaver, W=wake display\n");
+
   while (g_running) {
     process_events();
+    g_screen.tick(SDL_GetTicks());
+    show_page(g_screen.current_page());
     tick_lvgl();
     render();
     SDL_Delay(5);

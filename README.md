@@ -48,7 +48,7 @@ Primary specification and parity guide:
   - `pio run -e native-ui-preview`
 - Run:
   - `./.pio/build/native-ui-preview/program`
-- Capture page screenshots (home/fan/mode/settings):
+- Capture page screenshots (home/fan/mode/settings/screensaver):
   - `./.pio/build/native-ui-preview/program --capture-dir .tmp/ui-capture`
 - Verify UI screenshots against golden baselines:
   - `scripts/ui_golden_check.sh`
@@ -58,6 +58,7 @@ Primary specification and parity guide:
   - SDL2 development libraries available via `pkg-config` (example on macOS: `brew install sdl2`)
 - Notes:
   - The preview mirrors thermostat screen layout and interactions for UI iteration.
+  - Keyboard controls: `S` forces screensaver activation (via shared idle timeout logic), `W` wakes the screen.
   - Hardware-specific behavior (RGB timing, touch controller, ESP-NOW, sensor buses) is not simulated.
 
 ## UI Fonts

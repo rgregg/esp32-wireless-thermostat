@@ -256,6 +256,25 @@ void mode_button_cb(lv_event_t *e) {
   }
 }
 
+struct Rect {
+  lv_coord_t x;
+  lv_coord_t y;
+  lv_coord_t w;
+  lv_coord_t h;
+};
+
+bool intersects(const Rect &a, const Rect &b) {
+  const lv_coord_t ar = a.x + a.w;
+  const lv_coord_t ab = a.y + a.h;
+  const lv_coord_t br = b.x + b.w;
+  const lv_coord_t bb = b.y + b.h;
+  return a.x < br && ar > b.x && a.y < bb && ab > b.y;
+}
+
+bool fits(const Rect &r, lv_coord_t max_w, lv_coord_t max_h) {
+  return r.x >= 0 && r.y >= 0 && (r.x + r.w) <= max_w && (r.y + r.h) <= max_h;
+}
+
 }  // namespace
 
 void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
@@ -679,7 +698,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *timeout_label = lv_label_create(settings_controls);
   lv_label_set_text(timeout_label, "Display Timeout");
-  style_label(timeout_label, font26());
+  style_label(timeout_label, font20());
   out_handles->timeout_slider = lv_slider_create(settings_controls);
   lv_obj_set_width(out_handles->timeout_slider, 320);
   lv_slider_set_range(out_handles->timeout_slider, 30, 600);
@@ -691,7 +710,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *brightness_label = lv_label_create(settings_controls);
   lv_label_set_text(brightness_label, "Brightness");
-  style_label(brightness_label, font26());
+  style_label(brightness_label, font20());
   out_handles->brightness_slider = lv_slider_create(settings_controls);
   lv_obj_set_width(out_handles->brightness_slider, 320);
   lv_slider_set_range(out_handles->brightness_slider, 0, 100);
@@ -704,7 +723,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *dim_label = lv_label_create(settings_controls);
   lv_label_set_text(dim_label, "Screensaver Brightness");
-  style_label(dim_label, font26());
+  style_label(dim_label, font20());
   out_handles->dim_slider = lv_slider_create(settings_controls);
   lv_obj_set_width(out_handles->dim_slider, 320);
   lv_slider_set_range(out_handles->dim_slider, 0, 100);
@@ -786,22 +805,95 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_t *screensaver_root = make_transparent(out_handles->screensaver_page, LV_PCT(100), LV_PCT(100));
   out_handles->screen_time_label = lv_label_create(screensaver_root);
   lv_obj_set_pos(out_handles->screen_time_label, 40, 70);
-  style_label(out_handles->screen_time_label, font48());
+  style_label(out_handles->screen_time_label, font80());
 
-  lv_obj_t *screen_weather_label = lv_label_create(screensaver_root);
-  lv_obj_set_pos(screen_weather_label, 48, 156);
-  lv_label_set_text(screen_weather_label, "Weather");
-  style_label(screen_weather_label, font28());
+  out_handles->screen_weather_label = lv_label_create(screensaver_root);
+  lv_obj_set_pos(out_handles->screen_weather_label, 48, 156);
+  lv_label_set_text(out_handles->screen_weather_label, "--");
+  style_label(out_handles->screen_weather_label, font40());
 
-  lv_obj_t *screen_indoor_label = lv_label_create(screensaver_root);
-  lv_obj_set_pos(screen_indoor_label, 32, 240);
-  lv_label_set_text(screen_indoor_label, "Indoor");
-  style_label(screen_indoor_label, font80());
+  out_handles->screen_indoor_label = lv_label_create(screensaver_root);
+  lv_obj_set_pos(out_handles->screen_indoor_label, 32, 240);
+  lv_label_set_text(out_handles->screen_indoor_label, "--");
+  style_label(out_handles->screen_indoor_label, font120());
 }
 
 void set_mode_button_state(FurnaceMode mode) { apply_mode_state(mode); }
 void set_fan_button_state(FanMode mode) { apply_fan_state(mode); }
 void set_temperature_unit_button_state(TemperatureUnit unit) { apply_temperature_unit_state(unit); }
+
+void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv_obj_t *indoor_label,
+                               uint32_t minute_index) {
+  if (time_label == nullptr || weather_label == nullptr || indoor_label == nullptr) {
+    return;
+  }
+
+  lv_obj_update_layout(time_label);
+  lv_obj_update_layout(weather_label);
+  lv_obj_update_layout(indoor_label);
+
+  const lv_coord_t time_w = lv_obj_get_width(time_label);
+  const lv_coord_t time_h = lv_obj_get_height(time_label);
+  const lv_coord_t weather_w = lv_obj_get_width(weather_label);
+  const lv_coord_t weather_h = lv_obj_get_height(weather_label);
+  const lv_coord_t indoor_w = lv_obj_get_width(indoor_label);
+  const lv_coord_t indoor_h = lv_obj_get_height(indoor_label);
+
+  const lv_coord_t page_w = kDisplayWidth;
+  const lv_coord_t page_h = kDisplayHeight - 50;
+  const lv_coord_t margin = 24;
+
+  struct LayoutPos {
+    int time_x;
+    int time_y;
+    int weather_x;
+    int weather_y;
+    int indoor_x;
+    int indoor_y;
+  };
+
+  const LayoutPos candidates[] = {
+      {margin, margin, margin, 120, page_w - margin - indoor_w, page_h - margin - indoor_h},
+      {page_w - margin - time_w, margin, margin, page_h - margin - weather_h, margin,
+       page_h - margin - indoor_h},
+      {margin, page_h - margin - time_h, page_w - margin - weather_w, margin, margin, 126},
+      {page_w - margin - time_w, page_h - margin - time_h, margin, margin, page_w - margin - indoor_w, 126},
+      {margin, 96, page_w - margin - weather_w, page_h - margin - weather_h, margin,
+       page_h - margin - indoor_h},
+      {page_w - margin - time_w, 96, margin, page_h - margin - weather_h, page_w - margin - indoor_w,
+       page_h - margin - indoor_h},
+  };
+
+  const size_t count = sizeof(candidates) / sizeof(candidates[0]);
+  const size_t start = static_cast<size_t>(minute_index % count);
+
+  for (size_t i = 0; i < count; ++i) {
+    const LayoutPos &c = candidates[(start + i) % count];
+    const Rect time_r{static_cast<lv_coord_t>(c.time_x), static_cast<lv_coord_t>(c.time_y), time_w, time_h};
+    const Rect weather_r{static_cast<lv_coord_t>(c.weather_x), static_cast<lv_coord_t>(c.weather_y), weather_w,
+                         weather_h};
+    const Rect indoor_r{static_cast<lv_coord_t>(c.indoor_x), static_cast<lv_coord_t>(c.indoor_y), indoor_w,
+                        indoor_h};
+
+    if (!fits(time_r, page_w, page_h) || !fits(weather_r, page_w, page_h) ||
+        !fits(indoor_r, page_w, page_h)) {
+      continue;
+    }
+    if (intersects(time_r, weather_r) || intersects(time_r, indoor_r) ||
+        intersects(weather_r, indoor_r)) {
+      continue;
+    }
+
+    lv_obj_set_pos(time_label, static_cast<lv_coord_t>(c.time_x), static_cast<lv_coord_t>(c.time_y));
+    lv_obj_set_pos(weather_label, static_cast<lv_coord_t>(c.weather_x), static_cast<lv_coord_t>(c.weather_y));
+    lv_obj_set_pos(indoor_label, static_cast<lv_coord_t>(c.indoor_x), static_cast<lv_coord_t>(c.indoor_y));
+    return;
+  }
+
+  lv_obj_set_pos(time_label, margin, margin);
+  lv_obj_set_pos(weather_label, margin, margin + time_h + 20);
+  lv_obj_set_pos(indoor_label, margin, margin + time_h + weather_h + 40);
+}
 
 }  // namespace ui
 }  // namespace thermostat

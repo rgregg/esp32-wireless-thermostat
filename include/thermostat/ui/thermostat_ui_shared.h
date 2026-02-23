@@ -46,6 +46,8 @@ struct UiHandles {
   lv_obj_t *weather_label = nullptr;
   lv_obj_t *weather_icon_label = nullptr;
   lv_obj_t *screen_time_label = nullptr;
+  lv_obj_t *screen_weather_label = nullptr;
+  lv_obj_t *screen_indoor_label = nullptr;
   lv_obj_t *settings_diag_label = nullptr;
   lv_obj_t *settings_display_label = nullptr;
   lv_obj_t *settings_system_label = nullptr;
@@ -65,6 +67,8 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles);
 void set_mode_button_state(FurnaceMode mode);
 void set_fan_button_state(FanMode mode);
 void set_temperature_unit_button_state(TemperatureUnit unit);
+void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label,
+                               lv_obj_t *indoor_label, uint32_t minute_index);
 
 }  // namespace ui
 }  // namespace thermostat

@@ -222,6 +222,8 @@ lv_obj_t *g_humidity_label = nullptr;
 lv_obj_t *g_setpoint_label = nullptr;
 lv_obj_t *g_weather_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
+lv_obj_t *g_screen_weather_label = nullptr;
+lv_obj_t *g_screen_indoor_label = nullptr;
 lv_obj_t *g_settings_diag_label = nullptr;
 lv_obj_t *g_settings_display_label = nullptr;
 lv_obj_t *g_settings_system_label = nullptr;
@@ -1657,6 +1659,14 @@ void show_page(ThermostatPage page) {
       lv_obj_clear_flag(g_screensaver_page, LV_OBJ_FLAG_HIDDEN);
       break;
   }
+
+  if (g_tabs != nullptr) {
+    if (page == ThermostatPage::Screensaver) {
+      lv_obj_add_flag(g_tabs, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_clear_flag(g_tabs, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
 
 void apply_backlight(bool screensaver_active) {
@@ -1682,6 +1692,16 @@ void refresh_ui() {
   lv_label_set_text(g_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
 
   lv_label_set_text(g_screen_time_label, current_time_text().c_str());
+  if (g_screen_weather_label != nullptr) {
+    lv_label_set_text(g_screen_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
+  }
+  if (g_screen_indoor_label != nullptr) {
+    lv_label_set_text(g_screen_indoor_label, g_runtime->indoor_temp_text().c_str());
+  }
+  if (g_screen.screensaver_active()) {
+    thermostat::ui::update_screensaver_layout(g_screen_time_label, g_screen_weather_label,
+                                              g_screen_indoor_label, now / 60000UL);
+  }
   const bool wifi_connected = WiFi.status() == WL_CONNECTED;
   const bool mqtt_connected = g_mqtt.connected();
   const uint32_t uptime_s = now / 1000UL;
@@ -1956,6 +1976,8 @@ void create_ui() {
   g_setpoint_label = handles.setpoint_label;
   g_weather_label = handles.weather_label;
   g_screen_time_label = handles.screen_time_label;
+  g_screen_weather_label = handles.screen_weather_label;
+  g_screen_indoor_label = handles.screen_indoor_label;
   g_settings_diag_label = handles.settings_diag_label;
   g_settings_display_label = handles.settings_display_label;
   g_settings_system_label = handles.settings_system_label;
