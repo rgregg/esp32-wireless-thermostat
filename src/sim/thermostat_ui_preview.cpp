@@ -404,7 +404,7 @@ void update_labels() {
   char date_buf[32];
   char time_buf[16];
   strftime(date_buf, sizeof(date_buf), "%A, %b %d", tm_info);
-  strftime(time_buf, sizeof(time_buf), "%I:%M %p", tm_info);
+  strftime(time_buf, sizeof(time_buf), "%-I:%M %p", tm_info);
 
   if (g_home_date_label != nullptr) {
     lv_label_set_text(g_home_date_label, date_buf);

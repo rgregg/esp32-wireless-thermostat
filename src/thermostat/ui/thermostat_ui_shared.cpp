@@ -402,7 +402,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   out_handles->status_label = lv_label_create(left_col);
   lv_label_set_text(out_handles->status_label, "cool mode");
-  style_label(out_handles->status_label, font40());
+  style_label(out_handles->status_label, font30());
   lv_obj_set_width(out_handles->status_label, LV_PCT(100));
   lv_obj_set_style_text_align(out_handles->status_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
@@ -443,7 +443,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   out_handles->setpoint_column = make_transparent(home_root, 130, LV_PCT(100));
   lv_obj_set_layout(out_handles->setpoint_column, LV_LAYOUT_FLEX);
   lv_obj_set_flex_flow(out_handles->setpoint_column, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(out_handles->setpoint_column, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+  lv_obj_set_flex_align(out_handles->setpoint_column, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_bg_color(out_handles->setpoint_column, lv_color_hex(0x0E2431), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(out_handles->setpoint_column, LV_OPA_70, LV_PART_MAIN);
@@ -452,8 +452,6 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_style_radius(out_handles->setpoint_column, 26, LV_PART_MAIN);
   lv_obj_set_style_pad_top(out_handles->setpoint_column, 16, LV_PART_MAIN);
   lv_obj_set_style_pad_bottom(out_handles->setpoint_column, 16, LV_PART_MAIN);
-
-  make_transparent(out_handles->setpoint_column, 90, 4);
 
   lv_obj_t *btn_up = lv_btn_create(out_handles->setpoint_column);
   lv_obj_set_size(btn_up, 86, 86);
