@@ -69,6 +69,11 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
       command_sources_[free_slot].last_seq = 0;
       command_sources_[free_slot].active = true;
       last_seq = &command_sources_[free_slot].last_seq;
+    } else if (free_slot == -1) {
+      // All slots full and source not found — reject to avoid
+      // sharing sequence tracking with the default source
+      result.stale_or_duplicate = true;
+      return result;
     }
   }
 
