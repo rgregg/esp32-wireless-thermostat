@@ -15,7 +15,7 @@ fi
 mkdir -p "$TMP_DIR"
 
 if [[ ! -x "$PROGRAM" ]]; then
-  /Users/ryan/.platformio/penv/bin/pio run -e native-ui-preview
+  pio run -e native-ui-preview
 fi
 
 SDL_VIDEODRIVER=dummy "$PROGRAM" --capture-dir "$TMP_DIR"
