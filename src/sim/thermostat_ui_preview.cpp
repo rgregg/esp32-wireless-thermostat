@@ -10,6 +10,8 @@
 #include <SDL2/SDL.h>
 #include <lvgl.h>
 
+#include "espnow_cmd_word.h"
+#include "sim_mqtt_client.h"
 #include "thermostat/display_model.h"
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/thermostat_ui_state.h"
@@ -25,6 +27,13 @@ constexpr uint32_t kColorHeaderBorder = 0x0077B3;
 constexpr uint32_t kColorActionBtn = 0x4F46E5;
 constexpr uint32_t kColorWhite = 0xFFFFFF;
 constexpr uint32_t kColorBlack = 0x000000;
+
+// MQTT configuration
+constexpr const char *kDisplayBaseTopic = "thermostat/furnace-display";
+constexpr const char *kControllerBaseTopic = "thermostat/furnace-controller";
+constexpr const char *kMqttClientId = "sim-thermostat";
+constexpr const char *kMqttHost = "localhost";
+constexpr int kMqttPort = 1883;
 
 SDL_Window *g_window = nullptr;
 SDL_Renderer *g_renderer = nullptr;
@@ -92,10 +101,119 @@ uint8_t g_screensaver_brightness_pct = 16;
 thermostat::DisplayModel g_preview_model;
 thermostat::TemperatureUnit g_preview_unit = thermostat::TemperatureUnit::Celsius;
 FurnaceMode g_preview_mode = FurnaceMode::Off;
+FanMode g_preview_fan_mode = FanMode::Automatic;
 float g_preview_indoor_c = 22.2f;
 float g_preview_humidity = 43.0f;
 float g_preview_outdoor_c = 9.0f;
 const char *g_preview_weather_condition = "Cloudy";
+
+// MQTT state
+sim::SimMqttClient g_mqtt;
+bool g_mqtt_connected = false;
+uint32_t g_last_mqtt_connect_attempt_ms = 0;
+bool g_mqtt_first_attempt = true;
+uint16_t g_command_seq = 0;
+
+// Controller state received via MQTT
+bool g_ctrl_relay_heat = false;
+bool g_ctrl_relay_cool = false;
+bool g_ctrl_relay_fan = false;
+bool g_ctrl_failsafe = false;
+bool g_ctrl_lockout = false;
+float g_ctrl_filter_hours = 0.0f;
+
+std::string display_topic(const char *suffix) {
+  return std::string(kDisplayBaseTopic) + "/" + suffix;
+}
+
+std::string controller_topic(const char *suffix) {
+  return std::string(kControllerBaseTopic) + "/" + suffix;
+}
+
+void publish_packed_command() {
+  if (!g_mqtt_connected) return;
+
+  ++g_command_seq;
+  CommandWord cmd{};
+  cmd.seq = g_command_seq;
+  cmd.mode = g_preview_mode;
+  cmd.fan = g_preview_fan_mode;
+  cmd.setpoint_decic = static_cast<int16_t>(g_setpoint_c * 10.0f);
+  cmd.sync_request = false;
+  cmd.filter_reset = false;
+
+  uint32_t packed = espnow_cmd::encode(cmd);
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(packed));
+  g_mqtt.publish(display_topic("state/packed_command"), buf, true);
+
+  // Also publish granular state
+  const char *mode_str = "off";
+  if (g_preview_mode == FurnaceMode::Heat) mode_str = "heat";
+  else if (g_preview_mode == FurnaceMode::Cool) mode_str = "cool";
+  g_mqtt.publish(display_topic("state/mode"), mode_str, true);
+
+  const char *fan_str = "auto";
+  if (g_preview_fan_mode == FanMode::AlwaysOn) fan_str = "on";
+  else if (g_preview_fan_mode == FanMode::Circulate) fan_str = "circulate";
+  g_mqtt.publish(display_topic("state/fan_mode"), fan_str, true);
+
+  snprintf(buf, sizeof(buf), "%.1f", g_setpoint_c);
+  g_mqtt.publish(display_topic("state/target_temp_c"), buf, true);
+
+  snprintf(buf, sizeof(buf), "%.1f", g_preview_indoor_c);
+  g_mqtt.publish(display_topic("state/current_temp_c"), buf, true);
+
+  snprintf(buf, sizeof(buf), "%u", g_command_seq);
+  g_mqtt.publish(display_topic("state/command_seq"), buf, true);
+
+  printf("[MQTT TX] packed_command=%lu mode=%s fan=%s target=%.1f\n",
+         static_cast<unsigned long>(packed), mode_str, fan_str, g_setpoint_c);
+}
+
+void on_mqtt_message(const std::string &topic, const std::string &payload) {
+  // Handle controller state updates
+  if (topic == controller_topic("state/relay_heat")) {
+    g_ctrl_relay_heat = (payload == "1");
+  } else if (topic == controller_topic("state/relay_cool")) {
+    g_ctrl_relay_cool = (payload == "1");
+  } else if (topic == controller_topic("state/relay_fan")) {
+    g_ctrl_relay_fan = (payload == "1");
+  } else if (topic == controller_topic("state/failsafe")) {
+    g_ctrl_failsafe = (payload == "1");
+  } else if (topic == controller_topic("state/lockout")) {
+    g_ctrl_lockout = (payload == "1");
+  } else if (topic == controller_topic("state/filter_runtime_hours")) {
+    g_ctrl_filter_hours = static_cast<float>(atof(payload.c_str()));
+  } else if (topic == controller_topic("state/furnace_state")) {
+    // Could update UI based on controller furnace state
+  }
+}
+
+void ensure_mqtt_connected() {
+  if (g_mqtt_connected) return;
+
+  const uint32_t now = SDL_GetTicks();
+  if (!g_mqtt_first_attempt && (now - g_last_mqtt_connect_attempt_ms < 5000)) return;
+  g_mqtt_first_attempt = false;
+  g_last_mqtt_connect_attempt_ms = now;
+
+  printf("[MQTT] Connecting to %s:%d...\n", kMqttHost, kMqttPort);
+  if (!g_mqtt.connect(kMqttHost, kMqttPort, kMqttClientId)) {
+    printf("[MQTT] Connect failed: %s\n", g_mqtt.last_error().c_str());
+    return;
+  }
+
+  g_mqtt_connected = true;
+  printf("[MQTT] Connected!\n");
+
+  // Subscribe to controller state
+  g_mqtt.subscribe(controller_topic("state/+"));
+
+  // Publish initial state
+  g_mqtt.publish(display_topic("state/availability"), "online", true);
+  publish_packed_command();
+}
 
 FurnaceStateCode preview_state_code() {
   if (g_preview_mode == FurnaceMode::Heat) {
@@ -366,6 +484,7 @@ void on_setpoint_up(lv_event_t *) {
   const float user_val = g_preview_model.to_user_temperature(g_setpoint_c);
   g_setpoint_c = g_preview_model.to_celsius_from_user(user_val + step);
   if (g_setpoint_c > 35.0f) g_setpoint_c = 35.0f;
+  publish_packed_command();
 }
 
 void on_setpoint_down(lv_event_t *) {
@@ -373,6 +492,7 @@ void on_setpoint_down(lv_event_t *) {
   const float user_val = g_preview_model.to_user_temperature(g_setpoint_c);
   g_setpoint_c = g_preview_model.to_celsius_from_user(user_val - step);
   if (g_setpoint_c < 5.0f) g_setpoint_c = 5.0f;
+  publish_packed_command();
 }
 
 void on_unit_changed(lv_event_t *e) {
@@ -389,6 +509,14 @@ void on_mode_changed(lv_event_t *e) {
   g_preview_mode = mode;
   thermostat::ui::set_mode_button_state(mode);
   g_screen.on_mode_changed(mode);
+  publish_packed_command();
+}
+
+void on_fan_changed(lv_event_t *e) {
+  if (e == nullptr) return;
+  const auto fan = static_cast<FanMode>(reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+  g_preview_fan_mode = fan;
+  publish_packed_command();
 }
 
 uint32_t snap_to_step(uint32_t value, uint32_t step, uint32_t min_v, uint32_t max_v) {
@@ -431,6 +559,7 @@ void create_ui() {
   callbacks.on_setpoint_up = on_setpoint_up;
   callbacks.on_setpoint_down = on_setpoint_down;
   callbacks.on_mode = on_mode_changed;
+  callbacks.on_fan = on_fan_changed;
   callbacks.on_unit = on_unit_changed;
   callbacks.on_timeout_slider = on_timeout_slider;
   callbacks.on_brightness_slider = on_brightness_slider;
@@ -671,6 +800,11 @@ bool capture_baselines() {
 }
 
 void shutdown() {
+  if (g_mqtt_connected) {
+    g_mqtt.publish(display_topic("state/availability"), "offline", true);
+    g_mqtt.disconnect();
+  }
+
   if (g_texture != nullptr) {
     SDL_DestroyTexture(g_texture);
     g_texture = nullptr;
@@ -711,8 +845,14 @@ int main(int argc, char **argv) {
   }
 
   fprintf(stdout, "Simulator controls: S=activate screensaver, W=wake display\n");
+  fprintf(stdout, "Connecting to MQTT broker at %s:%d\n", kMqttHost, kMqttPort);
+
+  // Setup MQTT callback
+  g_mqtt.set_message_callback(on_mqtt_message);
 
   while (g_running) {
+    ensure_mqtt_connected();
+    g_mqtt.loop();
     process_events();
     g_screen.tick(SDL_GetTicks());
     show_page(g_screen.current_page());
