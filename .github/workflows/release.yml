@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: |
+          pip install platformio
+          pio --version
+
+      - name: Build controller firmware
+        run: pio run -e esp32-furnace-controller
+
+      - name: Build thermostat firmware
+        run: pio run -e esp32-furnace-thermostat
+
+      - name: Rename firmware binaries
+        run: |
+          cp .pio/build/esp32-furnace-controller/firmware.bin esp32-furnace-controller.bin
+          cp .pio/build/esp32-furnace-thermostat/firmware.bin esp32-furnace-thermostat.bin
+
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            esp32-furnace-controller.bin
+            esp32-furnace-thermostat.bin
