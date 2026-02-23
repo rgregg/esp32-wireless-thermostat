@@ -34,8 +34,8 @@ Status legend:
 | C-07 | Circulate scheduler should run windowed duty cycle based on period/duration minutes. | Implemented | Minute scheduler exists in `ControllerRuntime::run_minute_tasks`. |
 | C-08 | Filter runtime increments while system is actively running and supports reset. | Partial | Runtime and reset are implemented; `spare_relay_4` participation is logical only (no physical output layer yet). |
 | C-09 | Publish controller telemetry (`state`, `filter_runtime`, `lockout`, `mode`, `fan`, `setpoint`). | Implemented | `ControllerApp::publish` and `EspNowControllerTransport::publish_telemetry`. |
-| C-10 | Relay demands must drive physical outputs on GPIO32/33/25/26 with startup-safe defaults. | Missing | No GPIO output layer yet for controller role; runtime state is not mapped to physical relay pins. |
-| C-11 | Enforce relay interlock behavior equivalent to ESPHome relay interlock group. | Partial | Mutual exclusion is enforced logically; no explicit timed interlock delay equivalent to ESPHome `interlock_wait_time`. |
+| C-10 | Relay demands must drive physical outputs on GPIO32/33/25/26 with startup-safe defaults. | Implemented | `controller_relay_io.cpp` GPIO output layer drives relay pins with startup-safe defaults. |
+| C-11 | Enforce relay interlock behavior equivalent to ESPHome relay interlock group. | Implemented | Timed interlock delays enforced in relay IO layer (heat 0.5s, others 1s). |
 | C-12 | Local lockout entity should remain externally controllable and reflected in telemetry/state text. | Partial | Lockout behavior exists in runtime; no Home Assistant/API entity equivalent on controller firmware yet. |
 | C-13 | Preserve last-known indoor temp/humidity fallback behavior when remote values are missing. | Missing | Controller currently uses latest received values only; no persisted fallback store like ESPHome template numbers. |
 
@@ -46,7 +46,7 @@ Status legend:
 | D-01 | 800x480 RGB panel on 8048S043C pin/timing map. | Implemented | RGB panel config/pins/timings set in `esp32s3_thermostat_firmware.cpp`. |
 | D-02 | GT911 touch input on internal I2C bus. | Implemented | GT911 read/write + LVGL indev callback wired. |
 | D-03 | AHT20 temperature/humidity sensor on external I2C bus with 60s polling. | Implemented | AHT20 initialized on external I2C and polled every 60s. |
-| D-04 | Local temperature compensation offset before publishing indoor temp. | Missing | ESPHome `local_temperature_compensation_c` behavior is not implemented in current firmware. |
+| D-04 | Local temperature compensation offset before publishing indoor temp. | Implemented | `temp_comp_c` runtime config applied in thermostat firmware before publishing indoor temperature. |
 | D-05 | Local mode/fan/setpoint changes publish command word to controller. | Implemented | UI callbacks call runtime/app command publish path. |
 | D-06 | Ignore remote setpoint updates for ~5s after local interaction (debounce). | Implemented | `ThermostatApp` enforces local interaction debounce window. |
 | D-07 | Temperature unit preference (`fahrenheit`/`celsius`) drives conversions and UI format. | Implemented | `DisplayModel` and runtime unit handling implemented. |
@@ -54,8 +54,8 @@ Status legend:
 | D-09 | LVGL pages and interactions for Home/Fan/Mode/Settings/Screensaver. | Partial | Core pages and actions implemented; UI is functional but not a 1:1 parity copy of all YAML widgets/details. |
 | D-10 | Screen idle behavior: dim backlight, switch to screensaver, resume on touch. | Implemented | `ThermostatScreenController` + backlight dim/restore in firmware loop. |
 | D-11 | Trigger sync/filter-reset actions from Settings UI. | Implemented | UI buttons call `request_sync` and `request_filter_reset`. |
-| D-12 | Weather/outdoor data should come from Home Assistant entities. | Partial | Current firmware uses static outdoor stub (`Cloudy`, `6.0C`) unless external integration updates it. |
-| D-13 | Display diagnostics in settings (IP/MAC/SSID/channel/RSSI/firmware). | Missing | These YAML diagnostics are not yet fully represented in current LVGL settings page. |
+| D-12 | Weather/outdoor data should come from Home Assistant entities. | Implemented | PirateWeather API integration polls weather directly on display firmware using configured API key + ZIP code. |
+| D-13 | Display diagnostics in settings (IP/MAC/SSID/channel/RSSI/firmware). | Partial | Diagnostics expanded in settings page (IP, RSSI, firmware version, uptime); not all ESPHome YAML fields surfaced yet. |
 | D-14 | On boot, request/refresh state from controller. | Partial | Runtime starts transport and receives telemetry; explicit boot-time `get_data_from_controller` equivalent is limited. |
 
 ## Transport And Integration Spec And Parity
@@ -73,26 +73,25 @@ Status legend:
 | ID | Requirement (from ESPHome behavior) | Status | Current implementation notes |
 |---|---|---|---|
 | H-01 | Expose thermostat control/status to Home Assistant. | Implemented | MQTT HA discovery + climate command/state topics added in thermostat firmware. |
-| H-02 | Provide local fallback management interfaces (API/web/captive portal/OTA) similar to ESPHome templates. | Missing | Current PlatformIO port does not include ESPHome API/web server/captive portal stack. |
+| H-02 | Provide local fallback management interfaces (API/web/captive portal/OTA) similar to ESPHome templates. | Partial | Web config UI and web-based OTA upload at `/update` implemented; no captive portal or ESPHome native API equivalent. |
 | H-03 | Keep credentials/secrets out of repo. | Implemented | `platformio_override.ini` is ignored; example file added for local credential overrides. |
 
 ## Validation Spec
 
 | ID | Requirement | Status | Current implementation notes |
 |---|---|---|---|
-| V-01 | Native tests validate codec, controller runtime/app, thermostat app, display model, screen logic. | Implemented | `native-tests` currently runs 15 tests and passes. |
+| V-01 | Native tests validate codec, controller runtime/app, thermostat app, display model, screen logic. | Implemented | `native-tests` currently runs 37 tests and passes. |
 | V-02 | Build matrix must pass for host + controller + display targets. | Implemented | `native`, `native-tests`, `esp32-furnace-controller`, `esp32-furnace-thermostat` pass. |
-| V-03 | Hardware-in-loop verification for controller relays/display touch/panel/sensors. | Missing | Not yet automated or fully documented; pending physical validation. |
+| V-03 | Hardware-in-loop verification for controller relays/display touch/panel/sensors. | Partial | `docs/hil-checklist.md` provides a manual pass/fail checklist; not yet automated. |
 
 ## Parity Summary
 
-- `Implemented`: core safety state machine, command protocol, transport path, display runtime, and HA MQTT bridge.
-- `Partial`: a set of parity items are functionally present but not 1:1 with ESPHome behavior.
-- `Missing`: key gaps are physical controller relay GPIO integration, ESPHome-style management stack parity, and some display diagnostics/HA weather parity.
+- `Implemented`: core safety state machine, command protocol, transport path, display runtime, HA MQTT bridge, relay GPIO layer, weather integration, temperature compensation, web config UI, and web OTA.
+- `Partial`: some display diagnostics not fully surfaced, captive portal not implemented, HIL checklist exists but not automated.
+- `Missing`: ESPHome native API equivalent, captive portal, persisted indoor temp fallback on controller.
 
 ## Highest-Priority Remaining Gaps
 
-1. Implement controller physical relay GPIO output layer with safe boot defaults and timed interlock behavior.
-2. Replace display weather stub with real PirateWeather weather/outdoor integration source.
-3. Close remaining LVGL settings/diagnostic parity items (IP/MAC/SSID/channel/RSSI/firmware surface).
-4. Add hardware validation checklist and pass/fail log for both controller and display boards.
+1. Close remaining LVGL settings/diagnostic parity items (full ESPHome YAML diagnostic field set).
+2. Add persisted indoor temp/humidity fallback on controller (C-13).
+3. Automate hardware-in-loop verification (V-03).

@@ -19,8 +19,10 @@
 ## Runtime Management
 - Controller local config: `http://<controller-ip>/config`
 - Controller reboot endpoint: `POST http://<controller-ip>/reboot`
+- Controller web OTA upload: `http://<controller-ip>/update`
 - Display local fallback config: `http://<display-ip>/config`
 - Display reboot endpoint: `POST http://<display-ip>/reboot`
+- Display web OTA upload: `http://<display-ip>/update`
 - Display screenshot: `http://<display-ip>/screenshot`
 - MQTT path smoke verifier (with broker + both devices online):
   - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan`
@@ -39,6 +41,7 @@
   - `esp32-furnace-controller-<version>.bin`
   - `esp32-furnace-thermostat-<version>.bin`
 - Build metadata is recorded in `build-info.txt`, and `SHA256SUMS` is generated when `shasum` is available.
+- The GitHub Releases workflow automatically attaches firmware binaries to tagged releases.
 
 ## Runtime Config Contract
 
@@ -128,12 +131,19 @@
 
 ## OTA Rollout + Rollback
 
+### OTA Methods
+- **ArduinoOTA**: network OTA via PlatformIO or `espota`.
+- **Web OTA**: browser-based upload form at `http://<device-ip>/update`.
+
+### Automatic Rollback
+New firmware boots in a **pending-verify** state. The device must establish WiFi and MQTT connectivity within 3 minutes to confirm the update. If the device crashes or fails to connect in time, the bootloader automatically reverts to the previous firmware image.
+
 ### Rollout Order
 1. Verify both devices are online and healthy before update:
    - Controller `state/uptime_s` is advancing.
    - Display `state/uptime_s` is advancing.
    - Thermostat publishes `state/packed_command` and controller applies commands.
-2. Update thermostat (display) first via OTA.
+2. Update thermostat (display) first via OTA (ArduinoOTA or web upload at `/update`).
 3. Wait for display to reconnect to WiFi + MQTT and resume telemetry.
 4. Update controller second via OTA.
 5. Re-run MQTT smoke verification:
@@ -145,15 +155,17 @@
 - For thermostat, `/screenshot` endpoint returns current UI frame.
 
 ### Rollback Triggers
-- Node does not reconnect to WiFi/MQTT within 3 minutes.
-- Runtime state topics stop updating after reconnect.
-- Command path regression (packed or granular topics stop applying).
-- Web management endpoints become unavailable.
+- Automatic rollback fires if WiFi+MQTT are not established within 3 minutes of boot.
+- Manual rollback warranted if:
+  - Runtime state topics stop updating after reconnect.
+  - Command path regression (packed or granular topics stop applying).
+  - Web management endpoints become unavailable.
 
 ### Rollback Procedure
-1. Re-flash previous known-good firmware for the failed node using OTA if reachable.
-2. If OTA is unavailable, use serial recovery on bench hardware, then redeploy.
-3. After rollback, verify:
+1. In most cases, automatic rollback handles failed updates without intervention.
+2. If manual rollback is needed, re-flash previous known-good firmware using OTA if reachable.
+3. If OTA is unavailable, use serial recovery on bench hardware, then redeploy.
+4. After rollback, verify:
    - retained cfg state is intact
    - command path works (`mqtt_path_smoke.py`)
    - Home Assistant entities report expected state

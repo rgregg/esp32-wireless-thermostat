@@ -46,6 +46,7 @@ Both adapters include native-build-safe no-op behavior so host tests still compi
 - `ThermostatNode` wires thermostat transport callbacks into `ThermostatApp`.
 
 ## Remaining Work
-- Bind real display/UI events and local sensor sources into `ThermostatApp` methods.
-- Add optional ACK/diagnostic counters and explicit send result handling.
+- ~~Bind real display/UI events and local sensor sources into `ThermostatApp` methods.~~ Done.
+- ~~Add optional ACK/diagnostic counters and explicit send result handling.~~ Done — send OK/fail counters are tracked and published as telemetry.
 - Finalize encryption key handling and peer provisioning strategy.
+- Note: when MQTT-primary is active, ESP-NOW commands are gated on the controller to avoid conflicting sources.

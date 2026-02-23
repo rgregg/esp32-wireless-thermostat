@@ -42,6 +42,13 @@ Use this checklist after flashing both devices.
 - [ ] Filter runtime and furnace state sensors update.
 - [ ] Device model appears as one logical device identifier.
 
+## OTA Checks
+- [ ] Web upload form loads at `http://<controller-ip>/update`.
+- [ ] Web upload form loads at `http://<display-ip>/update`.
+- [ ] Firmware upload via web form succeeds and device reboots.
+- [ ] After successful OTA, device confirms health and stays on new firmware.
+- [ ] Flashing intentionally bad firmware triggers automatic rollback to previous image.
+
 ## Result
 - Status: PASS / FAIL
 - Notes:

@@ -11,7 +11,7 @@ We are **not** implementing ESPHome API/web/captive-portal/OTA parity in this po
 ## Adopted Replacements
 - Control/state surface: MQTT topics and HA discovery.
 - Provisioning: WiFi provisioning (`WiFiProv`) and static build-flag overrides.
-- OTA/debug: handled by PlatformIO upload and serial logs.
+- OTA/debug: ArduinoOTA for network updates, web-based OTA upload at `/update`, and serial logs.
 
 ## Notes
 - If field requirements change, this can be revisited as a separate feature stream.
