@@ -381,7 +381,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   out_handles->weather_label = lv_label_create(weather_row);
   lv_label_set_text(out_handles->weather_label, "80° / 55% Humidity");
-  style_label(out_handles->weather_label, font40());
+  style_label(out_handles->weather_label, font30());
   lv_obj_set_width(out_handles->weather_label, 260);
   lv_obj_set_style_text_align(out_handles->weather_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
