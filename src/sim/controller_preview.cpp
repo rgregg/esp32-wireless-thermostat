@@ -15,6 +15,7 @@
 #include "controller/controller_relay_io.h"
 #include "controller/controller_runtime.h"
 #include "espnow_cmd_word.h"
+#include "mqtt_payload.h"
 #include "sim_mqtt_client.h"
 #include "sim_weather_client.h"
 #include "thermostat/thermostat_state.h"
@@ -155,30 +156,12 @@ const char *mode_name(FurnaceMode mode) {
   }
 }
 
-const char *mode_mqtt(FurnaceMode mode) {
-  switch (mode) {
-    case FurnaceMode::Off: return "off";
-    case FurnaceMode::Heat: return "heat";
-    case FurnaceMode::Cool: return "cool";
-    default: return "off";
-  }
-}
-
 const char *fan_mode_name(FanMode mode) {
   switch (mode) {
     case FanMode::Automatic: return "AUTO";
     case FanMode::AlwaysOn: return "ON";
     case FanMode::Circulate: return "CIRC";
     default: return "???";
-  }
-}
-
-const char *fan_mode_mqtt(FanMode mode) {
-  switch (mode) {
-    case FanMode::Automatic: return "auto";
-    case FanMode::AlwaysOn: return "on";
-    case FanMode::Circulate: return "circulate";
-    default: return "auto";
   }
 }
 
@@ -278,16 +261,13 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   const auto &rt = g_app->runtime();
 
   if (topic == ctrl_topic("cmd/lockout")) {
-    bool lockout = (payload == "1" || payload == "true" || payload == "on");
-    g_app->set_hvac_lockout(lockout);
+    g_app->set_hvac_lockout(mqtt_payload::parse_bool(payload.c_str()));
     publish_controller_extras();
     return;
   }
 
   if (topic == ctrl_topic("cmd/mode")) {
-    FurnaceMode mode = FurnaceMode::Off;
-    if (payload == "heat") mode = FurnaceMode::Heat;
-    else if (payload == "cool") mode = FurnaceMode::Cool;
+    FurnaceMode mode = mqtt_payload::str_to_mode(payload.c_str());
 
     uint32_t packed = thermostat::build_packed_command(
         mode, rt.fan_mode(), rt.target_temperature_c(),
@@ -299,9 +279,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   }
 
   if (topic == ctrl_topic("cmd/fan_mode")) {
-    FanMode fan = FanMode::Automatic;
-    if (payload == "on" || payload == "always on") fan = FanMode::AlwaysOn;
-    else if (payload == "circulate") fan = FanMode::Circulate;
+    FanMode fan = mqtt_payload::str_to_fan(payload.c_str());
 
     uint32_t packed = thermostat::build_packed_command(
         rt.mode(), fan, rt.target_temperature_c(),
@@ -325,7 +303,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   }
 
   if (topic == ctrl_topic("cmd/filter_reset")) {
-    if (payload == "1" || payload == "true") {
+    if (mqtt_payload::parse_bool(payload.c_str())) {
       uint32_t packed = thermostat::build_packed_command(
           rt.mode(), rt.fan_mode(), rt.target_temperature_c(),
           static_cast<uint16_t>((now / 100) & 0x1FF), false, true);

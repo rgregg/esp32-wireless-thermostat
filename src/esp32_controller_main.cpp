@@ -10,6 +10,7 @@
 #include "command_builder.h"
 #include "espnow_cmd_word.h"
 #include "management_paths.h"
+#include "mqtt_payload.h"
 
 #if defined(ARDUINO)
 #include <Arduino.h>
@@ -407,13 +408,6 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   return true;
 }
 
-bool ctrl_parse_bool_payload(const char *value) {
-  if (value == nullptr) {
-    return false;
-  }
-  return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0;
-}
-
 bool ctrl_parse_u32_payload(const char *value, uint32_t *out) {
   if (value == nullptr || out == nullptr || value[0] == '\0') {
     return false;
@@ -784,7 +778,7 @@ void ctrl_web_handle_config_post() {
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
     const String value = g_ctrl_web.arg(i);
-    if (name == "disp_reboot" && ctrl_parse_bool_payload(value.c_str())) {
+    if (name == "disp_reboot" && mqtt_payload::parse_bool(value.c_str())) {
       if (ctrl_publish_display_cmd("reboot", "1")) {
         ++updated_display;
       }
@@ -953,12 +947,8 @@ void ctrl_publish_runtime_state() {
   const auto &rt = g_controller->app().runtime();
   const bool lockout = rt.hvac_lockout();
   const auto snap = rt.snapshot();
-  const char *mode = "off";
-  if (snap.mode == FurnaceMode::Heat) mode = "heat";
-  if (snap.mode == FurnaceMode::Cool) mode = "cool";
-  const char *fan = "auto";
-  if (snap.fan_mode == FanMode::AlwaysOn) fan = "on";
-  if (snap.fan_mode == FanMode::Circulate) fan = "circulate";
+  const char *mode = mqtt_payload::mode_to_str(snap.mode);
+  const char *fan = mqtt_payload::fan_to_str(snap.fan_mode);
 
   char buf[32];
   g_ctrl_mqtt.publish(ctrl_topic_for("state/availability").c_str(), "online", true);
@@ -1096,7 +1086,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
 
   if (topic_str == ctrl_topic_for("cmd/lockout")) {
-    g_controller->app().set_hvac_lockout(ctrl_parse_bool_payload(value));
+    g_controller->app().set_hvac_lockout(mqtt_payload::parse_bool(value));
     ctrl_publish_runtime_state();
     return;
   }
@@ -1110,17 +1100,13 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 
   // Direct controller command topics
   if (topic_str == ctrl_topic_for("cmd/mode")) {
-    if (strcmp(value, "heat") == 0) g_ctrl_shadow_mode = FurnaceMode::Heat;
-    else if (strcmp(value, "cool") == 0) g_ctrl_shadow_mode = FurnaceMode::Cool;
-    else g_ctrl_shadow_mode = FurnaceMode::Off;
+    g_ctrl_shadow_mode = mqtt_payload::str_to_mode(value);
     g_ctrl_have_shadow = true;
     ctrl_apply_mqtt_shadow(false, false);
     return;
   }
   if (topic_str == ctrl_topic_for("cmd/fan_mode")) {
-    if (strcmp(value, "on") == 0 || strcmp(value, "always on") == 0) g_ctrl_shadow_fan = FanMode::AlwaysOn;
-    else if (strcmp(value, "circulate") == 0) g_ctrl_shadow_fan = FanMode::Circulate;
-    else g_ctrl_shadow_fan = FanMode::Automatic;
+    g_ctrl_shadow_fan = mqtt_payload::str_to_fan(value);
     g_ctrl_have_shadow = true;
     ctrl_apply_mqtt_shadow(false, false);
     return;
@@ -1131,22 +1117,22 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_apply_mqtt_shadow(false, false);
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/sync") && ctrl_parse_bool_payload(value)) {
+  if (topic_str == ctrl_topic_for("cmd/sync") && mqtt_payload::parse_bool(value)) {
     ctrl_apply_mqtt_shadow(true, false);
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/reboot") && ctrl_parse_bool_payload(value)) {
+  if (topic_str == ctrl_topic_for("cmd/reboot") && mqtt_payload::parse_bool(value)) {
     ctrl_schedule_reboot();
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/reset_sequence") && ctrl_parse_bool_payload(value)) {
+  if (topic_str == ctrl_topic_for("cmd/reset_sequence") && mqtt_payload::parse_bool(value)) {
     g_controller->app().reset_remote_command_sequence();
     g_ctrl_mqtt_seq = 0;
     ctrl_publish_display_cmd("reset_sequence", "1");
     ctrl_publish_runtime_state();
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/filter_reset") && ctrl_parse_bool_payload(value)) {
+  if (topic_str == ctrl_topic_for("cmd/filter_reset") && mqtt_payload::parse_bool(value)) {
     ctrl_apply_mqtt_shadow(false, true);
     return;
   }
