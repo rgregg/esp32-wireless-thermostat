@@ -301,8 +301,6 @@ void ensure_mqtt_connected() {
   g_mqtt.subscribe(ctrl_topic("cmd/mode"));
   g_mqtt.subscribe(ctrl_topic("cmd/fan_mode"));
   g_mqtt.subscribe(ctrl_topic("cmd/target_temp_c"));
-  g_mqtt.subscribe(ctrl_topic("cmd/packed_word"));
-  g_mqtt.subscribe(ctrl_topic("cmd/sync"));
   g_mqtt.subscribe(ctrl_topic("cmd/filter_reset"));
   g_mqtt.subscribe(display_topic("state/packed_command"));
 

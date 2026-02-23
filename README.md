@@ -28,7 +28,7 @@ Installed near the furnace. Connects to HVAC wiring via relay outputs (heat, coo
 |---|---|
 | ESP32 4-relay controller board | [Amazon](https://www.amazon.com/dp/B0DNYYXQ3X) |
 | AC-to-DC power supply (furnace side) | [Amazon](https://www.amazon.com/dp/B08Q81Y8NM) |
-| 3D-printable enclosure | [`enclosures/Furnace Controller Encolsure v20.f3d`](enclosures/Furnace%20Controller%20Encolsure%20v20.f3d) |
+| 3D-printable enclosure | [`enclosures/Furnace Controller Enclosure v20.f3d`](enclosures/Furnace%20Controller%20Encolsure%20v20.f3d) |
 
 ### Thermostat Display Unit
 
