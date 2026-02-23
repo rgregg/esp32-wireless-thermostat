@@ -279,6 +279,7 @@ String g_cfg_ota_password = THERMOSTAT_OTA_PASSWORD;
 uint8_t g_cfg_espnow_channel = THERMOSTAT_ESPNOW_CHANNEL;
 String g_cfg_espnow_peer_mac = THERMOSTAT_ESPNOW_PEER_MAC;
 String g_cfg_espnow_lmk = THERMOSTAT_ESPNOW_LMK;
+String g_cfg_controller_base_topic = "";
 uint32_t g_cfg_controller_timeout_ms = 30000;
 bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
@@ -354,6 +355,7 @@ void load_runtime_config() {
   g_cfg_espnow_channel = static_cast<uint8_t>(g_cfg.getUChar("esp_ch", g_cfg_espnow_channel));
   g_cfg_espnow_peer_mac = g_cfg.getString("esp_peer", g_cfg_espnow_peer_mac);
   g_cfg_espnow_lmk = g_cfg.getString("esp_lmk", g_cfg_espnow_lmk);
+  g_cfg_controller_base_topic = g_cfg.getString("ctrl_base", g_cfg_controller_base_topic);
   g_cfg_controller_timeout_ms = g_cfg.getUInt("ctrl_to", g_cfg_controller_timeout_ms);
   const uint32_t display_timeout_s = g_cfg.getUInt("disp_to_s", THERMOSTAT_DISPLAY_TIMEOUT_S);
   g_display_timeout_ms = display_timeout_s * 1000UL;
@@ -408,6 +410,7 @@ void publish_all_cfg_state() {
   publish_cfg_value("espnow_channel", String(g_cfg_espnow_channel));
   publish_cfg_value("espnow_peer_mac", g_cfg_espnow_peer_mac);
   publish_cfg_value("espnow_lmk", g_cfg_espnow_lmk);
+  publish_cfg_value("controller_base_topic", g_cfg_controller_base_topic);
   publish_cfg_value("controller_timeout_ms", String(g_cfg_controller_timeout_ms));
   publish_cfg_value("reboot_required", g_cfg_reboot_required ? "1" : "0");
 }
@@ -515,6 +518,9 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_espnow_lmk = value;
     g_cfg.putString("esp_lmk", value);
     g_cfg_reboot_required = true;
+  } else if (key == "controller_base_topic") {
+    g_cfg_controller_base_topic = value;
+    g_cfg.putString("ctrl_base", value);
   } else if (key == "controller_timeout_ms") {
     const long parsed = atol(raw_value);
     if (parsed < 1000 || parsed > 600000) return false;
@@ -879,6 +885,7 @@ void web_handle_config_get() {
   body += "\"espnow_channel\":" + String(g_cfg_espnow_channel) + ",";
   body += "\"espnow_peer_mac\":\"" + json_escape(g_cfg_espnow_peer_mac) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"controller_base_topic\":\"" + json_escape(g_cfg_controller_base_topic) + "\",";
   body += "\"controller_timeout_ms\":" + String(g_cfg_controller_timeout_ms) + ",";
   body += "\"reboot_required\":" + String(g_cfg_reboot_required ? "true" : "false");
   body += "}";
@@ -980,6 +987,7 @@ void web_handle_root() {
   html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
           g_cfg_espnow_peer_mac + "\"><br>";
   html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
+  html += "controller_base_topic: <input name=\"controller_base_topic\" value=\"" + g_cfg_controller_base_topic + "\"><br>";
   html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
 
   html += "<fieldset><legend>Hardware Settings</legend>";
@@ -1119,18 +1127,33 @@ void mqtt_publish_state() {
     g_mqtt.publish(topic_for("state/wifi_rssi").c_str(), buf, true);
   }
 
-  bool ok = false;
-  const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok);
-  if (ok) {
+  bool ok_temp = false;
+  const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok_temp);
+  if (ok_temp) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_c);
     g_mqtt.publish(topic_for("state/current_temp_c").c_str(), buf, true);
   }
 
-  ok = false;
-  const float indoor_h = parse_numeric_prefix(g_runtime->indoor_humidity_text(), &ok);
-  if (ok) {
+  bool ok_humidity = false;
+  const float indoor_h = parse_numeric_prefix(g_runtime->indoor_humidity_text(), &ok_humidity);
+  if (ok_humidity) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_h);
     g_mqtt.publish(topic_for("state/current_humidity").c_str(), buf, true);
+  }
+
+  // Publish sensor data to controller's topic namespace for MQTT-based intake
+  if (g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
+    String mac_str = WiFi.macAddress();
+    if (ok_temp) {
+      String topic = g_cfg_controller_base_topic + "/sensor/" + mac_str + "/temp_c";
+      snprintf(buf, sizeof(buf), "%.2f", indoor_c);
+      g_mqtt.publish(topic.c_str(), buf, false);
+    }
+    if (ok_humidity) {
+      String topic = g_cfg_controller_base_topic + "/sensor/" + mac_str + "/humidity";
+      snprintf(buf, sizeof(buf), "%.2f", indoor_h);
+      g_mqtt.publish(topic.c_str(), buf, false);
+    }
   }
 
   g_mqtt.publish(topic_for("state/status").c_str(), g_runtime->status_text(now).c_str(), true);

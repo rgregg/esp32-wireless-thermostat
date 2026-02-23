@@ -154,6 +154,7 @@ uint8_t g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
 String g_cfg_ctrl_espnow_peer_mac = THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC;
 String g_cfg_ctrl_espnow_peer_macs = THERMOSTAT_CONTROLLER_ESPNOW_PEER_MACS;
 String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
+String g_cfg_ctrl_primary_sensor_mac = "FF:FF:FF:FF:FF:FF";
 String g_cfg_ctrl_pirateweather_api_key = THERMOSTAT_CONTROLLER_PIRATEWEATHER_API_KEY;
 String g_cfg_ctrl_pirateweather_zip = THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP;
 bool g_ctrl_mqtt_reconfigure_required = false;
@@ -187,6 +188,7 @@ CtrlDisplayCfgCacheEntry g_disp_cfg_cache[] = {
     {"espnow_channel", "unknown"},
     {"espnow_peer_mac", "unknown"},
     {"espnow_lmk", "unknown"},
+    {"controller_base_topic", "unknown"},
     {"controller_timeout_ms", "unknown"},
     {"reboot_required", "unknown"},
 };
@@ -211,6 +213,7 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_espnow_peer_mac = g_ctrl_cfg.getString("esp_peer", g_cfg_ctrl_espnow_peer_mac);
   g_cfg_ctrl_espnow_peer_macs = g_ctrl_cfg.getString("esp_peers", g_cfg_ctrl_espnow_peer_macs);
   g_cfg_ctrl_espnow_lmk = g_ctrl_cfg.getString("esp_lmk", g_cfg_ctrl_espnow_lmk);
+  g_cfg_ctrl_primary_sensor_mac = g_ctrl_cfg.getString("pri_sensor", g_cfg_ctrl_primary_sensor_mac);
   g_cfg_ctrl_pirateweather_api_key = g_ctrl_cfg.getString("pw_key", g_cfg_ctrl_pirateweather_api_key);
   g_cfg_ctrl_pirateweather_zip = g_ctrl_cfg.getString("pw_zip", g_cfg_ctrl_pirateweather_zip);
 }
@@ -305,10 +308,13 @@ void ctrl_publish_all_cfg_state() {
   ctrl_publish_cfg_value("espnow_peer_mac", g_cfg_ctrl_espnow_peer_mac);
   ctrl_publish_cfg_value("espnow_peer_macs", g_cfg_ctrl_espnow_peer_macs);
   ctrl_publish_cfg_value("espnow_lmk", g_cfg_ctrl_espnow_lmk);
+  ctrl_publish_cfg_value("primary_sensor_mac", g_cfg_ctrl_primary_sensor_mac);
   ctrl_publish_cfg_value("pirateweather_api_key", g_cfg_ctrl_pirateweather_api_key);
   ctrl_publish_cfg_value("pirateweather_zip", g_cfg_ctrl_pirateweather_zip);
   ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0");
 }
+
+bool ctrl_parse_mac(const char *text, uint8_t out[6]);
 
 bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   if (!g_ctrl_cfg_ready || raw_value == nullptr) {
@@ -387,6 +393,16 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_ctrl_espnow_lmk = value;
     g_ctrl_cfg.putString("esp_lmk", value);
     g_ctrl_cfg_reboot_required = true;
+  } else if (key == "primary_sensor_mac") {
+    uint8_t parsed_mac[6];
+    if (!ctrl_parse_mac(raw_value, parsed_mac)) {
+      return false;
+    }
+    g_cfg_ctrl_primary_sensor_mac = value;
+    g_ctrl_cfg.putString("pri_sensor", value);
+    if (g_controller != nullptr) {
+      g_controller->app().set_primary_sensor_mac(parsed_mac);
+    }
   } else if (key == "pirateweather_api_key") {
     g_cfg_ctrl_pirateweather_api_key = value;
     g_ctrl_cfg.putString("pw_key", value);
@@ -465,6 +481,23 @@ bool ctrl_parse_mac(const char *text, uint8_t out[6]) {
 bool ctrl_is_broadcast_mac(const uint8_t mac[6]) {
   static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   return memcmp(mac, kBroadcast, sizeof(kBroadcast)) == 0;
+}
+
+// Parse sensor topic: {base}/sensor/{mac}/{suffix}
+// Returns true if topic matches, setting mac_out and suffix_out.
+bool ctrl_parse_sensor_topic(const char *base, const char *topic,
+                             char mac_out[18], const char **suffix_out) {
+  const size_t base_len = strlen(base);
+  if (strncmp(topic, base, base_len) != 0) return false;
+  // Expect "/sensor/" after base
+  if (strncmp(topic + base_len, "/sensor/", 8) != 0) return false;
+  const char *mac_start = topic + base_len + 8;
+  // MAC is 17 chars "AA:BB:CC:DD:EE:FF"
+  if (strlen(mac_start) < 18 || mac_start[17] != '/') return false;
+  memcpy(mac_out, mac_start, 17);
+  mac_out[17] = '\0';
+  *suffix_out = mac_start + 18;
+  return true;
 }
 
 bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
@@ -755,6 +788,7 @@ void ctrl_web_handle_config_get() {
   body += "\"espnow_peer_mac\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_mac) + "\",";
   body += "\"espnow_peer_macs\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_macs) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_ctrl_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"primary_sensor_mac\":\"" + ctrl_json_escape(g_cfg_ctrl_primary_sensor_mac) + "\",";
   body += "\"pirateweather_api_key\":\"" +
           String(g_cfg_ctrl_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
   body += "\"pirateweather_zip\":\"" + ctrl_json_escape(g_cfg_ctrl_pirateweather_zip) + "\",";
@@ -836,6 +870,7 @@ void ctrl_web_handle_root() {
 
   html += "<fieldset><legend>Hardware Settings</legend>";
   html += "<form method=\"post\" action=\"/config\">";
+  html += "primary_sensor_mac: <input name=\"primary_sensor_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF (FF:FF:FF:FF:FF:FF = accept all)\" value=\"" + g_cfg_ctrl_primary_sensor_mac + "\"><br>";
   html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + g_cfg_ctrl_ota_hostname + "\"><br>";
   html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
   html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
@@ -880,6 +915,8 @@ void ctrl_web_handle_root() {
   html += "espnow_peer_mac: <input name=\"disp_espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
           ctrl_get_display_cfg_cache("espnow_peer_mac") + "\"><br>";
   html += "espnow_lmk: <input name=\"disp_espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
+  html += "controller_base_topic: <input name=\"disp_controller_base_topic\" value=\"" +
+          ctrl_get_display_cfg_cache("controller_base_topic") + "\"><br>";
   html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
 
   html += "<fieldset><legend>Hardware Settings</legend>";
@@ -1010,6 +1047,13 @@ void ctrl_publish_runtime_state() {
     g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_condition").c_str(),
                         app.outdoor_condition(), true);
   }
+  {
+    const uint8_t *ps = app.primary_sensor_mac();
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             ps[0], ps[1], ps[2], ps[3], ps[4], ps[5]);
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/primary_sensor_mac").c_str(), mac_str, true);
+  }
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
 }
@@ -1077,6 +1121,23 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
 
+  // MQTT sensor intake: {base}/sensor/{mac}/temp_c or humidity
+  char sensor_mac[18];
+  const char *sensor_suffix = nullptr;
+  if (ctrl_parse_sensor_topic(g_cfg_ctrl_mqtt_base_topic.c_str(), topic, sensor_mac,
+                              &sensor_suffix)) {
+    uint8_t parsed_mac[6];
+    if (ctrl_parse_mac(sensor_mac, parsed_mac) && g_controller != nullptr) {
+      const float fval = static_cast<float>(atof(value));
+      if (strcmp(sensor_suffix, "temp_c") == 0) {
+        g_controller->app().on_indoor_temperature_c(fval, parsed_mac);
+      } else if (strcmp(sensor_suffix, "humidity") == 0) {
+        g_controller->app().on_indoor_humidity(fval, parsed_mac);
+      }
+    }
+    return;
+  }
+
   if (topic_str.startsWith(ctrl_topic_for("cmd/"))) {
     g_ctrl_last_mqtt_command_ms = millis();
   }
@@ -1134,6 +1195,11 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
   if (topic_str == ctrl_topic_for("cmd/filter_reset") && mqtt_payload::parse_bool(value)) {
     ctrl_apply_mqtt_shadow(false, true);
+    return;
+  }
+  if (topic_str == ctrl_topic_for("cmd/primary_sensor_mac")) {
+    ctrl_try_update_runtime_config("primary_sensor_mac", value);
+    ctrl_publish_runtime_state();
     return;
   }
 
@@ -1207,7 +1273,10 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reboot").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reset_sequence").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/primary_sensor_mac").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/temp_c").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("cfg/+/state").c_str());
@@ -1329,6 +1398,15 @@ void setup() {
 
   const bool ok = g_controller->begin();
   g_ctrl_last_espnow_error = ok ? "none" : "begin_failed";
+
+  // Apply persisted primary sensor MAC
+  {
+    uint8_t ps_mac[6];
+    if (ctrl_parse_mac(g_cfg_ctrl_primary_sensor_mac.c_str(), ps_mac)) {
+      g_controller->app().set_primary_sensor_mac(ps_mac);
+    }
+  }
+
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ota_rollback_begin();
