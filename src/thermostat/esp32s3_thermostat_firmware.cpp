@@ -236,6 +236,7 @@ lv_obj_t *g_settings_config_label = nullptr;
 lv_obj_t *g_settings_errors_label = nullptr;
 
 lv_obj_t *g_setpoint_column = nullptr;
+lv_obj_t *g_filter_label = nullptr;
 lv_obj_t *g_timeout_slider = nullptr;
 lv_obj_t *g_brightness_slider = nullptr;
 lv_obj_t *g_dim_slider = nullptr;
@@ -1842,6 +1843,14 @@ void refresh_ui() {
       lv_obj_add_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
     }
   }
+  if (g_filter_label != nullptr) {
+    if (g_runtime->filter_runtime_hours() >= 720) {
+      lv_label_set_text(g_filter_label, "Change Filter");
+      lv_obj_clear_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
 
 void tab_event_cb(lv_event_t *) {
@@ -1993,6 +2002,7 @@ void create_ui() {
   g_brightness_slider = handles.brightness_slider;
   g_dim_slider = handles.dim_slider;
   g_setpoint_column = handles.setpoint_column;
+  g_filter_label = handles.filter_label;
 
   show_page(ThermostatPage::Home);
 }

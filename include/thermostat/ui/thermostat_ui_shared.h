@@ -61,6 +61,7 @@ struct UiHandles {
   lv_obj_t *brightness_slider = nullptr;
   lv_obj_t *dim_slider = nullptr;
   lv_obj_t *setpoint_column = nullptr;
+  lv_obj_t *filter_label = nullptr;
 };
 
 void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles);

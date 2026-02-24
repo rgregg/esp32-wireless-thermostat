@@ -93,6 +93,8 @@ lv_obj_t *g_settings_controller_label = nullptr;
 lv_obj_t *g_settings_espnow_label = nullptr;
 lv_obj_t *g_settings_config_label = nullptr;
 lv_obj_t *g_settings_errors_label = nullptr;
+lv_obj_t *g_setpoint_column = nullptr;
+lv_obj_t *g_filter_label = nullptr;
 lv_obj_t *g_timeout_slider = nullptr;
 lv_obj_t *g_brightness_slider = nullptr;
 lv_obj_t *g_dim_slider = nullptr;
@@ -536,6 +538,26 @@ void update_labels() {
   }
 
   if (g_settings_diag_label != nullptr) lv_label_set_text(g_settings_diag_label, errors_text);
+
+  // Setpoint column visibility based on mode
+  g_screen.on_mode_changed(g_display_app->local_mode());
+  if (g_setpoint_column != nullptr) {
+    if (g_screen.setpoint_visible()) {
+      lv_obj_clear_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  // Filter change indicator
+  if (g_filter_label != nullptr) {
+    if (g_display_app->filter_runtime_hours() >= 720) {
+      lv_label_set_text(g_filter_label, "Change Filter");
+      lv_obj_clear_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
 
 void on_tab_changed(lv_event_t *e) {
@@ -684,6 +706,8 @@ void create_ui() {
   g_timeout_slider = handles.timeout_slider;
   g_brightness_slider = handles.brightness_slider;
   g_dim_slider = handles.dim_slider;
+  g_setpoint_column = handles.setpoint_column;
+  g_filter_label = handles.filter_label;
 
   thermostat::ui::set_mode_button_state(g_display_app->local_mode());
   thermostat::ui::set_temperature_unit_button_state(g_display_app->temperature_unit());

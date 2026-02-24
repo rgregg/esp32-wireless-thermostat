@@ -440,6 +440,14 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_width(out_handles->humidity_label, LV_PCT(100));
   lv_obj_set_style_text_align(out_handles->humidity_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
+  out_handles->filter_label = lv_label_create(mid_col);
+  lv_label_set_text(out_handles->filter_label, "");
+  style_label(out_handles->filter_label, font30());
+  lv_obj_set_width(out_handles->filter_label, LV_PCT(100));
+  lv_obj_set_style_text_align(out_handles->filter_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(out_handles->filter_label, lv_color_hex(0xFF6600), LV_PART_MAIN);
+  lv_obj_add_flag(out_handles->filter_label, LV_OBJ_FLAG_HIDDEN);
+
   out_handles->setpoint_column = make_transparent(home_root, 130, LV_PCT(100));
   lv_obj_set_layout(out_handles->setpoint_column, LV_LAYOUT_FLEX);
   lv_obj_set_flex_flow(out_handles->setpoint_column, LV_FLEX_FLOW_COLUMN);

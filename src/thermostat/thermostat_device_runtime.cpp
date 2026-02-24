@@ -121,4 +121,8 @@ std::string ThermostatDeviceRuntime::weather_text() const {
 
 WeatherIcon ThermostatDeviceRuntime::weather_icon() const { return display_.weather_icon(); }
 
+uint32_t ThermostatDeviceRuntime::filter_runtime_hours() const {
+  return display_.filter_runtime_hours();
+}
+
 }  // namespace thermostat

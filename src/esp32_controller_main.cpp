@@ -482,6 +482,8 @@ void ctrl_publish_discovery() {
       String("homeassistant/button/") + dev_id + "_controller_reset_sequence/config";
   const String reboot_topic =
       String("homeassistant/button/") + dev_id + "_controller_reboot/config";
+  const String filter_change_topic =
+      String("homeassistant/binary_sensor/") + dev_id + "_filter_change_required/config";
 
   char payload[768];
   snprintf(payload, sizeof(payload),
@@ -593,6 +595,14 @@ void ctrl_publish_discovery() {
            "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(reboot_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Filter Change Required\",\"uniq_id\":\"%s_filter_change_required\","
+           "\"stat_t\":\"%s/state/filter_change_required\","
+           "\"dev_cla\":\"problem\",\"pl_on\":\"1\",\"pl_off\":\"0\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(filter_change_topic.c_str(), payload, true);
 
   g_ctrl_mqtt_discovery_sent = true;
 }
@@ -827,6 +837,8 @@ void ctrl_publish_runtime_state() {
   g_ctrl_mqtt.publish(ctrl_topic_for("state/target_temp_c").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%.2f", rt.filter_runtime_hours());
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_runtime_hours").c_str(), buf, true);
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_change_required").c_str(),
+                      rt.filter_runtime_hours() >= 720.0f ? "1" : "0", true);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(rt.furnace_state()));
   g_ctrl_mqtt.publish(ctrl_topic_for("state/furnace_state").c_str(), buf, true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/firmware_version").c_str(),

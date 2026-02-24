@@ -183,6 +183,8 @@ void publish_controller_extras() {
   g_mqtt.publish(ctrl_topic("state/uptime_s"), buf, true);
 
   g_mqtt.publish(ctrl_topic("state/failsafe"), rt.failsafe_active() ? "1" : "0", true);
+  g_mqtt.publish(ctrl_topic("state/filter_change_required"),
+                 rt.filter_runtime_hours() >= 720.0f ? "1" : "0", true);
 }
 
 void on_mqtt_message(const std::string &topic, const std::string &payload) {

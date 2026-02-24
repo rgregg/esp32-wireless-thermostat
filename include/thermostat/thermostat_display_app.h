@@ -41,6 +41,9 @@ class ThermostatDisplayApp {
   std::string indoor_humidity_text() const { return model_.format_indoor_humidity_text(); }
   std::string weather_text() const { return model_.format_weather_text(); }
   WeatherIcon weather_icon() const { return model_.weather_icon(); }
+  uint32_t filter_runtime_hours() const {
+    return app_.controller_filter_runtime_seconds() / 3600U;
+  }
 
  private:
   ThermostatApp &app_;

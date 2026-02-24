@@ -53,6 +53,7 @@ class ThermostatDeviceRuntime {
   std::string indoor_humidity_text() const;
   std::string weather_text() const;
   WeatherIcon weather_icon() const;
+  uint32_t filter_runtime_hours() const;
 
  private:
   ThermostatDeviceRuntimeConfig config_;
