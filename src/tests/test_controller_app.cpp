@@ -163,9 +163,9 @@ TEST_CASE(controller_app_nullptr_mac_always_accepted) {
   ASSERT_TRUE(app.indoor_temperature_c() == 25.0f);
 }
 
-TEST_CASE(controller_app_set_filter_runtime_seconds_loads_into_runtime) {
-  // Verify ControllerRuntime::set_filter_runtime_seconds can inject a persisted value
-  // (this simulates what ControllerApp does on boot when loading from NVS)
+TEST_CASE(controller_runtime_set_filter_runtime_seconds_survives_tick) {
+  // Verify ControllerRuntime::set_filter_runtime_seconds injects a value
+  // that persists across tick() calls when no HVAC is active
   thermostat::ControllerConfig cfg;
   cfg.min_cooling_off_time_ms = 0;
   cfg.min_cooling_run_time_ms = 0;

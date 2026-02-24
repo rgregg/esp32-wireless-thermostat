@@ -52,7 +52,7 @@ CommandApplyResult ControllerApp::on_command_word(uint32_t packed_word,
   const CommandApplyResult result = runtime_.apply_remote_command(cmd, source_mac);
   if (result.accepted) {
     if (result.filter_reset_requested) {
-      maybe_persist_filter_runtime();
+      maybe_persist_filter_runtime(/*force=*/true);
     }
     publish();
   }
@@ -246,10 +246,18 @@ void ControllerApp::persist_indoor_state() const {
 #endif
 }
 
-void ControllerApp::maybe_persist_filter_runtime() {
+void ControllerApp::maybe_persist_filter_runtime(bool force) {
 #if defined(ARDUINO)
   const uint32_t current = runtime_.filter_runtime_seconds();
   if (current == persisted_filter_runtime_s_) {
+    return;
+  }
+  // Throttle NVS writes to at most once per 10 minutes to reduce flash wear,
+  // unless force is true (e.g. filter reset).
+  constexpr uint32_t kPersistIntervalMs = 10UL * 60UL * 1000UL;
+  const uint32_t now = millis();
+  if (!force &&
+      static_cast<uint32_t>(now - last_filter_persist_ms_) < kPersistIntervalMs) {
     return;
   }
   Preferences prefs;
@@ -259,6 +267,9 @@ void ControllerApp::maybe_persist_filter_runtime() {
   prefs.putUInt("filter_rt", current);
   prefs.end();
   persisted_filter_runtime_s_ = current;
+  last_filter_persist_ms_ = now;
+#else
+  (void)force;
 #endif
 }
 
