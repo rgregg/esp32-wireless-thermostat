@@ -98,6 +98,8 @@ lv_obj_t *g_settings_config_label = nullptr;
 lv_obj_t *g_settings_errors_label = nullptr;
 lv_obj_t *g_setpoint_column = nullptr;
 lv_obj_t *g_filter_label = nullptr;
+lv_obj_t *g_fan_status_label = nullptr;
+lv_obj_t *g_mode_status_label = nullptr;
 lv_obj_t *g_timeout_slider = nullptr;
 lv_obj_t *g_brightness_slider = nullptr;
 lv_obj_t *g_dim_slider = nullptr;
@@ -631,6 +633,21 @@ void update_labels() {
       lv_obj_add_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
     }
   }
+
+  // Fan page status
+  if (g_fan_status_label != nullptr) {
+    const FurnaceStateCode cs = g_display_app->controller_state();
+    const char *fan_text = (cs == FurnaceStateCode::HeatOn || cs == FurnaceStateCode::CoolOn ||
+                            cs == FurnaceStateCode::FanOn)
+                               ? "Fan Running"
+                               : "Idle";
+    lv_label_set_text(g_fan_status_label, fan_text);
+  }
+
+  // Mode page status
+  if (g_mode_status_label != nullptr) {
+    lv_label_set_text(g_mode_status_label, status_text.c_str());
+  }
 }
 
 void on_tab_changed(lv_event_t *e) {
@@ -781,6 +798,8 @@ void create_ui() {
   g_dim_slider = handles.dim_slider;
   g_setpoint_column = handles.setpoint_column;
   g_filter_label = handles.filter_label;
+  g_fan_status_label = handles.fan_status_label;
+  g_mode_status_label = handles.mode_status_label;
 
   thermostat::ui::set_mode_button_state(g_display_app->local_mode());
   thermostat::ui::set_temperature_unit_button_state(g_display_app->temperature_unit());

@@ -64,6 +64,8 @@ struct UiHandles {
   lv_obj_t *dim_slider = nullptr;
   lv_obj_t *setpoint_column = nullptr;
   lv_obj_t *filter_label = nullptr;
+  lv_obj_t *fan_status_label = nullptr;
+  lv_obj_t *mode_status_label = nullptr;
 };
 
 void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles);

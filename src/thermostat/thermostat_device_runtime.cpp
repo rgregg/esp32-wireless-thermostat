@@ -111,6 +111,10 @@ uint32_t ThermostatDeviceRuntime::espnow_send_fail_count() const {
   return node_.transport().send_fail_count();
 }
 
+FurnaceStateCode ThermostatDeviceRuntime::controller_state() const {
+  return display_.controller_state();
+}
+
 std::string ThermostatDeviceRuntime::status_text(uint32_t now_ms) const {
   return display_.status_text(now_ms, config_.controller_connection_timeout_ms);
 }

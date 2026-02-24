@@ -112,7 +112,12 @@ void ControllerRuntime::tick(const ControllerTickInput &in) {
 }
 
 FurnaceStateCode ControllerRuntime::furnace_state() const {
-  return compute_furnace_state(snapshot());
+  FurnaceStateCode base = compute_furnace_state(snapshot());
+  if (equipment_delay_) {
+    if (base == FurnaceStateCode::HeatMode) return FurnaceStateCode::HeatWait;
+    if (base == FurnaceStateCode::CoolMode) return FurnaceStateCode::CoolWait;
+  }
+  return base;
 }
 
 ThermostatSnapshot ControllerRuntime::snapshot() const {
@@ -149,6 +154,7 @@ void ControllerRuntime::apply_hvac_calls(uint32_t now_ms, bool heat_call, bool c
   if (failsafe_active_ || hvac_lockout_) {
     enter_idle(now_ms);
     relay_.fan = false;
+    equipment_delay_ = false;
     return;
   }
 
@@ -192,6 +198,8 @@ void ControllerRuntime::apply_hvac_calls(uint32_t now_ms, bool heat_call, bool c
       } else {
         relay_.heat = false;
         relay_.cool = false;
+        equipment_delay_ = (heat_call && (!idle_ready || !heat_off_ready)) ||
+                           (cool_call && (!idle_ready || !cool_off_ready));
       }
       break;
     }
@@ -265,6 +273,7 @@ void ControllerRuntime::enter_heating(uint32_t now_ms) {
   relay_.heat = true;
   relay_.cool = false;
   relay_.fan = false;
+  equipment_delay_ = false;
 }
 
 void ControllerRuntime::enter_cooling(uint32_t now_ms) {
@@ -273,6 +282,7 @@ void ControllerRuntime::enter_cooling(uint32_t now_ms) {
   relay_.heat = false;
   relay_.cool = true;
   relay_.fan = false;
+  equipment_delay_ = false;
 }
 
 }  // namespace thermostat

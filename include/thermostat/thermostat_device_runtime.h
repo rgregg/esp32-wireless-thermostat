@@ -47,6 +47,7 @@ class ThermostatDeviceRuntime {
   uint32_t espnow_send_ok_count() const;
   uint32_t espnow_send_fail_count() const;
 
+  FurnaceStateCode controller_state() const;
   std::string status_text(uint32_t now_ms) const;
   std::string setpoint_text() const;
   std::string indoor_temp_text() const;

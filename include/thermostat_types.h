@@ -22,6 +22,8 @@ enum class FurnaceStateCode : uint8_t {
   CoolOn = 4,
   FanOn = 5,
   Error = 6,
+  HeatWait = 7,
+  CoolWait = 8,
 };
 
 constexpr float kFilterChangeThresholdHours = 720.0f;  // 30 days

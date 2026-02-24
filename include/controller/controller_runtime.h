@@ -106,6 +106,7 @@ class ControllerRuntime {
   bool has_heating_off_timestamp_ = false;
   bool has_cooling_off_timestamp_ = false;
   HvacState hvac_state_ = HvacState::Idle;
+  bool equipment_delay_ = false;
 
   int fan_circulate_elapsed_min_ = 0;
   uint32_t last_minute_tick_ms_ = 0;
