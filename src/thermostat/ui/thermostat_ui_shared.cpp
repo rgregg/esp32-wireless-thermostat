@@ -380,8 +380,8 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_style_text_align(out_handles->weather_icon_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   out_handles->weather_label = lv_label_create(weather_row);
-  lv_label_set_text(out_handles->weather_label, "80° / 55% Humidity");
-  style_label(out_handles->weather_label, font40());
+  lv_label_set_text(out_handles->weather_label, "---");
+  style_label(out_handles->weather_label, font30());
   lv_obj_set_width(out_handles->weather_label, 260);
   lv_obj_set_style_text_align(out_handles->weather_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
@@ -401,7 +401,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_style_line_opa(status_line, LV_OPA_70, LV_PART_MAIN);
 
   out_handles->status_label = lv_label_create(left_col);
-  lv_label_set_text(out_handles->status_label, "cool mode");
+  lv_label_set_text(out_handles->status_label, "---");
   style_label(out_handles->status_label, font30());
   lv_obj_set_width(out_handles->status_label, LV_PCT(100));
   lv_obj_set_style_text_align(out_handles->status_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
@@ -428,14 +428,14 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_style_text_align(indoor_title, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   out_handles->indoor_label = lv_label_create(mid_col);
-  lv_label_set_text(out_handles->indoor_label, "N/A");
+  lv_label_set_text(out_handles->indoor_label, "---");
   style_indoor_temp_label(out_handles->indoor_label);
   lv_obj_set_width(out_handles->indoor_label, LV_PCT(100));
   lv_obj_set_height(out_handles->indoor_label, LV_SIZE_CONTENT);
   lv_obj_set_style_text_align(out_handles->indoor_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
   out_handles->humidity_label = lv_label_create(mid_col);
-  lv_label_set_text(out_handles->humidity_label, "45% Humidity");
+  lv_label_set_text(out_handles->humidity_label, "---");
   style_label(out_handles->humidity_label, font30());
   lv_obj_set_width(out_handles->humidity_label, LV_PCT(100));
   lv_obj_set_style_text_align(out_handles->humidity_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
@@ -490,7 +490,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_style_text_align(set_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
   out_handles->setpoint_label = lv_label_create(set_obj);
-  lv_label_set_text(out_handles->setpoint_label, "68");
+  lv_label_set_text(out_handles->setpoint_label, "--");
   lv_label_set_long_mode(out_handles->setpoint_label, LV_LABEL_LONG_CLIP);
   style_label(out_handles->setpoint_label, font40());
   lv_obj_set_width(out_handles->setpoint_label, LV_SIZE_CONTENT);
