@@ -5,6 +5,7 @@
 #include "thermostat/thermostat_transport.h"
 #include "thermostat_types.h"
 #include "transport/espnow_packets.h"
+#include "weather_icon.h"
 
 namespace thermostat {
 
@@ -30,7 +31,7 @@ using ThermostatHeartbeatCallback = void (*)(uint32_t now_ms, void *ctx);
 using ThermostatTelemetryCallback =
     void (*)(const ThermostatControllerTelemetry &telemetry, void *ctx);
 using ThermostatWeatherCallback =
-    void (*)(float outdoor_temp_c, const char *condition, void *ctx);
+    void (*)(float outdoor_temp_c, WeatherIcon icon, void *ctx);
 
 class EspNowThermostatTransport final : public IThermostatTransport {
  public:

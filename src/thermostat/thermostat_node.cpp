@@ -57,17 +57,17 @@ void ThermostatNode::on_telemetry(const ThermostatControllerTelemetry &telemetry
 #endif
 }
 
-void ThermostatNode::on_weather_static(float outdoor_temp_c, const char *condition,
+void ThermostatNode::on_weather_static(float outdoor_temp_c, WeatherIcon icon,
                                         void *ctx) {
   if (ctx == nullptr) {
     return;
   }
-  static_cast<ThermostatNode *>(ctx)->on_weather(outdoor_temp_c, condition);
+  static_cast<ThermostatNode *>(ctx)->on_weather(outdoor_temp_c, icon);
 }
 
-void ThermostatNode::on_weather(float outdoor_temp_c, const char *condition) {
+void ThermostatNode::on_weather(float outdoor_temp_c, WeatherIcon icon) {
   if (weather_cb_ != nullptr) {
-    weather_cb_(outdoor_temp_c, condition, weather_cb_ctx_);
+    weather_cb_(outdoor_temp_c, icon, weather_cb_ctx_);
   }
 }
 

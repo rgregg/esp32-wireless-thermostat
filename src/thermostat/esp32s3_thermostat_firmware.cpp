@@ -22,6 +22,7 @@
 #include "ota_web_updater.h"
 
 #include "thermostat/thermostat_device_runtime.h"
+#include "weather_icon.h"
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
 #include "management_paths.h"
@@ -256,7 +257,7 @@ uint32_t g_last_mqtt_command_ms = 0;
 bool g_wifi_has_attempted_stored_connect = false;
 bool g_wifi_provisioning_started = false;
 float g_outdoor_temp_c = 6.0f;
-std::string g_weather_condition = "Cloudy";
+WeatherIcon g_weather_icon = WeatherIcon::Cloudy;
 bool g_have_weather_data = false;
 uint32_t g_last_weather_poll_ms = 0;
 uint32_t g_display_timeout_ms = static_cast<uint32_t>(THERMOSTAT_DISPLAY_TIMEOUT_S) * 1000UL;
@@ -673,20 +674,8 @@ bool json_extract_float(const String &json, const char *key, float *out, int fro
   return true;
 }
 
-String map_pirateweather_icon(const String &icon) {
-  if (icon == "clear-day") return "Sunny";
-  if (icon == "clear-night") return "Night";
-  if (icon == "partly-cloudy-day") return "Partly Cloudy";
-  if (icon == "partly-cloudy-night") return "Night Cloudy";
-  if (icon == "cloudy") return "Cloudy";
-  if (icon == "fog") return "Fog";
-  if (icon == "rain") return "Rain";
-  if (icon == "snow") return "Snow";
-  if (icon == "sleet") return "Sleet";
-  if (icon == "wind") return "Windy";
-  if (icon == "hail") return "Hail";
-  if (icon == "thunderstorm") return "Lightning";
-  return icon.length() > 0 ? icon : String("Unknown");
+WeatherIcon map_pirateweather_icon(const String &icon) {
+  return weather_icon_from_api(icon.c_str());
 }
 
 bool fetch_zip_coordinates(const String &zip, float *lat_out, float *lon_out) {
@@ -714,8 +703,8 @@ bool fetch_zip_coordinates(const String &zip, float *lat_out, float *lon_out) {
   return true;
 }
 
-bool fetch_pirateweather_current(float lat, float lon, float *temp_c_out, String *condition_out) {
-  if (temp_c_out == nullptr || condition_out == nullptr || g_cfg_pirateweather_api_key.length() == 0) {
+bool fetch_pirateweather_current(float lat, float lon, float *temp_c_out, WeatherIcon *icon_out) {
+  if (temp_c_out == nullptr || icon_out == nullptr || g_cfg_pirateweather_api_key.length() == 0) {
     return false;
   }
   WiFiClientSecure client;
@@ -745,7 +734,7 @@ bool fetch_pirateweather_current(float lat, float lon, float *temp_c_out, String
   }
 
   *temp_c_out = temp_c;
-  *condition_out = map_pirateweather_icon(icon);
+  *icon_out = map_pirateweather_icon(icon);
   return true;
 }
 
@@ -785,17 +774,17 @@ void poll_weather(uint32_t now_ms) {
   }
 
   float outdoor_temp_c = 0.0f;
-  String condition;
-  if (!fetch_pirateweather_current(lat, lon, &outdoor_temp_c, &condition)) {
+  WeatherIcon icon = WeatherIcon::Unknown;
+  if (!fetch_pirateweather_current(lat, lon, &outdoor_temp_c, &icon)) {
     g_have_weather_data = false;
     return;
   }
 
   g_outdoor_temp_c = outdoor_temp_c;
-  g_weather_condition = condition.c_str();
+  g_weather_icon = icon;
   g_have_weather_data = true;
   if (g_runtime != nullptr) {
-    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
+    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
   }
 }
 
@@ -2173,7 +2162,7 @@ void poll_sensors(uint32_t now_ms) {
 
   g_runtime->on_local_sensor_update(t, h);
   if (g_have_weather_data) {
-    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_condition);
+    g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
   }
 }
 

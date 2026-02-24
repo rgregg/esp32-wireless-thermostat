@@ -50,7 +50,7 @@ TEST_CASE(thermostat_display_app_user_and_sensor_flow) {
   ASSERT_TRUE(tx.humidity_count == 1);
   ASSERT_NEAR(tx.last_temp, 23.0f, 0.01f);
 
-  display.on_outdoor_weather_update(0.0f, "Sunny");
+  display.on_outdoor_weather_update(0.0f, thermostat::WeatherIcon::Sunny);
   ASSERT_TRUE(display.weather_icon() == thermostat::WeatherIcon::Sunny);
 }
 

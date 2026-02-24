@@ -104,9 +104,8 @@ std::string forecast_url(const char *api_key, float lat, float lon) {
 }
 
 bool parse_forecast_response(const char *json, float *temp_c,
-                             char *condition, size_t condition_len) {
-  if (json == nullptr || temp_c == nullptr ||
-      condition == nullptr || condition_len == 0) {
+                             thermostat::WeatherIcon *icon_out) {
+  if (json == nullptr || temp_c == nullptr || icon_out == nullptr) {
     return false;
   }
 
@@ -123,26 +122,8 @@ bool parse_forecast_response(const char *json, float *temp_c,
   char icon[64] = {0};
   json_extract_string(json, "icon", icon, sizeof(icon), offset);
 
-  const char *mapped = map_icon(icon);
-  snprintf(condition, condition_len, "%s", mapped);
+  *icon_out = thermostat::weather_icon_from_api(icon);
   return true;
-}
-
-const char *map_icon(const char *icon) {
-  if (icon == nullptr || icon[0] == '\0') return "Unknown";
-  if (strcmp(icon, "clear-day") == 0) return "Sunny";
-  if (strcmp(icon, "clear-night") == 0) return "Night";
-  if (strcmp(icon, "partly-cloudy-day") == 0) return "Partly Cloudy";
-  if (strcmp(icon, "partly-cloudy-night") == 0) return "Night Cloudy";
-  if (strcmp(icon, "cloudy") == 0) return "Cloudy";
-  if (strcmp(icon, "fog") == 0) return "Fog";
-  if (strcmp(icon, "rain") == 0) return "Rain";
-  if (strcmp(icon, "snow") == 0) return "Snow";
-  if (strcmp(icon, "sleet") == 0) return "Sleet";
-  if (strcmp(icon, "wind") == 0) return "Windy";
-  if (strcmp(icon, "hail") == 0) return "Hail";
-  if (strcmp(icon, "thunderstorm") == 0) return "Lightning";
-  return icon;
 }
 
 }  // namespace pirateweather

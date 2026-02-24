@@ -24,7 +24,7 @@ class ThermostatDisplayApp {
   void sync_from_app();
 
   void on_local_sensor_update(float indoor_temp_c, float indoor_humidity);
-  void on_outdoor_weather_update(float outdoor_temp_c, const std::string &condition);
+  void on_outdoor_weather_update(float outdoor_temp_c, WeatherIcon icon);
 
   void on_user_set_setpoint(float user_value, uint32_t now_ms);
   void on_user_set_setpoint_c(float setpoint_c, uint32_t now_ms);

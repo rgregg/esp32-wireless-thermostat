@@ -19,6 +19,7 @@
 #include "sim_mqtt_client.h"
 #include "sim_weather_client.h"
 #include "thermostat/thermostat_state.h"
+#include "weather_icon.h"
 
 namespace {
 
@@ -69,14 +70,14 @@ std::string display_topic(const char *suffix) {
 // SimControllerTransport: bridges ControllerApp telemetry to MQTT topics
 class SimControllerTransport : public thermostat::IControllerTransport {
  public:
-  void publish_weather(float outdoor_temp_c, const char *condition) override {
+  void publish_weather(float outdoor_temp_c, thermostat::WeatherIcon icon) override {
     if (!g_mqtt_connected) return;
 
     char buf[32];
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(outdoor_temp_c));
     g_mqtt.publish(ctrl_topic("state/outdoor_temp_c"), buf, true);
     g_mqtt.publish(ctrl_topic("state/outdoor_condition"),
-                   condition != nullptr ? condition : "", true);
+                   thermostat::weather_icon_display_text(icon), true);
   }
 
   void publish_telemetry(const thermostat::ControllerTelemetry &t) override {
@@ -133,9 +134,11 @@ uint32_t g_start_time_ms = 0;
 
 // Simulated weather
 float g_simulated_outdoor_c = 15.0f;
-constexpr const char *kWeatherConditions[] = {
-    "Sunny", "Cloudy", "Rain", "Snow", "Fog", "Lightning"};
-constexpr int kWeatherConditionCount = 6;
+constexpr thermostat::WeatherIcon kWeatherIcons[] = {
+    thermostat::WeatherIcon::Sunny, thermostat::WeatherIcon::Cloudy,
+    thermostat::WeatherIcon::Rain, thermostat::WeatherIcon::Snow,
+    thermostat::WeatherIcon::Fog, thermostat::WeatherIcon::Lightning};
+constexpr int kWeatherIconCount = 6;
 int g_weather_index = 1;  // Start at Cloudy
 bool g_weather_enabled = false;
 
@@ -575,11 +578,12 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   // Weather
   ly += 5;
   if (g_weather_enabled) {
-    const char *cond = g_app->has_outdoor_weather()
-                           ? g_app->outdoor_condition()
-                           : kWeatherConditions[g_weather_index];
+    thermostat::WeatherIcon disp_icon = g_app->has_outdoor_weather()
+                           ? g_app->outdoor_icon()
+                           : kWeatherIcons[g_weather_index];
     snprintf(buf, sizeof(buf), "Weather: %.1f C, %s",
-             static_cast<double>(g_simulated_outdoor_c), cond);
+             static_cast<double>(g_simulated_outdoor_c),
+             thermostat::weather_icon_display_text(disp_icon));
     draw_text(g_font_small, x + 10, ly, buf, kColorLightBlue);
   } else {
     draw_text(g_font_small, x + 10, ly, "Weather: (disabled)", 0xFF888888);
@@ -827,11 +831,12 @@ void handle_keypress(SDL_Keycode key) {
 
     case SDLK_w: {
       g_weather_enabled = true;
-      g_weather_index = (g_weather_index + 1) % kWeatherConditionCount;
-      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
-      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_weather_index = (g_weather_index + 1) % kWeatherIconCount;
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherIcons[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherIcons[g_weather_index]);
       printf("[SIM] Weather: %s, Outdoor: %.1f C\n",
-             kWeatherConditions[g_weather_index], static_cast<double>(g_simulated_outdoor_c));
+             thermostat::weather_icon_display_text(kWeatherIcons[g_weather_index]),
+             static_cast<double>(g_simulated_outdoor_c));
       break;
     }
 
@@ -839,8 +844,8 @@ void handle_keypress(SDL_Keycode key) {
       g_weather_enabled = true;
       g_simulated_outdoor_c += 2.0f;
       if (g_simulated_outdoor_c > 50.0f) g_simulated_outdoor_c = 50.0f;
-      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
-      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherIcons[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherIcons[g_weather_index]);
       printf("[SIM] Outdoor temp: %.1f C\n", static_cast<double>(g_simulated_outdoor_c));
       break;
 
@@ -848,8 +853,8 @@ void handle_keypress(SDL_Keycode key) {
       g_weather_enabled = true;
       g_simulated_outdoor_c -= 2.0f;
       if (g_simulated_outdoor_c < -40.0f) g_simulated_outdoor_c = -40.0f;
-      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
-      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherIcons[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherIcons[g_weather_index]);
       printf("[SIM] Outdoor temp: %.1f C\n", static_cast<double>(g_simulated_outdoor_c));
       break;
 
@@ -993,23 +998,24 @@ void poll_weather() {
   }
 
   printf("[Weather] %.1f C, %s\n",
-         static_cast<double>(result.temp_c), result.condition.c_str());
+         static_cast<double>(result.temp_c),
+         thermostat::weather_icon_display_text(result.icon));
 
   // Update simulator state
   g_weather_enabled = true;
   g_simulated_outdoor_c = result.temp_c;
 
-  // Find matching condition index for diagnostics panel display
-  for (int i = 0; i < kWeatherConditionCount; ++i) {
-    if (result.condition == kWeatherConditions[i]) {
+  // Find matching icon index for diagnostics panel display
+  for (int i = 0; i < kWeatherIconCount; ++i) {
+    if (result.icon == kWeatherIcons[i]) {
       g_weather_index = i;
       break;
     }
   }
 
   // Push into app and publish via MQTT
-  g_app->set_outdoor_weather(result.temp_c, result.condition.c_str());
-  g_transport.publish_weather(result.temp_c, result.condition.c_str());
+  g_app->set_outdoor_weather(result.temp_c, result.icon);
+  g_transport.publish_weather(result.temp_c, result.icon);
 }
 
 }  // namespace

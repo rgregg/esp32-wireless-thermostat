@@ -222,11 +222,9 @@ void EspNowThermostatTransport::on_recv(const uint8_t *src_mac,
       if (len >= static_cast<int>(sizeof(WeatherDataPacket)) &&
           weather_cb_ != nullptr) {
         const auto *pkt = reinterpret_cast<const WeatherDataPacket *>(data);
-        // Ensure null-terminated condition string
-        char condition[24];
-        memcpy(condition, pkt->condition, sizeof(condition));
-        condition[sizeof(condition) - 1] = '\0';
-        weather_cb_(pkt->outdoor_temp_c, condition, callback_context_);
+        weather_cb_(pkt->outdoor_temp_c,
+                    static_cast<WeatherIcon>(pkt->weather_icon),
+                    callback_context_);
       }
       break;
 

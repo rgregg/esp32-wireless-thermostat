@@ -76,16 +76,15 @@ WeatherResult fetch_weather(const std::string &api_key, const std::string &zip) 
   }
 
   float temp_c = 0.0f;
-  char condition[64] = {0};
-  if (!pirateweather::parse_forecast_response(weather_body.c_str(), &temp_c,
-                                              condition, sizeof(condition))) {
+  thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
+  if (!pirateweather::parse_forecast_response(weather_body.c_str(), &temp_c, &icon)) {
     fprintf(stderr, "[Weather] Failed to parse PirateWeather response\n");
     return result;
   }
 
   result.ok = true;
   result.temp_c = temp_c;
-  result.condition = condition;
+  result.icon = icon;
   return result;
 }
 
