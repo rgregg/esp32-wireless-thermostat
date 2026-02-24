@@ -24,6 +24,8 @@ enum class FurnaceStateCode : uint8_t {
   Error = 6,
 };
 
+constexpr float kFilterChangeThresholdHours = 720.0f;  // 30 days
+
 struct RelayDemand {
   bool heat = false;
   bool cool = false;

@@ -1844,7 +1844,7 @@ void refresh_ui() {
     }
   }
   if (g_filter_label != nullptr) {
-    if (g_runtime->filter_runtime_hours() >= 720) {
+    if (g_runtime->filter_runtime_hours() >= kFilterChangeThresholdHours) {
       lv_label_set_text(g_filter_label, "Change Filter");
       lv_obj_clear_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
     } else {
