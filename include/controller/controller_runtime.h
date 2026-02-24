@@ -45,7 +45,8 @@ class ControllerRuntime {
   void set_hvac_lockout(bool locked_out);
   void reset_remote_command_sequence();
 
-  CommandApplyResult apply_remote_command(const CommandWord &cmd);
+  CommandApplyResult apply_remote_command(const CommandWord &cmd,
+                                          const uint8_t *source_mac = nullptr);
 
   void tick(const ControllerTickInput &in);
 
@@ -109,7 +110,14 @@ class ControllerRuntime {
   int fan_circulate_elapsed_min_ = 0;
   uint32_t last_minute_tick_ms_ = 0;
 
-  uint16_t last_seq_ = 0;
+  static constexpr int kMaxCommandSources = 10;
+  struct CommandSource {
+    uint8_t mac[6] = {};
+    uint16_t last_seq = 0;
+    bool active = false;
+  };
+  CommandSource command_sources_[kMaxCommandSources] = {};
+  uint16_t last_seq_default_ = 0;  // used when no source MAC provided
 };
 
 }  // namespace thermostat

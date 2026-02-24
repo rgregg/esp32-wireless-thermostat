@@ -1,5 +1,7 @@
 #include "controller/controller_runtime.h"
 
+#include <string.h>
+
 #include "espnow_cmd_word.h"
 #include "thermostat/thermostat_state.h"
 
@@ -33,20 +35,56 @@ void ControllerRuntime::set_hvac_lockout(bool locked_out) {
 }
 
 void ControllerRuntime::reset_remote_command_sequence() {
-  last_seq_ = 0;
+  last_seq_default_ = 0;
+  for (int i = 0; i < kMaxCommandSources; ++i) {
+    command_sources_[i].active = false;
+    command_sources_[i].last_seq = 0;
+  }
 }
 
-CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cmd) {
+CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cmd,
+                                                           const uint8_t *source_mac) {
   CommandApplyResult result;
 
-  if (last_seq_ != 0) {
-    if (!espnow_cmd::is_newer_seq(last_seq_, cmd.seq)) {
+  // Resolve the per-source sequence counter
+  uint16_t *last_seq = &last_seq_default_;
+
+  if (source_mac != nullptr) {
+    // Find existing entry or allocate a new one
+    int free_slot = -1;
+    for (int i = 0; i < kMaxCommandSources; ++i) {
+      if (command_sources_[i].active &&
+          memcmp(command_sources_[i].mac, source_mac, 6) == 0) {
+        last_seq = &command_sources_[i].last_seq;
+        free_slot = -2;  // sentinel: found
+        break;
+      }
+      if (!command_sources_[i].active && free_slot == -1) {
+        free_slot = i;
+      }
+    }
+    if (free_slot >= 0) {
+      // New source — register it
+      memcpy(command_sources_[free_slot].mac, source_mac, 6);
+      command_sources_[free_slot].last_seq = 0;
+      command_sources_[free_slot].active = true;
+      last_seq = &command_sources_[free_slot].last_seq;
+    } else if (free_slot == -1) {
+      // All slots full and source not found — reject to avoid
+      // sharing sequence tracking with the default source
       result.stale_or_duplicate = true;
       return result;
     }
   }
 
-  last_seq_ = cmd.seq;
+  if (*last_seq != 0) {
+    if (!espnow_cmd::is_newer_seq(*last_seq, cmd.seq)) {
+      result.stale_or_duplicate = true;
+      return result;
+    }
+  }
+
+  *last_seq = cmd.seq;
   result.accepted = true;
 
   if (cmd.sync_request) {

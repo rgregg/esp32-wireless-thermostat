@@ -1,5 +1,7 @@
 #include "controller/controller_app.h"
 
+#include <string.h>
+
 #include "espnow_cmd_word.h"
 
 #if defined(ARDUINO)
@@ -7,6 +9,15 @@
 #endif
 
 namespace thermostat {
+
+namespace {
+bool is_broadcast_mac(const uint8_t mac[6]) {
+  for (int i = 0; i < 6; ++i) {
+    if (mac[i] != 0xFF) return false;
+  }
+  return true;
+}
+}  // namespace
 
 ControllerApp::ControllerApp(IControllerTransport &transport,
                              const ControllerConfig &config)
@@ -35,9 +46,10 @@ void ControllerApp::on_heartbeat(uint32_t now_ms) {
   runtime_.note_heartbeat(now_ms);
 }
 
-CommandApplyResult ControllerApp::on_command_word(uint32_t packed_word) {
+CommandApplyResult ControllerApp::on_command_word(uint32_t packed_word,
+                                                  const uint8_t *source_mac) {
   const CommandWord cmd = espnow_cmd::decode(packed_word);
-  const CommandApplyResult result = runtime_.apply_remote_command(cmd);
+  const CommandApplyResult result = runtime_.apply_remote_command(cmd, source_mac);
   if (result.accepted) {
     publish();
   }
@@ -62,16 +74,43 @@ void ControllerApp::reset_remote_command_sequence() {
   runtime_.reset_remote_command_sequence();
 }
 
-void ControllerApp::on_indoor_temperature_c(float temp_c) {
+void ControllerApp::on_indoor_temperature_c(float temp_c, const uint8_t *src_mac) {
+  if (src_mac != nullptr) {
+    if (is_broadcast_mac(primary_sensor_mac_)) {
+      // Auto-claim: first ESP-NOW source becomes primary
+      memcpy(primary_sensor_mac_, src_mac, 6);
+      primary_sensor_auto_claimed_ = true;
+    } else if (memcmp(src_mac, primary_sensor_mac_, 6) != 0) {
+      return;  // Not the primary sensor — ignore
+    }
+  }
   indoor_temp_c_ = temp_c;
   has_indoor_temp_ = true;
   persist_indoor_fallback();
 }
 
-void ControllerApp::on_indoor_humidity(float humidity_pct) {
+void ControllerApp::on_indoor_humidity(float humidity_pct, const uint8_t *src_mac) {
+  if (src_mac != nullptr) {
+    if (is_broadcast_mac(primary_sensor_mac_)) {
+      memcpy(primary_sensor_mac_, src_mac, 6);
+      primary_sensor_auto_claimed_ = true;
+    } else if (memcmp(src_mac, primary_sensor_mac_, 6) != 0) {
+      return;
+    }
+  }
   indoor_humidity_pct_ = humidity_pct;
   has_indoor_humidity_ = true;
   persist_indoor_fallback();
+}
+
+void ControllerApp::set_primary_sensor_mac(const uint8_t *mac) {
+  if (mac != nullptr) {
+    memcpy(primary_sensor_mac_, mac, 6);
+  } else {
+    // Reset to broadcast (accept all)
+    memset(primary_sensor_mac_, 0xFF, 6);
+  }
+  primary_sensor_auto_claimed_ = false;
 }
 
 void ControllerApp::tick(uint32_t now_ms) {
@@ -198,6 +237,17 @@ void ControllerApp::persist_indoor_fallback() const {
   prefs.putFloat("indoor_h", indoor_humidity_pct_);
   prefs.end();
 #endif
+}
+
+void ControllerApp::set_outdoor_weather(float temp_c, const char *condition) {
+  outdoor_temp_c_ = temp_c;
+  has_outdoor_weather_ = true;
+  if (condition != nullptr) {
+    strncpy(outdoor_condition_, condition, sizeof(outdoor_condition_) - 1);
+    outdoor_condition_[sizeof(outdoor_condition_) - 1] = '\0';
+  } else {
+    outdoor_condition_[0] = '\0';
+  }
 }
 
 }  // namespace thermostat

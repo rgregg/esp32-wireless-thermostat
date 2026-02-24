@@ -222,6 +222,7 @@ lv_obj_t *g_indoor_label = nullptr;
 lv_obj_t *g_humidity_label = nullptr;
 lv_obj_t *g_setpoint_label = nullptr;
 lv_obj_t *g_weather_label = nullptr;
+lv_obj_t *g_weather_icon_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_screen_weather_label = nullptr;
 lv_obj_t *g_screen_indoor_label = nullptr;
@@ -279,6 +280,7 @@ String g_cfg_ota_password = THERMOSTAT_OTA_PASSWORD;
 uint8_t g_cfg_espnow_channel = THERMOSTAT_ESPNOW_CHANNEL;
 String g_cfg_espnow_peer_mac = THERMOSTAT_ESPNOW_PEER_MAC;
 String g_cfg_espnow_lmk = THERMOSTAT_ESPNOW_LMK;
+String g_cfg_controller_base_topic = "";
 uint32_t g_cfg_controller_timeout_ms = 30000;
 bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
@@ -354,6 +356,7 @@ void load_runtime_config() {
   g_cfg_espnow_channel = static_cast<uint8_t>(g_cfg.getUChar("esp_ch", g_cfg_espnow_channel));
   g_cfg_espnow_peer_mac = g_cfg.getString("esp_peer", g_cfg_espnow_peer_mac);
   g_cfg_espnow_lmk = g_cfg.getString("esp_lmk", g_cfg_espnow_lmk);
+  g_cfg_controller_base_topic = g_cfg.getString("ctrl_base", g_cfg_controller_base_topic);
   g_cfg_controller_timeout_ms = g_cfg.getUInt("ctrl_to", g_cfg_controller_timeout_ms);
   const uint32_t display_timeout_s = g_cfg.getUInt("disp_to_s", THERMOSTAT_DISPLAY_TIMEOUT_S);
   g_display_timeout_ms = display_timeout_s * 1000UL;
@@ -408,6 +411,7 @@ void publish_all_cfg_state() {
   publish_cfg_value("espnow_channel", String(g_cfg_espnow_channel));
   publish_cfg_value("espnow_peer_mac", g_cfg_espnow_peer_mac);
   publish_cfg_value("espnow_lmk", g_cfg_espnow_lmk);
+  publish_cfg_value("controller_base_topic", g_cfg_controller_base_topic);
   publish_cfg_value("controller_timeout_ms", String(g_cfg_controller_timeout_ms));
   publish_cfg_value("reboot_required", g_cfg_reboot_required ? "1" : "0");
 }
@@ -515,6 +519,9 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_espnow_lmk = value;
     g_cfg.putString("esp_lmk", value);
     g_cfg_reboot_required = true;
+  } else if (key == "controller_base_topic") {
+    g_cfg_controller_base_topic = value;
+    g_cfg.putString("ctrl_base", value);
   } else if (key == "controller_timeout_ms") {
     const long parsed = atol(raw_value);
     if (parsed < 1000 || parsed > 600000) return false;
@@ -741,6 +748,19 @@ bool fetch_pirateweather_current(float lat, float lon, float *temp_c_out, String
 }
 
 void poll_weather(uint32_t now_ms) {
+  // If controller is providing weather via ESP-NOW, update globals and skip self-polling.
+  if (g_runtime != nullptr && g_runtime->has_controller_weather()) {
+    if (!g_have_weather_data || g_runtime->last_controller_weather_ms() == 0) {
+      g_runtime->set_last_controller_weather_ms(now_ms);
+      g_have_weather_data = true;
+    }
+    // Only fall back to self-polling if no controller weather for 30 minutes.
+    constexpr uint32_t kControllerWeatherTimeoutMs = 30UL * 60UL * 1000UL;
+    if ((now_ms - g_runtime->last_controller_weather_ms()) < kControllerWeatherTimeoutMs) {
+      return;
+    }
+  }
+
   if (WiFi.status() != WL_CONNECTED) return;
   if (g_cfg_pirateweather_api_key.length() == 0 || g_cfg_pirateweather_zip.length() == 0) {
     g_have_weather_data = false;
@@ -866,6 +886,7 @@ void web_handle_config_get() {
   body += "\"espnow_channel\":" + String(g_cfg_espnow_channel) + ",";
   body += "\"espnow_peer_mac\":\"" + json_escape(g_cfg_espnow_peer_mac) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"controller_base_topic\":\"" + json_escape(g_cfg_controller_base_topic) + "\",";
   body += "\"controller_timeout_ms\":" + String(g_cfg_controller_timeout_ms) + ",";
   body += "\"reboot_required\":" + String(g_cfg_reboot_required ? "true" : "false");
   body += "}";
@@ -967,6 +988,7 @@ void web_handle_root() {
   html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
           g_cfg_espnow_peer_mac + "\"><br>";
   html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
+  html += "controller_base_topic: <input name=\"controller_base_topic\" value=\"" + g_cfg_controller_base_topic + "\"><br>";
   html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
 
   html += "<fieldset><legend>Hardware Settings</legend>";
@@ -1106,18 +1128,33 @@ void mqtt_publish_state() {
     g_mqtt.publish(topic_for("state/wifi_rssi").c_str(), buf, true);
   }
 
-  bool ok = false;
-  const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok);
-  if (ok) {
+  bool ok_temp = false;
+  const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok_temp);
+  if (ok_temp) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_c);
     g_mqtt.publish(topic_for("state/current_temp_c").c_str(), buf, true);
   }
 
-  ok = false;
-  const float indoor_h = parse_numeric_prefix(g_runtime->indoor_humidity_text(), &ok);
-  if (ok) {
+  bool ok_humidity = false;
+  const float indoor_h = parse_numeric_prefix(g_runtime->indoor_humidity_text(), &ok_humidity);
+  if (ok_humidity) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_h);
     g_mqtt.publish(topic_for("state/current_humidity").c_str(), buf, true);
+  }
+
+  // Publish sensor data to controller's topic namespace for MQTT-based intake
+  if (g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
+    String mac_str = WiFi.macAddress();
+    if (ok_temp) {
+      String topic = g_cfg_controller_base_topic + "/sensor/" + mac_str + "/temp_c";
+      snprintf(buf, sizeof(buf), "%.2f", indoor_c);
+      g_mqtt.publish(topic.c_str(), buf, false);
+    }
+    if (ok_humidity) {
+      String topic = g_cfg_controller_base_topic + "/sensor/" + mac_str + "/humidity";
+      snprintf(buf, sizeof(buf), "%.2f", indoor_h);
+      g_mqtt.publish(topic.c_str(), buf, false);
+    }
   }
 
   g_mqtt.publish(topic_for("state/status").c_str(), g_runtime->status_text(now).c_str(), true);
@@ -1128,25 +1165,11 @@ void mqtt_publish_discovery() {
 
   const String base = g_cfg_mqtt_base_topic;
   const String node = g_cfg_shared_device_id;
-  const String config_topic = g_cfg_discovery_prefix + "/climate/" + node +
-                              "/config";
+
+  // Climate entity is now published by the controller. Display publishes only
+  // display-specific entities (timeout, brightness, diagnostics).
 
   char payload[1500];
-  snprintf(
-      payload, sizeof(payload),
-      "{\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\",\"mode_cmd_t\":\"%s/cmd/"
-      "mode\",\"mode_stat_t\":\"%s/state/mode\",\"temp_cmd_t\":\"%s/cmd/target_temp_c\","
-      "\"temp_stat_t\":\"%s/state/target_temp_c\",\"curr_temp_t\":\"%s/state/current_temp_c\","
-      "\"fan_mode_cmd_t\":\"%s/cmd/fan_mode\",\"fan_mode_stat_t\":\"%s/state/fan_mode\","
-      "\"curr_hum_t\":\"%s/state/current_humidity\",\"modes\":[\"off\",\"heat\",\"cool\"],"
-      "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],\"avty_t\":\"%s/state/availability\","
-      "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"min_temp\":5,\"max_temp\":35,"
-      "\"temp_step\":0.5,\"temp_unit\":\"C\",\"dev\":{\"ids\":[\"%s\"],"
-      "\"name\":\"Wireless Thermostat System\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      node.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(),
-      base.c_str(), base.c_str(), base.c_str(), node.c_str());
-  g_mqtt.publish(config_topic.c_str(), payload, true);
-
   const String timeout_config = g_cfg_discovery_prefix + "/number/" + node +
                                 "_display_timeout/config";
   snprintf(payload, sizeof(payload),
@@ -1693,6 +1716,10 @@ void refresh_ui() {
   lv_label_set_text(g_humidity_label, g_runtime->indoor_humidity_text().c_str());
   lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
   lv_label_set_text(g_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
+  if (g_weather_icon_label != nullptr && g_have_weather_data) {
+    lv_label_set_text(g_weather_icon_label,
+                      thermostat::ui::weather_icon_symbol(g_runtime->weather_icon()));
+  }
 
   lv_label_set_text(g_screen_time_label, current_time_text().c_str());
   if (g_screen_weather_label != nullptr) {
@@ -1986,6 +2013,7 @@ void create_ui() {
   g_humidity_label = handles.humidity_label;
   g_setpoint_label = handles.setpoint_label;
   g_weather_label = handles.weather_label;
+  g_weather_icon_label = handles.weather_icon_label;
   g_screen_time_label = handles.screen_time_label;
   g_screen_weather_label = handles.screen_weather_label;
   g_screen_indoor_label = handles.screen_indoor_label;

@@ -35,9 +35,12 @@ constexpr uint32_t kColorBlack = 0x000000;
 // MQTT configuration
 constexpr const char *kDisplayBaseTopic = "thermostat/furnace-display";
 constexpr const char *kControllerBaseTopic = "thermostat/furnace-controller";
-constexpr const char *kMqttClientId = "sim-thermostat";
 constexpr const char *kMqttHost = "localhost";
 constexpr int kMqttPort = 1883;
+
+// Configurable via --mac and --id CLI flags
+std::string g_sim_wifi_mac = "AA:BB:CC:DD:EE:01";
+std::string g_mqtt_client_id = "sim-thermostat";
 
 SDL_Window *g_window = nullptr;
 SDL_Renderer *g_renderer = nullptr;
@@ -114,6 +117,9 @@ bool g_mqtt_first_attempt = true;
 constexpr uint32_t kHeartbeatIntervalMs = 10000;
 uint32_t g_last_heartbeat_ms = 0;
 
+// Furnace state (used by drift logic + MQTT message handler)
+FurnaceStateCode g_furnace_state = FurnaceStateCode::Error;
+
 // Simulated sensor/weather values
 float g_preview_indoor_c = 22.2f;
 float g_preview_humidity = 43.0f;
@@ -183,7 +189,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   // Accumulate controller state from individual MQTT topics.
   // The telemetry_seq topic carries the sequence number that ThermostatApp
   // uses for dedup — only feed telemetry to the app when seq changes.
-  static FurnaceStateCode s_state = FurnaceStateCode::Error;
+  FurnaceStateCode &s_state = g_furnace_state;
   static bool s_lockout = false;
   static uint8_t s_mode_code = 0;
   static uint8_t s_fan_code = 0;
@@ -222,6 +228,33 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     state_updated = true;
   }
 
+  // Weather from controller (simulates ESP-NOW WeatherData packet)
+  static float s_ctrl_outdoor_c = 0.0f;
+  static std::string s_ctrl_condition;
+  static bool s_ctrl_weather_received = false;
+
+  if (topic == controller_topic("state/outdoor_temp_c")) {
+    s_ctrl_outdoor_c = static_cast<float>(atof(payload.c_str()));
+    if (s_ctrl_weather_received) {
+      g_preview_outdoor_c = s_ctrl_outdoor_c;
+      g_preview_weather_condition = s_ctrl_condition;
+      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_condition);
+    }
+    s_ctrl_weather_received = true;
+    return;
+  }
+  if (topic == controller_topic("state/outdoor_condition")) {
+    s_ctrl_condition = payload;
+    if (s_ctrl_weather_received) {
+      g_preview_weather_condition = s_ctrl_condition;
+      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_condition);
+      printf("[MQTT RX] Weather from controller: %.1f C, %s\n",
+             static_cast<double>(s_ctrl_outdoor_c), s_ctrl_condition.c_str());
+    }
+    s_ctrl_weather_received = true;
+    return;
+  }
+
   if (!state_updated) return;
 
   // Always note heartbeat when we receive any controller state
@@ -244,6 +277,46 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   }
 }
 
+// Sensor publish interval
+constexpr uint32_t kSensorPublishIntervalMs = 10000;
+uint32_t g_last_sensor_publish_ms = 0;
+
+void tick_sensor_simulation() {
+  // Drift indoor temperature based on furnace state
+  if (g_furnace_state == FurnaceStateCode::HeatOn) {
+    g_preview_indoor_c += 0.0005f;
+  } else if (g_furnace_state == FurnaceStateCode::CoolOn) {
+    g_preview_indoor_c -= 0.0005f;
+  } else {
+    // Passive drift toward outdoor temperature
+    g_preview_indoor_c += (g_preview_outdoor_c - g_preview_indoor_c) * 0.00002f;
+  }
+
+  // Clamp to reasonable range
+  if (g_preview_indoor_c < 5.0f) g_preview_indoor_c = 5.0f;
+  if (g_preview_indoor_c > 40.0f) g_preview_indoor_c = 40.0f;
+
+  // Update display app with drifted values
+  g_display_app->on_local_sensor_update(g_preview_indoor_c, g_preview_humidity);
+
+  // Periodically publish sensor data to controller's MQTT topic
+  const uint32_t now = SDL_GetTicks();
+  if (g_mqtt_connected && (now - g_last_sensor_publish_ms) >= kSensorPublishIntervalMs) {
+    g_last_sensor_publish_ms = now;
+
+    char buf[16];
+    std::string temp_topic = std::string(kControllerBaseTopic) + "/sensor/" +
+                             g_sim_wifi_mac + "/temp_c";
+    snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(g_preview_indoor_c));
+    g_mqtt.publish(temp_topic, buf, false);
+
+    std::string hum_topic = std::string(kControllerBaseTopic) + "/sensor/" +
+                            g_sim_wifi_mac + "/humidity";
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(g_preview_humidity));
+    g_mqtt.publish(hum_topic, buf, false);
+  }
+}
+
 void ensure_mqtt_connected() {
   if (g_mqtt_connected) return;
 
@@ -253,7 +326,7 @@ void ensure_mqtt_connected() {
   g_last_mqtt_connect_attempt_ms = now;
 
   printf("[MQTT] Connecting to %s:%d...\n", kMqttHost, kMqttPort);
-  if (!g_mqtt.connect(kMqttHost, kMqttPort, kMqttClientId)) {
+  if (!g_mqtt.connect(kMqttHost, kMqttPort, g_mqtt_client_id.c_str())) {
     printf("[MQTT] Connect failed: %s\n", g_mqtt.last_error().c_str());
     return;
   }
@@ -397,7 +470,7 @@ void update_labels() {
       g_display_app->status_text(now, kControllerConnectionTimeoutMs);
 
   // Weather icon from display app
-  const char *weather_icon = LV_SYMBOL_IMAGE;
+  const char *weather_icon = thermostat::ui::weather_icon_symbol(g_display_app->weather_icon());
 
   // Live clock
   time_t raw_time;
@@ -474,7 +547,7 @@ void update_labels() {
              "last_cmd_ago_s: %lu",
              g_mqtt_connected ? "yes" : "no",
              kMqttHost, kMqttPort,
-             kMqttClientId,
+             g_mqtt_client_id.c_str(),
              kDisplayBaseTopic,
              static_cast<unsigned long>(cmd_ago_s));
   }
@@ -967,6 +1040,9 @@ int main(int argc, char **argv) {
     if (strcmp(argv[i], "--capture-dir") == 0 && (i + 1) < argc) {
       g_capture_dir = argv[++i];
       g_capture_mode = true;
+    } else if (strcmp(argv[i], "--mac") == 0 && (i + 1) < argc) {
+      g_sim_wifi_mac = argv[++i];
+      g_mqtt_client_id = "sim-display-" + g_sim_wifi_mac;
     }
   }
 
@@ -995,6 +1071,8 @@ int main(int argc, char **argv) {
     return ok ? 0 : 1;
   }
 
+  fprintf(stdout, "Sensor MAC: %s  MQTT client: %s\n",
+          g_sim_wifi_mac.c_str(), g_mqtt_client_id.c_str());
   fprintf(stdout, "Simulator controls:\n");
   fprintf(stdout, "  S = activate screensaver, D = wake display\n");
   fprintf(stdout, "  W = cycle weather, [ / ] = adjust outdoor temp\n");
@@ -1020,6 +1098,7 @@ int main(int argc, char **argv) {
       g_mqtt.publish(display_topic("state/packed_command"), buf, true);
     }
 
+    tick_sensor_simulation();
     g_screen.tick(now);
     show_page(g_screen.current_page());
     tick_lvgl();

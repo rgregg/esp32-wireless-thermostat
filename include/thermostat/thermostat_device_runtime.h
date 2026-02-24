@@ -55,10 +55,19 @@ class ThermostatDeviceRuntime {
   WeatherIcon weather_icon() const;
   uint32_t filter_runtime_hours() const;
 
+  bool has_controller_weather() const { return has_controller_weather_; }
+  void set_last_controller_weather_ms(uint32_t ms) { last_controller_weather_ms_ = ms; }
+  uint32_t last_controller_weather_ms() const { return last_controller_weather_ms_; }
+
  private:
+  static void on_weather_from_controller(float outdoor_temp_c, const char *condition,
+                                          void *ctx);
+
   ThermostatDeviceRuntimeConfig config_;
   ThermostatNode node_;
   ThermostatDisplayApp display_;
+  bool has_controller_weather_ = false;
+  uint32_t last_controller_weather_ms_ = 0;
 };
 
 }  // namespace thermostat

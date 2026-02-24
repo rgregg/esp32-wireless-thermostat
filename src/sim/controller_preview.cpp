@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -14,7 +15,9 @@
 #include "controller/controller_relay_io.h"
 #include "controller/controller_runtime.h"
 #include "espnow_cmd_word.h"
+#include "mqtt_payload.h"
 #include "sim_mqtt_client.h"
+#include "sim_weather_client.h"
 #include "thermostat/thermostat_state.h"
 
 namespace {
@@ -66,6 +69,16 @@ std::string display_topic(const char *suffix) {
 // SimControllerTransport: bridges ControllerApp telemetry to MQTT topics
 class SimControllerTransport : public thermostat::IControllerTransport {
  public:
+  void publish_weather(float outdoor_temp_c, const char *condition) override {
+    if (!g_mqtt_connected) return;
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(outdoor_temp_c));
+    g_mqtt.publish(ctrl_topic("state/outdoor_temp_c"), buf, true);
+    g_mqtt.publish(ctrl_topic("state/outdoor_condition"),
+                   condition != nullptr ? condition : "", true);
+  }
+
   void publish_telemetry(const thermostat::ControllerTelemetry &t) override {
     if (!g_mqtt_connected) return;
 
@@ -116,8 +129,22 @@ bool g_espnow_command_enabled = true;
 thermostat::ControllerRelayIo g_relay_io;
 
 // Simulated state
-float g_simulated_indoor_c = 20.0f;
 uint32_t g_start_time_ms = 0;
+
+// Simulated weather
+float g_simulated_outdoor_c = 15.0f;
+constexpr const char *kWeatherConditions[] = {
+    "Sunny", "Cloudy", "Rain", "Snow", "Fog", "Lightning"};
+constexpr int kWeatherConditionCount = 6;
+int g_weather_index = 1;  // Start at Cloudy
+bool g_weather_enabled = false;
+
+// Real weather polling via PirateWeather API
+constexpr uint32_t kWeatherPollMs = 15UL * 60UL * 1000UL;  // 15 minutes
+std::string g_pirateweather_api_key;
+std::string g_pirateweather_zip;
+uint32_t g_last_weather_poll_ms = 0;
+bool g_weather_api_configured = false;
 
 const char *mode_name(FurnaceMode mode) {
   switch (mode) {
@@ -128,30 +155,12 @@ const char *mode_name(FurnaceMode mode) {
   }
 }
 
-const char *mode_mqtt(FurnaceMode mode) {
-  switch (mode) {
-    case FurnaceMode::Off: return "off";
-    case FurnaceMode::Heat: return "heat";
-    case FurnaceMode::Cool: return "cool";
-    default: return "off";
-  }
-}
-
 const char *fan_mode_name(FanMode mode) {
   switch (mode) {
     case FanMode::Automatic: return "AUTO";
     case FanMode::AlwaysOn: return "ON";
     case FanMode::Circulate: return "CIRC";
     default: return "???";
-  }
-}
-
-const char *fan_mode_mqtt(FanMode mode) {
-  switch (mode) {
-    case FanMode::Automatic: return "auto";
-    case FanMode::AlwaysOn: return "on";
-    case FanMode::Circulate: return "circulate";
-    default: return "auto";
   }
 }
 
@@ -165,6 +174,42 @@ const char *hvac_state_name(FurnaceStateCode state) {
     case FurnaceStateCode::FanOn: return "Fan Running";
     case FurnaceStateCode::Error: return "ERROR";
     default: return "Unknown";
+  }
+}
+
+void load_dotenv() {
+  std::ifstream file(".env");
+  if (!file.is_open()) return;
+
+  std::string line;
+  while (std::getline(file, line)) {
+    // Skip empty lines and comments
+    size_t start = line.find_first_not_of(" \t");
+    if (start == std::string::npos || line[start] == '#') continue;
+
+    size_t eq = line.find('=', start);
+    if (eq == std::string::npos) continue;
+
+    std::string key = line.substr(start, eq - start);
+    std::string value = line.substr(eq + 1);
+
+    // Trim trailing whitespace from key
+    size_t end = key.find_last_not_of(" \t");
+    if (end != std::string::npos) key.erase(end + 1);
+
+    // Trim leading/trailing whitespace and optional quotes from value
+    start = value.find_first_not_of(" \t");
+    if (start != std::string::npos) value = value.substr(start);
+    end = value.find_last_not_of(" \t\r\n");
+    if (end != std::string::npos) value.erase(end + 1);
+    if (value.size() >= 2 &&
+        ((value.front() == '"' && value.back() == '"') ||
+         (value.front() == '\'' && value.back() == '\''))) {
+      value = value.substr(1, value.size() - 2);
+    }
+
+    // Don't overwrite existing env vars (0 = no overwrite)
+    setenv(key.c_str(), value.c_str(), 0);
   }
 }
 
@@ -187,6 +232,32 @@ void publish_controller_extras() {
                  rt.filter_runtime_hours() >= kFilterChangeThresholdHours ? "1" : "0", true);
 }
 
+// Parse sensor topic: {base}/sensor/{mac}/{suffix}
+// Returns true if topic matches, populating mac_out and suffix_out.
+bool parse_sensor_topic(const std::string &base, const std::string &topic,
+                        std::string &mac_out, std::string &suffix_out) {
+  const std::string prefix = base + "/sensor/";
+  if (topic.compare(0, prefix.size(), prefix) != 0) return false;
+  // MAC is 17 chars "AA:BB:CC:DD:EE:FF" followed by "/"
+  if (topic.size() < prefix.size() + 18) return false;
+  if (topic[prefix.size() + 17] != '/') return false;
+  mac_out = topic.substr(prefix.size(), 17);
+  suffix_out = topic.substr(prefix.size() + 18);
+  return !suffix_out.empty();
+}
+
+// Parse "AA:BB:CC:DD:EE:FF" into 6-byte array
+bool parse_mac_string(const std::string &mac_str, uint8_t out[6]) {
+  if (mac_str.size() != 17) return false;
+  unsigned int b[6];
+  if (sscanf(mac_str.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
+             &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
+    return false;
+  }
+  for (int i = 0; i < 6; ++i) out[i] = static_cast<uint8_t>(b[i]);
+  return true;
+}
+
 void on_mqtt_message(const std::string &topic, const std::string &payload) {
   const uint32_t now = SDL_GetTicks();
 
@@ -194,6 +265,23 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   if (topic.find("cmd/") != std::string::npos ||
       topic.find("packed_command") != std::string::npos) {
     g_last_mqtt_command_ms = now;
+  }
+
+  // MQTT sensor intake: {base}/sensor/{mac}/temp_c or humidity
+  std::string sensor_mac, sensor_suffix;
+  if (parse_sensor_topic(kControllerBaseTopic, topic, sensor_mac, sensor_suffix)) {
+    uint8_t parsed_mac[6];
+    if (parse_mac_string(sensor_mac, parsed_mac)) {
+      const float fval = static_cast<float>(atof(payload.c_str()));
+      if (sensor_suffix == "temp_c") {
+        g_app->on_indoor_temperature_c(fval, parsed_mac);
+        printf("[MQTT RX] sensor/%s/temp_c = %.2f\n", sensor_mac.c_str(),
+               static_cast<double>(fval));
+      } else if (sensor_suffix == "humidity") {
+        g_app->on_indoor_humidity(fval, parsed_mac);
+      }
+    }
+    return;
   }
 
   // Handle display's packed command (primary communication path)
@@ -217,16 +305,13 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   const auto &rt = g_app->runtime();
 
   if (topic == ctrl_topic("cmd/lockout")) {
-    bool lockout = (payload == "1" || payload == "true" || payload == "on");
-    g_app->set_hvac_lockout(lockout);
+    g_app->set_hvac_lockout(mqtt_payload::parse_bool(payload.c_str()));
     publish_controller_extras();
     return;
   }
 
   if (topic == ctrl_topic("cmd/mode")) {
-    FurnaceMode mode = FurnaceMode::Off;
-    if (payload == "heat") mode = FurnaceMode::Heat;
-    else if (payload == "cool") mode = FurnaceMode::Cool;
+    FurnaceMode mode = mqtt_payload::str_to_mode(payload.c_str());
 
     uint32_t packed = thermostat::build_packed_command(
         mode, rt.fan_mode(), rt.target_temperature_c(),
@@ -238,9 +323,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   }
 
   if (topic == ctrl_topic("cmd/fan_mode")) {
-    FanMode fan = FanMode::Automatic;
-    if (payload == "on" || payload == "always on") fan = FanMode::AlwaysOn;
-    else if (payload == "circulate") fan = FanMode::Circulate;
+    FanMode fan = mqtt_payload::str_to_fan(payload.c_str());
 
     uint32_t packed = thermostat::build_packed_command(
         rt.mode(), fan, rt.target_temperature_c(),
@@ -264,7 +347,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   }
 
   if (topic == ctrl_topic("cmd/filter_reset")) {
-    if (payload == "1" || payload == "true") {
+    if (mqtt_payload::parse_bool(payload.c_str())) {
       uint32_t packed = thermostat::build_packed_command(
           rt.mode(), rt.fan_mode(), rt.target_temperature_c(),
           static_cast<uint16_t>((now / 100) & 0x1FF), false, true);
@@ -305,6 +388,10 @@ void ensure_mqtt_connected() {
   g_mqtt.subscribe(ctrl_topic("cmd/target_temp_c"));
   g_mqtt.subscribe(ctrl_topic("cmd/filter_reset"));
   g_mqtt.subscribe(display_topic("state/packed_command"));
+
+  // Subscribe to sensor intake topics from display nodes
+  g_mqtt.subscribe(ctrl_topic("sensor/+/temp_c"));
+  g_mqtt.subscribe(ctrl_topic("sensor/+/humidity"));
 
   publish_controller_extras();
 }
@@ -440,7 +527,7 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   draw_text(g_font_small, x + 10, ly, buf, kColorYellow);
   ly += line_height;
 
-  snprintf(buf, sizeof(buf), "Indoor: %.1f C", g_simulated_indoor_c);
+  snprintf(buf, sizeof(buf), "Indoor: %.1f C", g_app->indoor_temperature_c());
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
   ly += line_height;
 
@@ -483,6 +570,20 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   // Filter runtime
   snprintf(buf, sizeof(buf), "Filter: %.1f hrs", g_app->runtime().filter_runtime_hours());
   draw_text(g_font_small, x + 10, ly, buf, kColorWhite);
+  ly += line_height;
+
+  // Weather
+  ly += 5;
+  if (g_weather_enabled) {
+    const char *cond = g_app->has_outdoor_weather()
+                           ? g_app->outdoor_condition()
+                           : kWeatherConditions[g_weather_index];
+    snprintf(buf, sizeof(buf), "Weather: %.1f C, %s",
+             static_cast<double>(g_simulated_outdoor_c), cond);
+    draw_text(g_font_small, x + 10, ly, buf, kColorLightBlue);
+  } else {
+    draw_text(g_font_small, x + 10, ly, "Weather: (disabled)", 0xFF888888);
+  }
   ly += line_height;
 
   // MQTT status
@@ -591,10 +692,10 @@ void draw_controls_panel(int x, int y, int w, int h) {
   const int line_height = 16;
   int ly = y + 35;
 
-  draw_text(g_font_small, x + 10, ly, "H/C/O - Mode (ESP-NOW)", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "F - Cycle fan", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "+/- Setpoint", kColorWhite); ly += line_height;
-  draw_text(g_font_small, x + 10, ly, "L - Lockout  Q - Quit", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "H/C/O - Mode  F - Fan", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "+/- Setpoint  L - Lock", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "W - Weather  [/] - Temp", kColorWhite); ly += line_height;
+  draw_text(g_font_small, x + 10, ly, "Q - Quit", kColorWhite); ly += line_height;
   if (!g_espnow_command_enabled) {
     draw_text(g_font_small, x + 10, ly, "MQTT hold: keys blocked", kColorYellow);
   }
@@ -724,6 +825,34 @@ void handle_keypress(SDL_Keycode key) {
       publish_controller_extras();
       break;
 
+    case SDLK_w: {
+      g_weather_enabled = true;
+      g_weather_index = (g_weather_index + 1) % kWeatherConditionCount;
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      printf("[SIM] Weather: %s, Outdoor: %.1f C\n",
+             kWeatherConditions[g_weather_index], static_cast<double>(g_simulated_outdoor_c));
+      break;
+    }
+
+    case SDLK_RIGHTBRACKET:
+      g_weather_enabled = true;
+      g_simulated_outdoor_c += 2.0f;
+      if (g_simulated_outdoor_c > 50.0f) g_simulated_outdoor_c = 50.0f;
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      printf("[SIM] Outdoor temp: %.1f C\n", static_cast<double>(g_simulated_outdoor_c));
+      break;
+
+    case SDLK_LEFTBRACKET:
+      g_weather_enabled = true;
+      g_simulated_outdoor_c -= 2.0f;
+      if (g_simulated_outdoor_c < -40.0f) g_simulated_outdoor_c = -40.0f;
+      g_app->set_outdoor_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      g_transport.publish_weather(g_simulated_outdoor_c, kWeatherConditions[g_weather_index]);
+      printf("[SIM] Outdoor temp: %.1f C\n", static_cast<double>(g_simulated_outdoor_c));
+      break;
+
     case SDLK_q:
     case SDLK_ESCAPE:
       g_running = false;
@@ -753,28 +882,12 @@ void tick_controller() {
       (static_cast<uint32_t>(now - g_last_mqtt_command_ms) < kMqttPrimaryHoldMs);
   g_espnow_command_enabled = !mqtt_primary_active;
 
-  // Feed simulated indoor temperature into the app — ControllerApp::tick()
-  // uses compute_hvac_calls() with proper deadband/overrun logic.
-  g_app->on_indoor_temperature_c(g_simulated_indoor_c);
+  // Indoor temperature now arrives via MQTT sensor intake from the display sim.
   g_app->tick(now);
 
   // Apply relay IO interlock layer on top of runtime demand
   auto snap = g_app->runtime().snapshot();
   g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
-
-  // Simulate temperature drift based on actual relay output (post-interlock)
-  const auto &relay_out = g_relay_io.latched_output();
-  if (relay_out.heat) {
-    g_simulated_indoor_c += 0.005f;  // Faster heating for demo
-  } else if (relay_out.cool) {
-    g_simulated_indoor_c -= 0.005f;  // Faster cooling for demo
-  } else {
-    const float outdoor = 15.0f;
-    g_simulated_indoor_c += (outdoor - g_simulated_indoor_c) * 0.0002f;
-  }
-
-  if (g_simulated_indoor_c < 5.0f) g_simulated_indoor_c = 5.0f;
-  if (g_simulated_indoor_c > 40.0f) g_simulated_indoor_c = 40.0f;
 
   // Publish relay/uptime extras periodically
   if (g_mqtt_connected && (now - g_last_state_publish_ms) > 5000) {
@@ -861,6 +974,44 @@ void shutdown() {
   g_app = nullptr;
 }
 
+void poll_weather() {
+  if (!g_weather_api_configured || g_app == nullptr) return;
+
+  const uint32_t now = SDL_GetTicks();
+  if (g_last_weather_poll_ms != 0 &&
+      (now - g_last_weather_poll_ms) < kWeatherPollMs) {
+    return;
+  }
+  g_last_weather_poll_ms = now;
+
+  printf("[Weather] Fetching weather for ZIP %s...\n", g_pirateweather_zip.c_str());
+
+  auto result = sim::fetch_weather(g_pirateweather_api_key, g_pirateweather_zip);
+  if (!result.ok) {
+    printf("[Weather] Fetch failed\n");
+    return;
+  }
+
+  printf("[Weather] %.1f C, %s\n",
+         static_cast<double>(result.temp_c), result.condition.c_str());
+
+  // Update simulator state
+  g_weather_enabled = true;
+  g_simulated_outdoor_c = result.temp_c;
+
+  // Find matching condition index for diagnostics panel display
+  for (int i = 0; i < kWeatherConditionCount; ++i) {
+    if (result.condition == kWeatherConditions[i]) {
+      g_weather_index = i;
+      break;
+    }
+  }
+
+  // Push into app and publish via MQTT
+  g_app->set_outdoor_weather(result.temp_c, result.condition.c_str());
+  g_transport.publish_weather(result.temp_c, result.condition.c_str());
+}
+
 }  // namespace
 
 int main(int /* argc */, char ** /* argv */) {
@@ -885,12 +1036,28 @@ int main(int /* argc */, char ** /* argv */) {
 
   g_mqtt.set_message_callback(on_mqtt_message);
 
+  load_dotenv();
+
+  // Check for PirateWeather API credentials
+  const char *pw_key = getenv("PIRATEWEATHER_API_KEY");
+  const char *pw_zip = getenv("PIRATEWEATHER_ZIP");
+  if (pw_key != nullptr && pw_key[0] != '\0' &&
+      pw_zip != nullptr && pw_zip[0] != '\0') {
+    g_pirateweather_api_key = pw_key;
+    g_pirateweather_zip = pw_zip;
+    g_weather_api_configured = true;
+    printf("PirateWeather API configured (ZIP: %s)\n", pw_zip);
+  } else {
+    printf("PirateWeather not configured (set PIRATEWEATHER_API_KEY and PIRATEWEATHER_ZIP)\n");
+  }
+
   printf("ESP32 Controller Simulator\n");
   printf("Connecting to MQTT broker at %s:%d\n", kMqttHost, kMqttPort);
 
   while (g_running) {
     ensure_mqtt_connected();
     g_mqtt.loop();
+    poll_weather();
     process_events();
     tick_controller();
     render_board();

@@ -7,6 +7,8 @@
 #include "thermostat_types.h"
 #include "thermostat/display_model.h"
 
+using thermostat::WeatherIcon;
+
 namespace thermostat {
 namespace ui {
 
@@ -70,6 +72,9 @@ void set_fan_button_state(FanMode mode);
 void set_temperature_unit_button_state(TemperatureUnit unit);
 void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label,
                                lv_obj_t *indoor_label, uint32_t minute_index);
+
+const lv_font_t *font_mdi_weather_30();
+const char *weather_icon_symbol(WeatherIcon icon);
 
 }  // namespace ui
 }  // namespace thermostat
