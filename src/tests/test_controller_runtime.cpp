@@ -134,4 +134,60 @@ TEST_CASE(controller_runtime_reset_remote_command_sequence_allows_reseed) {
   rt.reset_remote_command_sequence();
   ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
 }
+
+TEST_CASE(controller_runtime_per_source_sequence_tracking) {
+  thermostat::ControllerRuntime rt;
+
+  // Two different source MACs
+  const uint8_t mac_a[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+  const uint8_t mac_b[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
+
+  // Source A sends seq=1
+  CommandWord cmd;
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 210;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_a).accepted);
+
+  // Source B also sends seq=1 — should be accepted (independent sequence)
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.setpoint_decic = 240;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_b).accepted);
+
+  // Source A sends seq=2 — accepted
+  cmd.seq = 2;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_a).accepted);
+
+  // Source A sends seq=1 again — stale
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_a).stale_or_duplicate);
+
+  // Source B sends seq=2 — accepted
+  cmd.seq = 2;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_b).accepted);
+
+  // Reset clears all sources
+  rt.reset_remote_command_sequence();
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_a).accepted);
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_b).accepted);
+}
+
+TEST_CASE(controller_runtime_null_source_uses_default_sequence) {
+  thermostat::ControllerRuntime rt;
+
+  CommandWord cmd;
+  cmd.seq = 5;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, nullptr).accepted);
+
+  // Same seq without source — duplicate
+  ASSERT_TRUE(rt.apply_remote_command(cmd, nullptr).stale_or_duplicate);
+
+  // Different source MAC with same seq — accepted (independent)
+  const uint8_t mac_a[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+  cmd.seq = 5;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac_a).accepted);
+}
 #endif

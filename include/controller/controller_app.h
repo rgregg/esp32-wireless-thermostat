@@ -21,6 +21,10 @@ class IControllerTransport {
   virtual ~IControllerTransport() = default;
 
   virtual void publish_telemetry(const ControllerTelemetry &telemetry) = 0;
+  virtual void publish_weather(float outdoor_temp_c, const char *condition) {
+    (void)outdoor_temp_c;
+    (void)condition;
+  }
 };
 
 class ControllerApp {
@@ -29,13 +33,24 @@ class ControllerApp {
                 const ControllerConfig &config = ControllerConfig());
 
   void on_heartbeat(uint32_t now_ms);
-  CommandApplyResult on_command_word(uint32_t packed_word);
+  CommandApplyResult on_command_word(uint32_t packed_word,
+                                    const uint8_t *source_mac = nullptr);
   void on_thermostat_ack(uint16_t seq);
   void set_hvac_lockout(bool locked);
   void reset_remote_command_sequence();
 
-  void on_indoor_temperature_c(float temp_c);
-  void on_indoor_humidity(float humidity_pct);
+  // Weather state: controller stores latest weather for MQTT publishing
+  void set_outdoor_weather(float temp_c, const char *condition);
+  bool has_outdoor_weather() const { return has_outdoor_weather_; }
+  float outdoor_temp_c() const { return outdoor_temp_c_; }
+  const char *outdoor_condition() const { return outdoor_condition_; }
+
+  void on_indoor_temperature_c(float temp_c, const uint8_t *src_mac = nullptr);
+  void on_indoor_humidity(float humidity_pct, const uint8_t *src_mac = nullptr);
+
+  void set_primary_sensor_mac(const uint8_t *mac);
+  const uint8_t *primary_sensor_mac() const { return primary_sensor_mac_; }
+  bool primary_sensor_auto_claimed() const { return primary_sensor_auto_claimed_; }
 
   // Automatic HVAC calls derived from mode + setpoint + indoor temperature.
   void tick(uint32_t now_ms);
@@ -47,6 +62,8 @@ class ControllerApp {
 
   bool has_indoor_temperature() const { return has_indoor_temp_; }
   float indoor_temperature_c() const { return indoor_temp_c_; }
+  bool has_indoor_humidity() const { return has_indoor_humidity_; }
+  float indoor_humidity_pct() const { return indoor_humidity_pct_; }
 
  private:
   void load_persisted_indoor_fallback();
@@ -72,6 +89,13 @@ class ControllerApp {
   uint16_t last_acked_seq_ = 0;
   bool has_last_published_ = false;
   ControllerTelemetry last_published_{};
+
+  uint8_t primary_sensor_mac_[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  bool primary_sensor_auto_claimed_ = false;
+
+  bool has_outdoor_weather_ = false;
+  float outdoor_temp_c_ = 0.0f;
+  char outdoor_condition_[24] = {};
 };
 
 }  // namespace thermostat

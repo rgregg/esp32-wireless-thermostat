@@ -74,8 +74,8 @@ RGB data pins (`D0..D15`):
 - If using encrypted ESP-NOW, configure unicast peer MACs and a shared 16-byte LMK on both units.
 
 ## Enclosures (3D Print Files)
-- Controller enclosure CAD: `enclosures/Furnace Controller Encolsure v20.f3d`
-- Thermostat display enclosure CAD: `enclosures/Thermostat Display v27.f3d`
+- Controller enclosure CAD: [`enclosures/controller_v20.f3d`](../enclosures/controller_v20.f3d)
+- Thermostat display enclosure CAD: [`enclosures/display_v27.f3d`](../enclosures/display_v27.f3d)
 - For fire compliance, print with a UL-listed filament such as Prusament PETG V0 (or equivalent UL-listed V0-rated material).
 
 ## Out of Scope in Current Firmware

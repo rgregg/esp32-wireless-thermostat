@@ -28,7 +28,9 @@ Installed near the furnace. Connects to HVAC wiring via relay outputs (heat, coo
 |---|---|
 | ESP32 4-relay controller board | [Amazon](https://www.amazon.com/dp/B0DNYYXQ3X) |
 | AC-to-DC power supply (furnace side) | [Amazon](https://www.amazon.com/dp/B08Q81Y8NM) |
-| 3D-printable enclosure | [`enclosures/Furnace Controller Enclosure v20.f3d`](enclosures/Furnace%20Controller%20Encolsure%20v20.f3d) |
+| 3D-printable enclosure | [`enclosures/controller_v20.f3d`](enclosures/controller_v20.f3d) |
+
+![Controller Enclosure](enclosures/controller_rendering.png)
 
 ### Thermostat Display Unit
 
@@ -38,7 +40,9 @@ Wall-mounted touchscreen with built-in temperature/humidity sensor.
 |---|---|
 | ESP32-S3 4.3" capacitive touch display | [Amazon](https://www.amazon.com/dp/B0CLGCMWQ7) |
 | AHT10/AHT20 temperature & humidity sensor | [Amazon](https://www.amazon.com/dp/B092495GZJ) |
-| 3D-printable enclosure | [`enclosures/Thermostat Display v27.f3d`](enclosures/Thermostat%20Display%20v27.f3d) |
+| 3D-printable enclosure | [`enclosures/display_v27.f3d`](enclosures/display_v27.f3d) |
+
+![Display Enclosure](enclosures/display_rendering.png)
 
 The sensor connects to the display board via I2C (SDA=GPIO 18, SCL=GPIO 17). See [`docs/hardware-requirements.md`](docs/hardware-requirements.md) for full GPIO pinouts and wiring details.
 

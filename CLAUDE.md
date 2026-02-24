@@ -51,6 +51,15 @@
 5.  **Document Results**: Add review section to `tasks/todo.md`\
 6.  **Capture Lessons**: Update `tasks/lessons.md` after corrections
 
+## Code Sharing: Simulator and Firmware
+
+The simulator (`src/sim/`) and firmware (`src/esp32_controller_main.cpp`) share core logic via platform-agnostic headers in `include/`. When adding or modifying logic that exists in both contexts:
+
+-   **Never duplicate** enum conversions, payload parsing, or business logic between sim and firmware. Extract shared code into a header-only utility in `include/` using `const char *` interfaces.
+-   **Check for existing shared headers** before writing inline logic: `mqtt_payload.h` (mode/fan/bool parsing), `command_builder.h`, `espnow_cmd_word.h`, `controller/pirateweather.h`.
+-   **Don't over-abstract** trivial patterns where the sim and firmware use fundamentally different types (e.g., `std::string` vs Arduino `String` for topic construction). Only extract when the logic is non-trivial or error-prone.
+-   **Keep shared headers platform-agnostic**: no Arduino types, no SDL types, no `std::string`. Use C-compatible types (`const char *`, `float`, enums).
+
 ## Core Principles
 
 -   **Simplicity First**: Make every change as simple as possible.  Impact minimal code.

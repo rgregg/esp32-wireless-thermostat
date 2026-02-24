@@ -29,6 +29,8 @@ struct EspNowThermostatConfig {
 using ThermostatHeartbeatCallback = void (*)(uint32_t now_ms, void *ctx);
 using ThermostatTelemetryCallback =
     void (*)(const ThermostatControllerTelemetry &telemetry, void *ctx);
+using ThermostatWeatherCallback =
+    void (*)(float outdoor_temp_c, const char *condition, void *ctx);
 
 class EspNowThermostatTransport final : public IThermostatTransport {
  public:
@@ -38,6 +40,7 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   void set_callbacks(ThermostatHeartbeatCallback heartbeat_cb,
                      ThermostatTelemetryCallback telemetry_cb,
                      void *callback_context);
+  void set_weather_callback(ThermostatWeatherCallback weather_cb);
 
   void publish_command_word(uint32_t packed_word) override;
   void publish_controller_ack(uint16_t seq) override;
@@ -59,6 +62,7 @@ class EspNowThermostatTransport final : public IThermostatTransport {
 
   ThermostatHeartbeatCallback heartbeat_cb_ = nullptr;
   ThermostatTelemetryCallback telemetry_cb_ = nullptr;
+  ThermostatWeatherCallback weather_cb_ = nullptr;
   void *callback_context_ = nullptr;
 
   static EspNowThermostatTransport *instance_;
