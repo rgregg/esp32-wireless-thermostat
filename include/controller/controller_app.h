@@ -67,8 +67,9 @@ class ControllerApp {
   float indoor_humidity_pct() const { return indoor_humidity_pct_; }
 
  private:
-  void load_persisted_indoor_fallback();
-  void persist_indoor_fallback() const;
+  void load_persisted_state();
+  void persist_indoor_state() const;
+  void maybe_persist_filter_runtime();
   bool telemetry_payload_changed(const ControllerTelemetry &next) const;
   static bool is_newer_u16(uint16_t previous, uint16_t incoming);
   static uint8_t mode_to_code(FurnaceMode mode);
@@ -97,6 +98,8 @@ class ControllerApp {
   bool has_outdoor_weather_ = false;
   float outdoor_temp_c_ = 0.0f;
   WeatherIcon outdoor_icon_ = WeatherIcon::Unknown;
+
+  uint32_t persisted_filter_runtime_s_ = 0;
 };
 
 }  // namespace thermostat

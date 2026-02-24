@@ -63,6 +63,7 @@ class ControllerRuntime {
   uint32_t heartbeat_last_seen_ms() const { return heartbeat_last_seen_ms_; }
 
   uint32_t filter_runtime_seconds() const { return filter_runtime_seconds_; }
+  void set_filter_runtime_seconds(uint32_t v) { filter_runtime_seconds_ = v; }
   float filter_runtime_hours() const {
     return static_cast<float>(filter_runtime_seconds_) / 3600.0f;
   }

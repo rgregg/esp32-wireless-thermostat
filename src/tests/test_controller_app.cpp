@@ -162,4 +162,28 @@ TEST_CASE(controller_app_nullptr_mac_always_accepted) {
   app.on_indoor_temperature_c(25.0f);
   ASSERT_TRUE(app.indoor_temperature_c() == 25.0f);
 }
+
+TEST_CASE(controller_app_set_filter_runtime_seconds_loads_into_runtime) {
+  // Verify ControllerRuntime::set_filter_runtime_seconds can inject a persisted value
+  // (this simulates what ControllerApp does on boot when loading from NVS)
+  thermostat::ControllerConfig cfg;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_idle_time_ms = 0;
+  thermostat::ControllerRuntime rt(cfg);
+
+  // Directly set a persisted value (simulates loading from NVS on boot)
+  ASSERT_EQ(rt.filter_runtime_seconds(), static_cast<uint32_t>(0));
+  rt.set_filter_runtime_seconds(7200);
+  ASSERT_EQ(rt.filter_runtime_seconds(), static_cast<uint32_t>(7200));
+
+  // tick() should not reset it when no HVAC is active
+  rt.note_heartbeat(1000);
+  thermostat::ControllerTickInput in;
+  in.now_ms = 2000;
+  rt.tick(in);
+  ASSERT_EQ(rt.filter_runtime_seconds(), static_cast<uint32_t>(7200));
+}
 #endif
