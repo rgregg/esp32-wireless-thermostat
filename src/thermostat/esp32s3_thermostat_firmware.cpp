@@ -3,6 +3,7 @@
 #include "thermostat/esp32s3_thermostat_firmware.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <ctime>
 #include <cstdio>
@@ -852,6 +853,22 @@ String json_escape(const String &in) {
   return out;
 }
 
+String html_escape(const String &in) {
+  String out;
+  out.reserve(in.length() + 16);
+  for (size_t i = 0; i < in.length(); ++i) {
+    const char c = in[i];
+    switch (c) {
+      case '&': out += "&amp;"; break;
+      case '"': out += "&quot;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      default: out += c; break;
+    }
+  }
+  return out;
+}
+
 void web_handle_config_get() {
   String body = "{";
   body += "\"wifi_ssid\":\"" + json_escape(g_cfg_wifi_ssid) + "\",";
@@ -964,22 +981,22 @@ void web_handle_root() {
 
   html += "<fieldset><legend>Networking Settings</legend>";
   html += "<form method=\"post\" action=\"/config\">";
-  html += "wifi_ssid: <input name=\"wifi_ssid\" maxlength=\"64\" value=\"" + g_cfg_wifi_ssid +
+  html += "wifi_ssid: <input name=\"wifi_ssid\" maxlength=\"64\" value=\"" + html_escape(g_cfg_wifi_ssid) +
           "\"><br>";
   html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
-  html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + g_cfg_mqtt_host + "\"><br>";
+  html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + html_escape(g_cfg_mqtt_host) + "\"><br>";
   html += "mqtt_port: <input name=\"mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" value=\"" +
           String(g_cfg_mqtt_port) + "\"><br>";
-  html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + g_cfg_mqtt_user + "\"><br>";
+  html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + html_escape(g_cfg_mqtt_user) + "\"><br>";
   html += "mqtt_password: <input name=\"mqtt_password\" value=\"\"><br>";
-  html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + g_cfg_mqtt_client_id + "\"><br>";
-  html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + g_cfg_mqtt_base_topic + "\"><br>";
+  html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + html_escape(g_cfg_mqtt_client_id) + "\"><br>";
+  html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + html_escape(g_cfg_mqtt_base_topic) + "\"><br>";
   html += "espnow_channel: <input name=\"espnow_channel\" type=\"number\" min=\"1\" max=\"14\" step=\"1\" value=\"" +
           String(g_cfg_espnow_channel) + "\"><br>";
   html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
-          g_cfg_espnow_peer_mac + "\"><br>";
+          html_escape(g_cfg_espnow_peer_mac) + "\"><br>";
   html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
-  html += "controller_base_topic: <input name=\"controller_base_topic\" value=\"" + g_cfg_controller_base_topic + "\"><br>";
+  html += "controller_base_topic: <input name=\"controller_base_topic\" value=\"" + html_escape(g_cfg_controller_base_topic) + "\"><br>";
   html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
 
   html += "<fieldset><legend>Hardware Settings</legend>";
@@ -988,7 +1005,7 @@ void web_handle_root() {
           String(g_cfg_temp_comp_c, 2) + "\"><br>";
   html += "controller_timeout_ms: <input name=\"controller_timeout_ms\" type=\"number\" min=\"1000\" max=\"600000\" step=\"1\" value=\"" +
           String(g_cfg_controller_timeout_ms) + "\"><br>";
-  html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + g_cfg_ota_hostname + "\"><br>";
+  html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + html_escape(g_cfg_ota_hostname) + "\"><br>";
   html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
   html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
 
@@ -1008,14 +1025,14 @@ void web_handle_root() {
   html += "<form method=\"post\" action=\"/config\">";
   html += "pirateweather_api_key: <input name=\"pirateweather_api_key\" value=\"\"><br>";
   html += "pirateweather_zip: <input name=\"pirateweather_zip\" pattern=\"^[0-9]{5}(-[0-9]{4})?$\" title=\"US ZIP format: 12345 or 12345-6789\" value=\"" +
-          g_cfg_pirateweather_zip + "\"><br>";
+          html_escape(g_cfg_pirateweather_zip) + "\"><br>";
   html += "<button type=\"submit\">Save Weather</button></form></fieldset>";
 
   html += "<fieldset><legend>Miscellaneous</legend>";
   html += "<form method=\"post\" action=\"/config\">";
-  html += "discovery_prefix: <input name=\"discovery_prefix\" value=\"" + g_cfg_discovery_prefix +
+  html += "discovery_prefix: <input name=\"discovery_prefix\" value=\"" + html_escape(g_cfg_discovery_prefix) +
           "\"><br>";
-  html += "shared_device_id: <input name=\"shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" + g_cfg_shared_device_id +
+  html += "shared_device_id: <input name=\"shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" + html_escape(g_cfg_shared_device_id) +
           "\"><br>";
   html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
 
@@ -1353,7 +1370,10 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       g_runtime->on_user_set_fan_mode(FanMode::Automatic, now);
     }
   } else if (topic_str == topic_for("cmd/target_temp_c")) {
-    const float celsius = static_cast<float>(atof(value));
+    float celsius = static_cast<float>(atof(value));
+    if (!std::isfinite(celsius)) return;
+    if (celsius < 0.0f) celsius = 0.0f;
+    if (celsius > 40.0f) celsius = 40.0f;
     g_runtime->on_user_set_setpoint_c(celsius, now);
   } else if (topic_str == topic_for("cmd/unit")) {
     g_cfg_temp_unit_f = strcmp(normalized, "f") == 0 || strcmp(normalized, "fahrenheit") == 0;
@@ -1380,7 +1400,11 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       g_runtime->request_filter_reset(now);
     }
   } else if (topic_str == topic_for("cmd/temp_comp_c")) {
-    g_cfg_temp_comp_c = static_cast<float>(atof(value));
+    float comp = static_cast<float>(atof(value));
+    if (!std::isfinite(comp)) return;
+    if (comp < -10.0f) comp = -10.0f;
+    if (comp > 10.0f) comp = 10.0f;
+    g_cfg_temp_comp_c = comp;
     g_runtime->set_local_temperature_compensation_c(g_cfg_temp_comp_c);
     if (g_cfg_ready) {
       g_cfg.putFloat("temp_comp", g_cfg_temp_comp_c);
