@@ -2,12 +2,14 @@
 
 #include <string>
 
+#include "weather_icon.h"
+
 namespace sim {
 
 struct WeatherResult {
   bool ok = false;
   float temp_c = 0.0f;
-  std::string condition;
+  thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
 };
 
 // Fetch current weather from PirateWeather API using libcurl.

@@ -9,7 +9,7 @@ TEST_CASE(display_model_units_and_weather) {
   m.set_temperature_unit(thermostat::TemperatureUnit::Fahrenheit);
   m.set_local_setpoint_c(20.0f);
   m.set_outdoor_temperature_c(0.0f);
-  m.set_weather_condition("Partly Cloudy");
+  m.set_weather_icon(thermostat::WeatherIcon::PartlyCloudy);
 
   ASSERT_TRUE(m.format_setpoint_text() == "68");
   ASSERT_TRUE(m.weather_icon() == thermostat::WeatherIcon::PartlyCloudy);

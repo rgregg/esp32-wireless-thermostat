@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "controller/controller_runtime.h"
+#include "weather_icon.h"
 
 namespace thermostat {
 
@@ -21,9 +22,9 @@ class IControllerTransport {
   virtual ~IControllerTransport() = default;
 
   virtual void publish_telemetry(const ControllerTelemetry &telemetry) = 0;
-  virtual void publish_weather(float outdoor_temp_c, const char *condition) {
+  virtual void publish_weather(float outdoor_temp_c, WeatherIcon icon) {
     (void)outdoor_temp_c;
-    (void)condition;
+    (void)icon;
   }
 };
 
@@ -40,10 +41,10 @@ class ControllerApp {
   void reset_remote_command_sequence();
 
   // Weather state: controller stores latest weather for MQTT publishing
-  void set_outdoor_weather(float temp_c, const char *condition);
+  void set_outdoor_weather(float temp_c, WeatherIcon icon);
   bool has_outdoor_weather() const { return has_outdoor_weather_; }
   float outdoor_temp_c() const { return outdoor_temp_c_; }
-  const char *outdoor_condition() const { return outdoor_condition_; }
+  WeatherIcon outdoor_icon() const { return outdoor_icon_; }
 
   void on_indoor_temperature_c(float temp_c, const uint8_t *src_mac = nullptr);
   void on_indoor_humidity(float humidity_pct, const uint8_t *src_mac = nullptr);
@@ -95,7 +96,7 @@ class ControllerApp {
 
   bool has_outdoor_weather_ = false;
   float outdoor_temp_c_ = 0.0f;
-  char outdoor_condition_[24] = {};
+  WeatherIcon outdoor_icon_ = WeatherIcon::Unknown;
 };
 
 }  // namespace thermostat

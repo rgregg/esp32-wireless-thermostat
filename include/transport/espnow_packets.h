@@ -4,8 +4,7 @@
 
 namespace thermostat {
 
-constexpr uint8_t kEspNowProtocolVersion = 2;
-constexpr uint8_t kEspNowProtocolVersionV1 = 1;
+constexpr uint8_t kEspNowProtocolVersion = 3;
 
 enum class PacketType : uint8_t {
   Heartbeat = 1,
@@ -57,12 +56,13 @@ struct ControllerAckPacket {
 struct WeatherDataPacket {
   PacketHeader header;
   float outdoor_temp_c;
-  char condition[24];
+  uint8_t weather_icon;
 };
+
 #pragma pack(pop)
 
 inline bool is_compatible_protocol_version(uint8_t version) {
-  return version == kEspNowProtocolVersion || version == kEspNowProtocolVersionV1;
+  return version == kEspNowProtocolVersion;
 }
 
 }  // namespace thermostat

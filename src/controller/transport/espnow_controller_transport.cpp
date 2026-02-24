@@ -152,7 +152,7 @@ void EspNowControllerTransport::publish_telemetry(
 }
 
 void EspNowControllerTransport::publish_weather(float outdoor_temp_c,
-                                                 const char *condition) {
+                                                 WeatherIcon icon) {
   if (!initialized_) {
     return;
   }
@@ -162,10 +162,7 @@ void EspNowControllerTransport::publish_weather(float outdoor_temp_c,
   pkt.header.type = static_cast<uint8_t>(PacketType::WeatherData);
   pkt.header.version = kEspNowProtocolVersion;
   pkt.outdoor_temp_c = outdoor_temp_c;
-  if (condition != nullptr) {
-    strncpy(pkt.condition, condition, sizeof(pkt.condition) - 1);
-    pkt.condition[sizeof(pkt.condition) - 1] = '\0';
-  }
+  pkt.weather_icon = static_cast<uint8_t>(icon);
 
   send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }

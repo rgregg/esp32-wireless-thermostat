@@ -11,11 +11,11 @@ ThermostatDeviceRuntime::ThermostatDeviceRuntime(
 bool ThermostatDeviceRuntime::begin() { return node_.begin(); }
 
 void ThermostatDeviceRuntime::on_weather_from_controller(float outdoor_temp_c,
-                                                          const char *condition,
+                                                          WeatherIcon icon,
                                                           void *ctx) {
   if (ctx == nullptr) return;
   auto *self = static_cast<ThermostatDeviceRuntime *>(ctx);
-  self->display_.on_outdoor_weather_update(outdoor_temp_c, std::string(condition));
+  self->display_.on_outdoor_weather_update(outdoor_temp_c, icon);
   self->last_controller_weather_ms_ = 0;  // mark as received; firmware sets actual timestamp
   self->has_controller_weather_ = true;
 }
@@ -31,8 +31,8 @@ void ThermostatDeviceRuntime::on_local_sensor_update(float indoor_temp_c,
 }
 
 void ThermostatDeviceRuntime::on_outdoor_weather_update(float outdoor_temp_c,
-                                                        const std::string &condition) {
-  display_.on_outdoor_weather_update(outdoor_temp_c, condition);
+                                                        WeatherIcon icon) {
+  display_.on_outdoor_weather_update(outdoor_temp_c, icon);
 }
 
 void ThermostatDeviceRuntime::on_user_set_setpoint(float user_value, uint32_t now_ms) {
@@ -111,6 +111,10 @@ uint32_t ThermostatDeviceRuntime::espnow_send_fail_count() const {
   return node_.transport().send_fail_count();
 }
 
+FurnaceStateCode ThermostatDeviceRuntime::controller_state() const {
+  return display_.controller_state();
+}
+
 std::string ThermostatDeviceRuntime::status_text(uint32_t now_ms) const {
   return display_.status_text(now_ms, config_.controller_connection_timeout_ms);
 }
@@ -132,5 +136,9 @@ std::string ThermostatDeviceRuntime::weather_text() const {
 }
 
 WeatherIcon ThermostatDeviceRuntime::weather_icon() const { return display_.weather_icon(); }
+
+uint32_t ThermostatDeviceRuntime::filter_runtime_hours() const {
+  return display_.filter_runtime_hours();
+}
 
 }  // namespace thermostat

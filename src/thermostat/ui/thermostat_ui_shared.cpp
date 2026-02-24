@@ -358,7 +358,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *outdoor_title = lv_label_create(left_col);
   lv_label_set_text(outdoor_title, "OUTDOOR");
-  style_label(outdoor_title, font30());
+  style_label(outdoor_title, font20());
   lv_obj_set_width(outdoor_title, LV_PCT(100));
   lv_obj_set_style_text_align(outdoor_title, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
@@ -381,7 +381,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_style_text_align(out_handles->weather_icon_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   out_handles->weather_label = lv_label_create(weather_row);
-  lv_label_set_text(out_handles->weather_label, "80° / 55% Humidity");
+  lv_label_set_text(out_handles->weather_label, "---");
   style_label(out_handles->weather_label, font30());
   lv_obj_set_width(out_handles->weather_label, 260);
   lv_obj_set_style_text_align(out_handles->weather_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
@@ -390,7 +390,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *status_title = lv_label_create(left_col);
   lv_label_set_text(status_title, "STATUS");
-  style_label(status_title, font30());
+  style_label(status_title, font20());
   lv_obj_set_width(status_title, LV_PCT(100));
   lv_obj_set_style_text_align(status_title, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
@@ -402,7 +402,7 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_style_line_opa(status_line, LV_OPA_70, LV_PART_MAIN);
 
   out_handles->status_label = lv_label_create(left_col);
-  lv_label_set_text(out_handles->status_label, "cool mode");
+  lv_label_set_text(out_handles->status_label, "---");
   style_label(out_handles->status_label, font30());
   lv_obj_set_width(out_handles->status_label, LV_PCT(100));
   lv_obj_set_style_text_align(out_handles->status_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
@@ -424,22 +424,30 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *indoor_title = lv_label_create(mid_col);
   lv_label_set_text(indoor_title, "INDOOR");
-  style_label(indoor_title, font30());
+  style_label(indoor_title, font20());
   lv_obj_set_width(indoor_title, LV_PCT(100));
   lv_obj_set_style_text_align(indoor_title, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   out_handles->indoor_label = lv_label_create(mid_col);
-  lv_label_set_text(out_handles->indoor_label, "N/A");
+  lv_label_set_text(out_handles->indoor_label, "---");
   style_indoor_temp_label(out_handles->indoor_label);
   lv_obj_set_width(out_handles->indoor_label, LV_PCT(100));
   lv_obj_set_height(out_handles->indoor_label, LV_SIZE_CONTENT);
   lv_obj_set_style_text_align(out_handles->indoor_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
   out_handles->humidity_label = lv_label_create(mid_col);
-  lv_label_set_text(out_handles->humidity_label, "45% Humidity");
+  lv_label_set_text(out_handles->humidity_label, "---");
   style_label(out_handles->humidity_label, font30());
   lv_obj_set_width(out_handles->humidity_label, LV_PCT(100));
   lv_obj_set_style_text_align(out_handles->humidity_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+  out_handles->filter_label = lv_label_create(mid_col);
+  lv_label_set_text(out_handles->filter_label, "");
+  style_label(out_handles->filter_label, font30());
+  lv_obj_set_width(out_handles->filter_label, LV_PCT(100));
+  lv_obj_set_style_text_align(out_handles->filter_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(out_handles->filter_label, lv_color_hex(0xFF6600), LV_PART_MAIN);
+  lv_obj_add_flag(out_handles->filter_label, LV_OBJ_FLAG_HIDDEN);
 
   out_handles->setpoint_column = make_transparent(home_root, 130, LV_PCT(100));
   lv_obj_set_layout(out_handles->setpoint_column, LV_LAYOUT_FLEX);
@@ -478,12 +486,12 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *set_title = lv_label_create(set_obj);
   lv_label_set_text(set_title, "SET TO");
-  style_label(set_title, font30());
+  style_label(set_title, font20());
   lv_obj_set_width(set_title, LV_PCT(100));
   lv_obj_set_style_text_align(set_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
   out_handles->setpoint_label = lv_label_create(set_obj);
-  lv_label_set_text(out_handles->setpoint_label, "68");
+  lv_label_set_text(out_handles->setpoint_label, "--");
   lv_label_set_long_mode(out_handles->setpoint_label, LV_LABEL_LONG_CLIP);
   style_label(out_handles->setpoint_label, font40());
   lv_obj_set_width(out_handles->setpoint_label, LV_SIZE_CONTENT);
@@ -508,12 +516,38 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *fan_root = make_transparent(out_handles->fan_page, LV_PCT(100), LV_PCT(100));
   lv_obj_set_layout(fan_root, LV_LAYOUT_FLEX);
-  lv_obj_set_flex_flow(fan_root, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_flow(fan_root, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(fan_root, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_left(fan_root, 20, LV_PART_MAIN);
-  lv_obj_set_style_pad_right(fan_root, 20, LV_PART_MAIN);
-  lv_obj_set_style_pad_top(fan_root, 20, LV_PART_MAIN);
-  lv_obj_set_style_pad_bottom(fan_root, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_left(fan_root, 26, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(fan_root, 24, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(fan_root, 26, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(fan_root, 20, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(fan_root, 40, LV_PART_MAIN);
+
+  lv_obj_t *fan_left_col = make_transparent(fan_root, 300, LV_PCT(100));
+  lv_obj_set_layout(fan_left_col, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(fan_left_col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(fan_left_col, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_row(fan_left_col, 6, LV_PART_MAIN);
+
+  lv_obj_t *fan_status_title = lv_label_create(fan_left_col);
+  lv_label_set_text(fan_status_title, "STATUS");
+  style_label(fan_status_title, font20());
+  lv_obj_set_width(fan_status_title, LV_PCT(100));
+  lv_obj_set_style_text_align(fan_status_title, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+
+  static lv_point_t fan_status_line_pts[] = {{0, 0}, {286, 0}};
+  lv_obj_t *fan_status_line = lv_line_create(fan_left_col);
+  lv_line_set_points(fan_status_line, fan_status_line_pts, 2);
+  lv_obj_set_style_line_width(fan_status_line, 1, LV_PART_MAIN);
+  lv_obj_set_style_line_color(fan_status_line, lv_color_hex(kColorWhite), LV_PART_MAIN);
+  lv_obj_set_style_line_opa(fan_status_line, LV_OPA_70, LV_PART_MAIN);
+
+  out_handles->fan_status_label = lv_label_create(fan_left_col);
+  lv_label_set_text(out_handles->fan_status_label, "---");
+  style_label(out_handles->fan_status_label, font30());
+  lv_obj_set_width(out_handles->fan_status_label, LV_PCT(100));
+  lv_obj_set_style_text_align(out_handles->fan_status_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   lv_obj_t *fan_matrix = make_transparent(fan_root, 360, 220);
   lv_obj_set_layout(fan_matrix, LV_LAYOUT_FLEX);
@@ -560,12 +594,38 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 
   lv_obj_t *mode_root = make_transparent(out_handles->mode_page, LV_PCT(100), LV_PCT(100));
   lv_obj_set_layout(mode_root, LV_LAYOUT_FLEX);
-  lv_obj_set_flex_flow(mode_root, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_flow(mode_root, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(mode_root, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_left(mode_root, 20, LV_PART_MAIN);
-  lv_obj_set_style_pad_right(mode_root, 20, LV_PART_MAIN);
-  lv_obj_set_style_pad_top(mode_root, 20, LV_PART_MAIN);
-  lv_obj_set_style_pad_bottom(mode_root, 10, LV_PART_MAIN);
+  lv_obj_set_style_pad_left(mode_root, 26, LV_PART_MAIN);
+  lv_obj_set_style_pad_right(mode_root, 24, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(mode_root, 26, LV_PART_MAIN);
+  lv_obj_set_style_pad_bottom(mode_root, 20, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(mode_root, 40, LV_PART_MAIN);
+
+  lv_obj_t *mode_left_col = make_transparent(mode_root, 300, LV_PCT(100));
+  lv_obj_set_layout(mode_left_col, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(mode_left_col, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(mode_left_col, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_set_style_pad_row(mode_left_col, 6, LV_PART_MAIN);
+
+  lv_obj_t *mode_status_title = lv_label_create(mode_left_col);
+  lv_label_set_text(mode_status_title, "STATUS");
+  style_label(mode_status_title, font20());
+  lv_obj_set_width(mode_status_title, LV_PCT(100));
+  lv_obj_set_style_text_align(mode_status_title, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+
+  static lv_point_t mode_status_line_pts[] = {{0, 0}, {286, 0}};
+  lv_obj_t *mode_status_line = lv_line_create(mode_left_col);
+  lv_line_set_points(mode_status_line, mode_status_line_pts, 2);
+  lv_obj_set_style_line_width(mode_status_line, 1, LV_PART_MAIN);
+  lv_obj_set_style_line_color(mode_status_line, lv_color_hex(kColorWhite), LV_PART_MAIN);
+  lv_obj_set_style_line_opa(mode_status_line, LV_OPA_70, LV_PART_MAIN);
+
+  out_handles->mode_status_label = lv_label_create(mode_left_col);
+  lv_label_set_text(out_handles->mode_status_label, "---");
+  style_label(out_handles->mode_status_label, font30());
+  lv_obj_set_width(out_handles->mode_status_label, LV_PCT(100));
+  lv_obj_set_style_text_align(out_handles->mode_status_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   lv_obj_t *mode_matrix = make_transparent(mode_root, 360, 220);
   lv_obj_set_layout(mode_matrix, LV_LAYOUT_FLEX);

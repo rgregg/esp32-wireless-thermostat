@@ -38,7 +38,7 @@ class EspNowControllerTransport final : public IControllerTransport {
                      void *callback_context);
 
   void publish_telemetry(const ControllerTelemetry &telemetry) override;
-  void publish_weather(float outdoor_temp_c, const char *condition) override;
+  void publish_weather(float outdoor_temp_c, WeatherIcon icon) override;
   uint32_t send_ok_count() const { return send_ok_count_; }
   uint32_t send_fail_count() const { return send_fail_count_; }
 

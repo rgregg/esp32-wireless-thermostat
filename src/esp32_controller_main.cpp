@@ -7,6 +7,7 @@
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
 #include "controller/pirateweather.h"
+#include "weather_icon.h"
 #include "command_builder.h"
 #include "espnow_cmd_word.h"
 #include "management_paths.h"
@@ -532,8 +533,8 @@ bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out)
 }
 
 bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
-                                       char *condition_out, size_t condition_len) {
-  if (temp_c_out == nullptr || condition_out == nullptr ||
+                                       thermostat::WeatherIcon *icon_out) {
+  if (temp_c_out == nullptr || icon_out == nullptr ||
       g_cfg_ctrl_pirateweather_api_key.length() == 0) {
     return false;
   }
@@ -549,7 +550,7 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
   const String body = http.getString();
   http.end();
   return pirateweather::parse_forecast_response(body.c_str(), temp_c_out,
-                                                condition_out, condition_len);
+                                                icon_out);
 }
 
 void ctrl_poll_weather(uint32_t now_ms) {
@@ -572,15 +573,14 @@ void ctrl_poll_weather(uint32_t now_ms) {
   if (!ctrl_fetch_zip_coordinates(zip.c_str(), &lat, &lon)) return;
 
   float outdoor_temp_c = 0.0f;
-  char condition[64] = {0};
-  if (!ctrl_fetch_pirateweather_current(lat, lon, &outdoor_temp_c,
-                                        condition, sizeof(condition))) return;
+  thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
+  if (!ctrl_fetch_pirateweather_current(lat, lon, &outdoor_temp_c, &icon)) return;
 
   // Store in app for MQTT publishing
-  g_controller->app().set_outdoor_weather(outdoor_temp_c, condition);
+  g_controller->app().set_outdoor_weather(outdoor_temp_c, icon);
 
   // Send to all connected displays via ESP-NOW
-  g_controller->transport().publish_weather(outdoor_temp_c, condition);
+  g_controller->transport().publish_weather(outdoor_temp_c, icon);
 
   // Publish to MQTT
   if (g_ctrl_mqtt.connected()) {
@@ -588,7 +588,7 @@ void ctrl_poll_weather(uint32_t now_ms) {
     snprintf(buf, sizeof(buf), "%.1f", outdoor_temp_c);
     g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
     g_ctrl_mqtt.publish(ctrl_topic_for("state/weather_condition").c_str(),
-                        condition, true);
+                        thermostat::weather_icon_display_text(icon), true);
   }
 }
 
@@ -626,6 +626,8 @@ void ctrl_publish_discovery() {
       String("homeassistant/button/") + dev_id + "_controller_reset_sequence/config";
   const String reboot_topic =
       String("homeassistant/button/") + dev_id + "_controller_reboot/config";
+  const String filter_change_topic =
+      String("homeassistant/binary_sensor/") + dev_id + "_filter_change_required/config";
 
   const String climate_topic = String("homeassistant/climate/") + dev_id + "/config";
 
@@ -753,6 +755,14 @@ void ctrl_publish_discovery() {
            "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(reboot_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Filter Change Required\",\"uniq_id\":\"%s_filter_change_required\","
+           "\"stat_t\":\"%s/state/filter_change_required\","
+           "\"dev_cla\":\"problem\",\"pl_on\":\"1\",\"pl_off\":\"0\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(filter_change_topic.c_str(), payload, true);
 
   g_ctrl_mqtt_discovery_sent = true;
 }
@@ -1003,6 +1013,8 @@ void ctrl_publish_runtime_state() {
   g_ctrl_mqtt.publish(ctrl_topic_for("state/current_humidity").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%.2f", rt.filter_runtime_hours());
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_runtime_hours").c_str(), buf, true);
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_change_required").c_str(),
+                      rt.filter_runtime_hours() >= kFilterChangeThresholdHours ? "1" : "0", true);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(rt.furnace_state()));
   g_ctrl_mqtt.publish(ctrl_topic_for("state/furnace_state").c_str(), buf, true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/firmware_version").c_str(),
@@ -1045,7 +1057,7 @@ void ctrl_publish_runtime_state() {
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.outdoor_temp_c()));
     g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
     g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_condition").c_str(),
-                        app.outdoor_condition(), true);
+                        thermostat::weather_icon_display_text(app.outdoor_icon()), true);
   }
   {
     const uint8_t *ps = app.primary_sensor_mac();

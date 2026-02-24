@@ -4,12 +4,13 @@
 
 #include "thermostat/thermostat_app.h"
 #include "thermostat/transport/espnow_thermostat_transport.h"
+#include "weather_icon.h"
 
 namespace thermostat {
 
 class ThermostatNode {
  public:
-  using WeatherCallback = void (*)(float outdoor_temp_c, const char *condition,
+  using WeatherCallback = void (*)(float outdoor_temp_c, WeatherIcon icon,
                                    void *ctx);
 
   ThermostatNode(const ThermostatAppConfig &app_config,
@@ -32,12 +33,12 @@ class ThermostatNode {
   static void on_heartbeat_static(uint32_t now_ms, void *ctx);
   static void on_telemetry_static(const ThermostatControllerTelemetry &telemetry,
                                   void *ctx);
-  static void on_weather_static(float outdoor_temp_c, const char *condition,
+  static void on_weather_static(float outdoor_temp_c, WeatherIcon icon,
                                 void *ctx);
 
   void on_heartbeat(uint32_t now_ms);
   void on_telemetry(const ThermostatControllerTelemetry &telemetry);
-  void on_weather(float outdoor_temp_c, const char *condition);
+  void on_weather(float outdoor_temp_c, WeatherIcon icon);
 
   WeatherCallback weather_cb_ = nullptr;
   void *weather_cb_ctx_ = nullptr;

@@ -25,9 +25,9 @@ void ThermostatDisplayApp::on_local_sensor_update(float indoor_temp_c,
 }
 
 void ThermostatDisplayApp::on_outdoor_weather_update(float outdoor_temp_c,
-                                                     const std::string &condition) {
+                                                     WeatherIcon icon) {
   model_.set_outdoor_temperature_c(outdoor_temp_c);
-  model_.set_weather_condition(condition);
+  model_.set_weather_icon(icon);
 }
 
 void ThermostatDisplayApp::on_user_set_setpoint(float user_value, uint32_t now_ms) {

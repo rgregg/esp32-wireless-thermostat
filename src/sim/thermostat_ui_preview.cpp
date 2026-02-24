@@ -20,6 +20,7 @@
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/thermostat_ui_state.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
+#include "weather_icon.h"
 
 namespace {
 
@@ -96,6 +97,10 @@ lv_obj_t *g_settings_controller_label = nullptr;
 lv_obj_t *g_settings_espnow_label = nullptr;
 lv_obj_t *g_settings_config_label = nullptr;
 lv_obj_t *g_settings_errors_label = nullptr;
+lv_obj_t *g_setpoint_column = nullptr;
+lv_obj_t *g_filter_label = nullptr;
+lv_obj_t *g_fan_status_label = nullptr;
+lv_obj_t *g_mode_status_label = nullptr;
 lv_obj_t *g_timeout_slider = nullptr;
 lv_obj_t *g_brightness_slider = nullptr;
 lv_obj_t *g_dim_slider = nullptr;
@@ -122,12 +127,14 @@ FurnaceStateCode g_furnace_state = FurnaceStateCode::Error;
 float g_preview_indoor_c = 22.2f;
 float g_preview_humidity = 43.0f;
 float g_preview_outdoor_c = 9.0f;
-std::string g_preview_weather_condition = "Cloudy";
+thermostat::WeatherIcon g_preview_weather_icon = thermostat::WeatherIcon::Cloudy;
 
 // Weather cycle for interactive control
-constexpr const char *kWeatherConditions[] = {
-    "Clear", "Cloudy", "Rain", "Snow", "Fog", "Lightning"};
-constexpr int kWeatherConditionCount = 6;
+constexpr thermostat::WeatherIcon kWeatherIcons[] = {
+    thermostat::WeatherIcon::Sunny, thermostat::WeatherIcon::Cloudy,
+    thermostat::WeatherIcon::Rain, thermostat::WeatherIcon::Snow,
+    thermostat::WeatherIcon::Fog, thermostat::WeatherIcon::Lightning};
+constexpr int kWeatherIconCount = 6;
 int g_weather_index = 1;  // Start at Cloudy
 
 std::string display_topic(const char *suffix) {
@@ -228,26 +235,40 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
 
   // Weather from controller (simulates ESP-NOW WeatherData packet)
   static float s_ctrl_outdoor_c = 0.0f;
-  static std::string s_ctrl_condition;
+  static thermostat::WeatherIcon s_ctrl_icon = thermostat::WeatherIcon::Unknown;
   static bool s_ctrl_weather_received = false;
 
   if (topic == controller_topic("state/outdoor_temp_c")) {
     s_ctrl_outdoor_c = static_cast<float>(atof(payload.c_str()));
     if (s_ctrl_weather_received) {
       g_preview_outdoor_c = s_ctrl_outdoor_c;
-      g_preview_weather_condition = s_ctrl_condition;
-      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_condition);
+      g_preview_weather_icon = s_ctrl_icon;
+      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_icon);
     }
     s_ctrl_weather_received = true;
     return;
   }
   if (topic == controller_topic("state/outdoor_condition")) {
-    s_ctrl_condition = payload;
+    // Map display text back to WeatherIcon for MQTT-bridged weather
+    s_ctrl_icon = thermostat::WeatherIcon::Unknown;
+    if (payload == "Sunny") s_ctrl_icon = thermostat::WeatherIcon::Sunny;
+    else if (payload == "Partly Cloudy") s_ctrl_icon = thermostat::WeatherIcon::PartlyCloudy;
+    else if (payload == "Cloudy") s_ctrl_icon = thermostat::WeatherIcon::Cloudy;
+    else if (payload == "Rain") s_ctrl_icon = thermostat::WeatherIcon::Rain;
+    else if (payload == "Snow") s_ctrl_icon = thermostat::WeatherIcon::Snow;
+    else if (payload == "Fog") s_ctrl_icon = thermostat::WeatherIcon::Fog;
+    else if (payload == "Windy") s_ctrl_icon = thermostat::WeatherIcon::Windy;
+    else if (payload == "Lightning") s_ctrl_icon = thermostat::WeatherIcon::Lightning;
+    else if (payload == "Sleet") s_ctrl_icon = thermostat::WeatherIcon::Sleet;
+    else if (payload == "Hail") s_ctrl_icon = thermostat::WeatherIcon::Hail;
+    else if (payload == "Night") s_ctrl_icon = thermostat::WeatherIcon::Night;
+    else if (payload == "Night Cloudy") s_ctrl_icon = thermostat::WeatherIcon::NightCloudy;
     if (s_ctrl_weather_received) {
-      g_preview_weather_condition = s_ctrl_condition;
-      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_condition);
+      g_preview_weather_icon = s_ctrl_icon;
+      g_display_app->on_outdoor_weather_update(s_ctrl_outdoor_c, s_ctrl_icon);
       printf("[MQTT RX] Weather from controller: %.1f C, %s\n",
-             static_cast<double>(s_ctrl_outdoor_c), s_ctrl_condition.c_str());
+             static_cast<double>(s_ctrl_outdoor_c),
+             thermostat::weather_icon_display_text(s_ctrl_icon));
     }
     s_ctrl_weather_received = true;
     return;
@@ -609,6 +630,41 @@ void update_labels() {
   }
 
   if (g_settings_diag_label != nullptr) lv_label_set_text(g_settings_diag_label, errors_text);
+
+  // Setpoint column visibility based on mode
+  g_screen.on_mode_changed(g_display_app->local_mode());
+  if (g_setpoint_column != nullptr) {
+    if (g_screen.setpoint_visible()) {
+      lv_obj_clear_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  // Filter change indicator
+  if (g_filter_label != nullptr) {
+    if (g_display_app->filter_runtime_hours() >= kFilterChangeThresholdHours) {
+      lv_label_set_text(g_filter_label, "Change Filter");
+      lv_obj_clear_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(g_filter_label, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  // Fan page status
+  if (g_fan_status_label != nullptr) {
+    const FurnaceStateCode cs = g_display_app->controller_state();
+    const char *fan_text = (cs == FurnaceStateCode::HeatOn || cs == FurnaceStateCode::CoolOn ||
+                            cs == FurnaceStateCode::FanOn)
+                               ? "Fan Running"
+                               : "Idle";
+    lv_label_set_text(g_fan_status_label, fan_text);
+  }
+
+  // Mode page status
+  if (g_mode_status_label != nullptr) {
+    lv_label_set_text(g_mode_status_label, status_text.c_str());
+  }
 }
 
 void on_tab_changed(lv_event_t *e) {
@@ -757,6 +813,10 @@ void create_ui() {
   g_timeout_slider = handles.timeout_slider;
   g_brightness_slider = handles.brightness_slider;
   g_dim_slider = handles.dim_slider;
+  g_setpoint_column = handles.setpoint_column;
+  g_filter_label = handles.filter_label;
+  g_fan_status_label = handles.fan_status_label;
+  g_mode_status_label = handles.mode_status_label;
 
   thermostat::ui::set_mode_button_state(g_display_app->local_mode());
   thermostat::ui::set_temperature_unit_button_state(g_display_app->temperature_unit());
@@ -843,26 +903,27 @@ void process_events() {
       if (e.key.keysym.sym == SDLK_s) {
         activate_screensaver();
       } else if (e.key.keysym.sym == SDLK_w) {
-        // W key: cycle weather condition
-        g_weather_index = (g_weather_index + 1) % kWeatherConditionCount;
-        g_preview_weather_condition = kWeatherConditions[g_weather_index];
+        // W key: cycle weather icon
+        g_weather_index = (g_weather_index + 1) % kWeatherIconCount;
+        g_preview_weather_icon = kWeatherIcons[g_weather_index];
         g_display_app->on_outdoor_weather_update(g_preview_outdoor_c,
-                                                  g_preview_weather_condition);
+                                                  g_preview_weather_icon);
         printf("[SIM] Weather: %s, Outdoor: %.1f C\n",
-               g_preview_weather_condition.c_str(), g_preview_outdoor_c);
+               thermostat::weather_icon_display_text(g_preview_weather_icon),
+               g_preview_outdoor_c);
       } else if (e.key.keysym.sym == SDLK_RIGHTBRACKET) {
         // ] key: increase outdoor temperature
         g_preview_outdoor_c += 2.0f;
         if (g_preview_outdoor_c > 50.0f) g_preview_outdoor_c = 50.0f;
         g_display_app->on_outdoor_weather_update(g_preview_outdoor_c,
-                                                  g_preview_weather_condition);
+                                                  g_preview_weather_icon);
         printf("[SIM] Outdoor temp: %.1f C\n", g_preview_outdoor_c);
       } else if (e.key.keysym.sym == SDLK_LEFTBRACKET) {
         // [ key: decrease outdoor temperature
         g_preview_outdoor_c -= 2.0f;
         if (g_preview_outdoor_c < -40.0f) g_preview_outdoor_c = -40.0f;
         g_display_app->on_outdoor_weather_update(g_preview_outdoor_c,
-                                                  g_preview_weather_condition);
+                                                  g_preview_weather_icon);
         printf("[SIM] Outdoor temp: %.1f C\n", g_preview_outdoor_c);
       } else if (e.key.keysym.sym == SDLK_d) {
         // D key: wake display (renamed from W since W is now weather)
@@ -1035,7 +1096,7 @@ int main(int argc, char **argv) {
 
   // Seed initial sensor/weather data
   g_display_app->on_local_sensor_update(g_preview_indoor_c, g_preview_humidity);
-  g_display_app->on_outdoor_weather_update(g_preview_outdoor_c, g_preview_weather_condition);
+  g_display_app->on_outdoor_weather_update(g_preview_outdoor_c, g_preview_weather_icon);
 
   init_lvgl();
   create_ui();

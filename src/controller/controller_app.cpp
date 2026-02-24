@@ -239,15 +239,10 @@ void ControllerApp::persist_indoor_fallback() const {
 #endif
 }
 
-void ControllerApp::set_outdoor_weather(float temp_c, const char *condition) {
+void ControllerApp::set_outdoor_weather(float temp_c, WeatherIcon icon) {
   outdoor_temp_c_ = temp_c;
+  outdoor_icon_ = icon;
   has_outdoor_weather_ = true;
-  if (condition != nullptr) {
-    strncpy(outdoor_condition_, condition, sizeof(outdoor_condition_) - 1);
-    outdoor_condition_[sizeof(outdoor_condition_) - 1] = '\0';
-  } else {
-    outdoor_condition_[0] = '\0';
-  }
 }
 
 }  // namespace thermostat

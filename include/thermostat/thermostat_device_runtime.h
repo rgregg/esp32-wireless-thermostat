@@ -23,7 +23,7 @@ class ThermostatDeviceRuntime {
   void tick(uint32_t now_ms);
 
   void on_local_sensor_update(float indoor_temp_c, float indoor_humidity);
-  void on_outdoor_weather_update(float outdoor_temp_c, const std::string &condition);
+  void on_outdoor_weather_update(float outdoor_temp_c, WeatherIcon icon);
 
   void on_user_set_setpoint(float user_value, uint32_t now_ms);
   void on_user_set_setpoint_c(float setpoint_c, uint32_t now_ms);
@@ -47,19 +47,21 @@ class ThermostatDeviceRuntime {
   uint32_t espnow_send_ok_count() const;
   uint32_t espnow_send_fail_count() const;
 
+  FurnaceStateCode controller_state() const;
   std::string status_text(uint32_t now_ms) const;
   std::string setpoint_text() const;
   std::string indoor_temp_text() const;
   std::string indoor_humidity_text() const;
   std::string weather_text() const;
   WeatherIcon weather_icon() const;
+  uint32_t filter_runtime_hours() const;
 
   bool has_controller_weather() const { return has_controller_weather_; }
   void set_last_controller_weather_ms(uint32_t ms) { last_controller_weather_ms_ = ms; }
   uint32_t last_controller_weather_ms() const { return last_controller_weather_ms_; }
 
  private:
-  static void on_weather_from_controller(float outdoor_temp_c, const char *condition,
+  static void on_weather_from_controller(float outdoor_temp_c, WeatherIcon icon,
                                           void *ctx);
 
   ThermostatDeviceRuntimeConfig config_;

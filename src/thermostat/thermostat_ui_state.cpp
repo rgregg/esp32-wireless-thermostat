@@ -29,6 +29,9 @@ std::string furnace_state_text(FurnaceStateCode state,
       return "Cool on";
     case FurnaceStateCode::FanOn:
       return "Fan on";
+    case FurnaceStateCode::HeatWait:
+    case FurnaceStateCode::CoolWait:
+      return "Waiting for equipment";
     case FurnaceStateCode::Error:
     default:
       return "Error";
