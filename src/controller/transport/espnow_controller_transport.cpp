@@ -52,10 +52,13 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
     return false;
   }
 
-  esp_now_register_recv_cb(
-      reinterpret_cast<esp_now_recv_cb_t>(&EspNowControllerTransport::on_recv_static));
-  esp_now_register_send_cb(
-      reinterpret_cast<esp_now_send_cb_t>(&EspNowControllerTransport::on_send_static));
+  esp_now_register_recv_cb([](const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    EspNowControllerTransport::on_recv_static(info, data, len);
+  });
+  esp_now_register_send_cb([](const esp_now_send_info_t *info, esp_now_send_status_t status) {
+    const uint8_t *mac = (info != nullptr) ? info->des_addr : nullptr;
+    EspNowControllerTransport::on_send_static(mac, static_cast<int>(status));
+  });
 
   for (int i = 0; i < config_.peer_count; ++i) {
     if (is_all_zero_mac(config_.peer_macs[i])) {
@@ -189,7 +192,12 @@ void EspNowControllerTransport::on_recv_static(const void *recv_info,
   if (instance_ == nullptr) {
     return;
   }
+#if defined(ARDUINO)
+  const auto *info = reinterpret_cast<const esp_now_recv_info_t *>(recv_info);
+  const uint8_t *src_mac = info->src_addr;
+#else
   const uint8_t *src_mac = reinterpret_cast<const uint8_t *>(recv_info);
+#endif
   instance_->on_recv(src_mac, data, len);
 }
 

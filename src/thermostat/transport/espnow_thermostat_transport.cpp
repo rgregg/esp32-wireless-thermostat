@@ -41,10 +41,13 @@ bool EspNowThermostatTransport::begin(const EspNowThermostatConfig &config) {
     return false;
   }
 
-  esp_now_register_recv_cb(
-      reinterpret_cast<esp_now_recv_cb_t>(&EspNowThermostatTransport::on_recv_static));
-  esp_now_register_send_cb(
-      reinterpret_cast<esp_now_send_cb_t>(&EspNowThermostatTransport::on_send_static));
+  esp_now_register_recv_cb([](const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    EspNowThermostatTransport::on_recv_static(info, data, len);
+  });
+  esp_now_register_send_cb([](const esp_now_send_info_t *info, esp_now_send_status_t status) {
+    const uint8_t *mac = (info != nullptr) ? info->des_addr : nullptr;
+    EspNowThermostatTransport::on_send_static(mac, static_cast<int>(status));
+  });
 
   esp_now_peer_info_t peer_info;
   memset(&peer_info, 0, sizeof(peer_info));
@@ -154,7 +157,12 @@ void EspNowThermostatTransport::on_recv_static(const void *recv_info,
   if (instance_ == nullptr) {
     return;
   }
+#if defined(ARDUINO)
+  const auto *info = reinterpret_cast<const esp_now_recv_info_t *>(recv_info);
+  const uint8_t *src_mac = info->src_addr;
+#else
   const uint8_t *src_mac = reinterpret_cast<const uint8_t *>(recv_info);
+#endif
   instance_->on_recv(src_mac, data, len);
 }
 
@@ -248,6 +256,7 @@ void EspNowThermostatTransport::send_heartbeat(uint32_t now_ms) {
 
 void EspNowThermostatTransport::send_to_peer(const uint8_t *data, size_t len) {
 #if defined(ARDUINO)
+  if (!initialized_) return;
   const uint32_t now = millis();
   if (last_send_ms_ != 0 &&
       static_cast<uint32_t>(now - last_send_ms_) < kMinSendIntervalMs) {

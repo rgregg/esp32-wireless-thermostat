@@ -34,6 +34,8 @@
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 namespace thermostat {
 namespace {
@@ -188,7 +190,21 @@ struct TouchState {
   int16_t y = 0;
 };
 
+uint16_t g_touch_x_max = kDisplayWidth;
+uint16_t g_touch_y_max = kDisplayHeight;
+
 esp_lcd_panel_handle_t g_panel = nullptr;
+SemaphoreHandle_t g_flush_ready_sem = nullptr;
+
+// Called from ISR when the panel finishes swapping framebuffers at VSYNC
+bool IRAM_ATTR on_vsync_ready(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *,
+                               void *) {
+  BaseType_t high_task_wakeup = pdFALSE;
+  if (g_flush_ready_sem != nullptr) {
+    xSemaphoreGiveFromISR(g_flush_ready_sem, &high_task_wakeup);
+  }
+  return high_task_wakeup == pdTRUE;
+}
 
 lv_disp_draw_buf_t g_draw_buf;
 lv_color_t *g_buf_1 = nullptr;
@@ -291,6 +307,7 @@ bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
 bool g_cfg_reboot_required = false;
 uint16_t *g_screenshot_fb = nullptr;
+bool g_screenshot_pending = false;
 uint32_t g_boot_count = 0;
 String g_reset_reason = "unknown";
 String g_last_mqtt_error = "none";
@@ -951,6 +968,14 @@ void web_handle_screenshot() {
   if (g_screenshot_fb == nullptr) {
     g_web.send(503, "text/plain", "screenshot buffer unavailable");
     return;
+  }
+  // Request a fresh capture and wait for the next frame to render it
+  g_screenshot_pending = true;
+  lv_obj_invalidate(lv_scr_act());
+  const uint32_t deadline = millis() + 200;
+  while (g_screenshot_pending && static_cast<int32_t>(millis() - deadline) < 0) {
+    lv_timer_handler();
+    delay(1);
   }
   const uint32_t row_size = ((kDisplayWidth * 3U) + 3U) & ~3U;
   const uint32_t image_size = row_size * kDisplayHeight;
@@ -1679,7 +1704,8 @@ void ensure_mdns_ready() {
 }
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
-  if (g_screenshot_fb != nullptr && area != nullptr && color_p != nullptr) {
+  if (g_screenshot_pending && g_screenshot_fb != nullptr &&
+      area != nullptr && color_p != nullptr) {
     const int width = (area->x2 - area->x1 + 1);
     const int height = (area->y2 - area->y1 + 1);
     for (int y = 0; y < height; ++y) {
@@ -1691,10 +1717,15 @@ void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *co
       memcpy(&g_screenshot_fb[(dst_y * kDisplayWidth) + dst_x],
              &color_p[y * width], static_cast<size_t>(copy_w) * sizeof(uint16_t));
     }
+    g_screenshot_pending = false;
   }
+  // In direct_mode with double buffering, the panel driver detects that
+  // color_p is one of its own framebuffers and does an atomic pointer swap
+  // instead of a memcpy.  Wait for the swap to complete at VSYNC before
+  // letting LVGL draw into the next buffer.
   if (g_panel != nullptr) {
-    esp_lcd_panel_draw_bitmap(g_panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1,
-                              color_p);
+    esp_lcd_panel_draw_bitmap(g_panel, 0, 0, kDisplayWidth, kDisplayHeight, color_p);
+    xSemaphoreTake(g_flush_ready_sem, pdMS_TO_TICKS(100));
   }
   lv_disp_flush_ready(disp_drv);
 }
@@ -1727,6 +1758,9 @@ bool gt911_write(uint16_t reg, uint8_t val) {
   return g_touch_i2c.endTransmission() == 0;
 }
 
+void show_page(ThermostatPage page);
+void apply_backlight(bool screensaver_active);
+
 void poll_touch() {
   uint8_t status = 0;
   if (!gt911_read(0x814E, &status, 1)) {
@@ -1747,12 +1781,20 @@ void poll_touch() {
     return;
   }
 
-  const uint16_t x = static_cast<uint16_t>(data[1] << 8 | data[0]);
-  const uint16_t y = static_cast<uint16_t>(data[3] << 8 | data[2]);
+  const uint16_t raw_x = static_cast<uint16_t>(data[1] << 8 | data[0]);
+  const uint16_t raw_y = static_cast<uint16_t>(data[3] << 8 | data[2]);
+
+  // Scale touch coordinates to display resolution if GT911 config differs
+  const int16_t x = (g_touch_x_max != kDisplayWidth)
+                        ? static_cast<int16_t>(static_cast<uint32_t>(raw_x) * kDisplayWidth / g_touch_x_max)
+                        : static_cast<int16_t>(raw_x);
+  const int16_t y = (g_touch_y_max != kDisplayHeight)
+                        ? static_cast<int16_t>(static_cast<uint32_t>(raw_y) * kDisplayHeight / g_touch_y_max)
+                        : static_cast<int16_t>(raw_y);
 
   g_touch.touched = true;
-  g_touch.x = static_cast<int16_t>(x);
-  g_touch.y = static_cast<int16_t>(y);
+  g_touch.x = x;
+  g_touch.y = y;
 
   gt911_write(0x814E, 0);
 }
@@ -1763,7 +1805,12 @@ void touch_read_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = g_touch.x;
     data->point.y = g_touch.y;
+    const bool was_screensaver = g_screen.screensaver_active();
     g_screen.on_user_interaction(millis());
+    if (was_screensaver && !g_screen.screensaver_active()) {
+      show_page(g_screen.current_page());
+      apply_backlight(false);
+    }
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
@@ -2018,6 +2065,7 @@ void tab_event_cb(lv_event_t *) {
   } else if (strcmp(txt, "SETTINGS") == 0) {
     g_screen.on_tab_selected(ThermostatPage::Settings, now);
   }
+  show_page(g_screen.current_page());
 }
 
 void btn_setpoint_up_cb(lv_event_t *) {
@@ -2202,8 +2250,6 @@ void init_display_and_lvgl() {
     panel_config.data_gpio_nums[i] = pins[i];
   }
 
-  panel_config.psram_trans_align = 64;
-  panel_config.sram_trans_align = 4;
   panel_config.flags.fb_in_psram = 1;
   panel_config.bounce_buffer_size_px = 10 * kDisplayWidth;
   panel_config.num_fbs = 2;
@@ -2212,16 +2258,27 @@ void init_display_and_lvgl() {
   if (esp_lcd_new_rgb_panel(&panel_config, &g_panel) == ESP_OK) {
     esp_lcd_panel_reset(g_panel);
     esp_lcd_panel_init(g_panel);
+
+    // Register VSYNC callback so the flush can wait for the buffer swap
+    g_flush_ready_sem = xSemaphoreCreateBinary();
+    esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+    cbs.on_vsync = on_vsync_ready;
+    esp_lcd_rgb_panel_register_event_callbacks(g_panel, &cbs, nullptr);
   }
+
+  // Get the panel's two PSRAM framebuffers for double-buffered direct mode.
+  // LVGL draws dirty areas into one buffer while the panel DMA reads the other.
+  // On flush, esp_lcd_panel_draw_bitmap detects the source is a panel buffer
+  // and does an atomic pointer swap instead of a copy.
+  void *panel_fb0 = nullptr;
+  void *panel_fb1 = nullptr;
+  esp_lcd_rgb_panel_get_frame_buffer(g_panel, 2, &panel_fb0, &panel_fb1);
 
   lv_init();
 
-  constexpr size_t kLvglBufLines = 100;
-  const size_t buf_pixels = kDisplayWidth * kLvglBufLines;
-  g_buf_1 = static_cast<lv_color_t *>(
-      heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  g_buf_2 = static_cast<lv_color_t *>(
-      heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  const size_t buf_pixels = kDisplayWidth * kDisplayHeight;
+  g_buf_1 = static_cast<lv_color_t *>(panel_fb0);
+  g_buf_2 = static_cast<lv_color_t *>(panel_fb1);
 
   lv_disp_draw_buf_init(&g_draw_buf, g_buf_1, g_buf_2, buf_pixels);
   lv_disp_drv_init(&g_disp_drv);
@@ -2229,6 +2286,7 @@ void init_display_and_lvgl() {
   g_disp_drv.ver_res = kDisplayHeight;
   g_disp_drv.flush_cb = rgb_flush_cb;
   g_disp_drv.draw_buf = &g_draw_buf;
+  g_disp_drv.full_refresh = 1;
   lv_disp_drv_register(&g_disp_drv);
 
   lv_indev_drv_init(&g_indev_drv);
@@ -2248,6 +2306,16 @@ void init_sensors() {
   g_touch_i2c.begin(kTouchI2cSda, kTouchI2cScl, 400000U);
   g_sensor_i2c.begin(kSensorI2cSda, kSensorI2cScl, 100000U);
   g_aht_ready = g_aht.begin(&g_sensor_i2c);
+
+  // Read GT911 configured resolution for coordinate scaling
+  uint8_t res[4] = {0};
+  if (gt911_read(0x8048, res, 4)) {
+    const uint16_t x_max = static_cast<uint16_t>(res[1] << 8 | res[0]);
+    const uint16_t y_max = static_cast<uint16_t>(res[3] << 8 | res[2]);
+    if (x_max > 0) g_touch_x_max = x_max;
+    if (y_max > 0) g_touch_y_max = y_max;
+    Serial.printf("[touch] GT911 resolution: %ux%u\n", g_touch_x_max, g_touch_y_max);
+  }
 }
 
 void init_network() {
@@ -2330,7 +2398,7 @@ void thermostat_firmware_setup() {
 }
 
 void thermostat_firmware_loop() {
-  const uint32_t now = millis();
+  uint32_t now = millis();
   if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
     shutdown_display_for_reboot();
     delay(kRebootPanelOffDelayMs);
@@ -2349,6 +2417,13 @@ void thermostat_firmware_loop() {
     g_last_ui_tick_ms = now;
     lv_timer_handler();
   }
+
+  // Re-capture time after LVGL processing so the runtime tick uses a
+  // timestamp >= any millis() call made inside touch_read_cb.  Without
+  // this, on_user_interaction(millis()) can set last_interaction_ms to a
+  // value slightly *after* `now`, causing an unsigned underflow in
+  // g_screen.tick(now) that immediately triggers the screensaver.
+  now = millis();
 
   if ((now - g_last_runtime_tick_ms) >= kRuntimeTickMs) {
     g_last_runtime_tick_ms = now;
