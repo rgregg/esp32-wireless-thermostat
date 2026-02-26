@@ -21,6 +21,7 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include "improv_ble_provisioning.h"
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
@@ -62,6 +63,10 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kCtrlHttpTimeoutMs = 8000;
 uint32_t g_ctrl_last_weather_poll_ms = 0;
+bool g_ctrl_wifi_provisioning_started = false;
+bool g_ctrl_wifi_has_attempted_stored_connect = false;
+uint32_t g_ctrl_first_wifi_attempt_ms = 0;
+constexpr uint32_t kCtrlProvisionStartDelayMs = 15000;
 
 #ifndef THERMOSTAT_CONTROLLER_WIFI_SSID
 #define THERMOSTAT_CONTROLLER_WIFI_SSID ""
@@ -126,6 +131,7 @@ uint32_t g_ctrl_last_weather_poll_ms = 0;
 #ifndef THERMOSTAT_CONTROLLER_OTA_PASSWORD
 #define THERMOSTAT_CONTROLLER_OTA_PASSWORD ""
 #endif
+
 
 #ifndef THERMOSTAT_FIRMWARE_VERSION
 #define THERMOSTAT_FIRMWARE_VERSION "dev"
@@ -1274,24 +1280,79 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
 }
 
+void ctrl_start_wifi_provisioning() {
+  if (g_ctrl_wifi_provisioning_started) return;
+#ifdef IMPROV_WIFI_BLE_ENABLED
+  ImprovBleConfig cfg = {};
+  cfg.device_name = "Controller";
+  cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  cfg.hardware_variant = "ESP32";
+  cfg.device_url = nullptr;
+  improv_ble_start(cfg, [](const char *ssid, const char *password) {
+    g_cfg_ctrl_wifi_ssid = ssid;
+    g_cfg_ctrl_wifi_password = password;
+    g_ctrl_cfg.putString("wifi_ssid", ssid);
+    g_ctrl_cfg.putString("wifi_pwd", password);
+    g_ctrl_wifi_reconnect_required = true;
+  });
+#endif
+  g_ctrl_wifi_provisioning_started = true;
+}
+
+void ctrl_wifi_event_handler(arduino_event_t *event) {
+  if (event == nullptr) return;
+  switch (event->event_id) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+#ifdef IMPROV_WIFI_BLE_ENABLED
+      if (improv_ble_is_active()) {
+        improv_ble_stop();
+      }
+#endif
+      g_ctrl_wifi_provisioning_started = false;
+      break;
+    default:
+      break;
+  }
+}
+
 void ctrl_ensure_wifi_connected(uint32_t now_ms) {
   if (g_ctrl_wifi_reconnect_required) {
     g_ctrl_wifi_reconnect_required = false;
     WiFi.disconnect();
     g_ctrl_last_wifi_attempt_ms = 0;
   }
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
-  }
-  if ((now_ms - g_ctrl_last_wifi_attempt_ms) < kCtrlNetworkRetryMs) {
-    return;
-  }
-  g_ctrl_last_wifi_attempt_ms = now_ms;
-  if (g_cfg_ctrl_wifi_ssid.length() == 0) {
-    WiFi.begin();
-  } else {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  // Phase 1: Use configured SSID if available
+  if (g_cfg_ctrl_wifi_ssid.length() > 0) {
+    if ((now_ms - g_ctrl_last_wifi_attempt_ms) < kCtrlNetworkRetryMs) return;
+    g_ctrl_last_wifi_attempt_ms = now_ms;
     WiFi.begin(g_cfg_ctrl_wifi_ssid.c_str(), g_cfg_ctrl_wifi_password.c_str());
+    return;
   }
+
+  // Phase 2: If provisioning is running, let it handle things
+  if (g_ctrl_wifi_provisioning_started) return;
+
+  // Phase 3: Try stored creds via WiFi.begin()
+  if (!g_ctrl_wifi_has_attempted_stored_connect) {
+    g_ctrl_wifi_has_attempted_stored_connect = true;
+    g_ctrl_first_wifi_attempt_ms = now_ms;
+    g_ctrl_last_wifi_attempt_ms = now_ms;
+    WiFi.begin();
+    return;
+  }
+
+  // Phase 4: After timeout, start BLE provisioning
+  if ((now_ms - g_ctrl_first_wifi_attempt_ms) >= kCtrlProvisionStartDelayMs) {
+    ctrl_start_wifi_provisioning();
+    return;
+  }
+
+  if ((now_ms - g_ctrl_last_wifi_attempt_ms) < kCtrlNetworkRetryMs) return;
+  g_ctrl_last_wifi_attempt_ms = now_ms;
+  WiFi.begin();
 }
 
 void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
@@ -1456,6 +1517,8 @@ void setup() {
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);
   g_controller = &node;
   WiFi.mode(WIFI_STA);
+  WiFi.onEvent(ctrl_wifi_event_handler);
+  WiFi.setAutoReconnect(true);
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 
@@ -1480,10 +1543,11 @@ void loop() {
   const uint32_t now = millis();
   if (now - last_heartbeat >= 5000) {
     last_heartbeat = now;
-    Serial.printf("[%lu] controller alive, wifi=%s, mqtt=%s\n",
+    Serial.printf("[%lu] controller alive, wifi=%s, mqtt=%s, prov=%s\n",
                   now,
                   WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "no",
-                  g_ctrl_mqtt.connected() ? "yes" : "no");
+                  g_ctrl_mqtt.connected() ? "yes" : "no",
+                  g_ctrl_wifi_provisioning_started ? "active" : "idle");
   }
   if (g_ctrl_reboot_requested && static_cast<int32_t>(now - g_ctrl_reboot_at_ms) >= 0) {
     ESP.restart();

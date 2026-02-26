@@ -14,7 +14,7 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
-#include <WiFiProv.h>
+#include "improv_ble_provisioning.h"
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -120,17 +120,6 @@ constexpr uint32_t kRebootPanelOffDelayMs = 200;
 #define THERMOSTAT_PIRATEWEATHER_ZIP ""
 #endif
 
-#ifndef THERMOSTAT_PROV_POP
-#define THERMOSTAT_PROV_POP "thermostat-setup"
-#endif
-
-#ifndef THERMOSTAT_PROV_SERVICE_NAME
-#define THERMOSTAT_PROV_SERVICE_NAME "PROV_ESP32_THERMOSTAT"
-#endif
-
-#ifndef THERMOSTAT_PROV_RESET_PROVISIONED
-#define THERMOSTAT_PROV_RESET_PROVISIONED 0
-#endif
 
 #ifndef THERMOSTAT_DISPLAY_TIMEOUT_S
 #define THERMOSTAT_DISPLAY_TIMEOUT_S 300
@@ -1540,31 +1529,22 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   mqtt_publish_state();
 }
 
-String improv_service_name() {
-  const String configured(THERMOSTAT_PROV_SERVICE_NAME);
-  if (configured.length() > 0) return configured;
-  String mac = WiFi.macAddress();
-  mac.replace(":", "");
-  if (mac.length() >= 6) {
-    return String("PROV_") + mac.substring(mac.length() - 6);
-  }
-  return "PROV_ESP32_THERMOSTAT";
-}
-
 void start_wifi_provisioning() {
   if (g_wifi_provisioning_started) return;
-  const String service_name = improv_service_name();
-  const bool reset_provisioned = THERMOSTAT_PROV_RESET_PROVISIONED != 0;
-#if CONFIG_BLUEDROID_ENABLED || CONFIG_BT_BLUEDROID_ENABLED
-  WiFiProv.beginProvision(NETWORK_PROV_SCHEME_BLE, NETWORK_PROV_SCHEME_HANDLER_FREE_BTDM,
-                          NETWORK_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(),
-                          nullptr, nullptr, reset_provisioned);
-  WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "ble");
-#else
-  WiFiProv.beginProvision(NETWORK_PROV_SCHEME_SOFTAP, NETWORK_PROV_SCHEME_HANDLER_NONE,
-                          NETWORK_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(),
-                          nullptr, nullptr, reset_provisioned);
-  WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "softap");
+#ifdef IMPROV_WIFI_BLE_ENABLED
+  ImprovBleConfig cfg = {};
+  cfg.device_name = "Thermostat";
+  cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  cfg.hardware_variant = "ESP32-S3";
+  cfg.device_url = nullptr;
+  improv_ble_start(cfg, [](const char *ssid, const char *password) {
+    g_cfg_wifi_ssid = ssid;
+    g_cfg_wifi_password = password;
+    g_cfg.putString("wifi_ssid", ssid);
+    g_cfg.putString("wifi_pwd", password);
+    g_cfg_wifi_reconnect_required = true;
+  });
 #endif
   g_wifi_provisioning_started = true;
 }
@@ -1573,10 +1553,12 @@ void wifi_event_handler(arduino_event_t *event) {
   if (event == nullptr) return;
   switch (event->event_id) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+#ifdef IMPROV_WIFI_BLE_ENABLED
+      if (improv_ble_is_active()) {
+        improv_ble_stop();
+      }
+#endif
       g_wifi_provisioning_started = false;
-      break;
-    case ARDUINO_EVENT_PROV_START:
-      g_wifi_provisioning_started = true;
       break;
     default:
       break;
