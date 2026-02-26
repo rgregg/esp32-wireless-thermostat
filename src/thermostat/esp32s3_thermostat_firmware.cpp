@@ -231,6 +231,8 @@ lv_obj_t *g_humidity_label = nullptr;
 lv_obj_t *g_setpoint_label = nullptr;
 lv_obj_t *g_weather_label = nullptr;
 lv_obj_t *g_weather_icon_label = nullptr;
+lv_obj_t *g_home_time_label = nullptr;
+lv_obj_t *g_home_date_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_screen_weather_label = nullptr;
 lv_obj_t *g_screen_indoor_label = nullptr;
@@ -1096,13 +1098,25 @@ void ensure_web_ready() {
 
 std::string current_time_text() {
   time_t now = time(nullptr);
-  if (now <= 0) {
+  if (now < 1700000000L) {
     return "--:--";
   }
   struct tm local_tm {};
   localtime_r(&now, &local_tm);
   char buf[24];
   strftime(buf, sizeof(buf), "%I:%M %p", &local_tm);
+  return std::string(buf[0] == '0' ? buf + 1 : buf);
+}
+
+std::string current_date_text() {
+  time_t now = time(nullptr);
+  if (now < 1700000000L) {
+    return "--- date ---";
+  }
+  struct tm local_tm {};
+  localtime_r(&now, &local_tm);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%A, %b %d", &local_tm);
   return std::string(buf);
 }
 
@@ -1162,6 +1176,19 @@ void mqtt_publish_state() {
   g_mqtt.publish(topic_for("state/error_ota").c_str(), g_last_ota_error.c_str(), true);
   g_mqtt.publish(topic_for("state/error_espnow").c_str(), g_last_espnow_error.c_str(), true);
 
+  {
+    const uint32_t now_ms = millis();
+    const uint32_t mqtt_ms = g_last_mqtt_command_ms;
+    const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
+    const bool mqtt_active = mqtt_ms > 0 && (now_ms - mqtt_ms) < g_cfg_controller_timeout_ms;
+    const bool espnow_active = espnow_ms > 0 && (now_ms - espnow_ms) < g_cfg_controller_timeout_ms;
+    const char *path = espnow_active && mqtt_active ? "mqtt+esp-now"
+                       : mqtt_active                ? "mqtt"
+                       : espnow_active              ? "esp-now"
+                                                    : "disconnected";
+    g_mqtt.publish(topic_for("state/connection_path").c_str(), path, true);
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     g_mqtt.publish(topic_for("state/wifi_ip").c_str(), WiFi.localIP().toString().c_str(), true);
     g_mqtt.publish(topic_for("state/wifi_mac").c_str(), WiFi.macAddress().c_str(), true);
@@ -1220,7 +1247,8 @@ void mqtt_publish_discovery() {
            "{\"name\":\"Display Timeout\",\"uniq_id\":\"%s_display_timeout\","
            "\"cmd_t\":\"%s/cmd/display_timeout_s\",\"stat_t\":\"%s/state/display_timeout_s\","
            "\"min\":30,\"max\":600,\"step\":5,\"mode\":\"box\",\"unit_of_meas\":\"s\","
-           "\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+           "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
            node.c_str(), base.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(timeout_config.c_str(), payload, true);
 
@@ -1260,16 +1288,34 @@ void mqtt_publish_discovery() {
            "{\"name\":\"Display WiFi RSSI\",\"uniq_id\":\"%s_display_wifi_rssi\","
            "\"stat_t\":\"%s/state/wifi_rssi\",\"unit_of_meas\":\"dBm\","
            "\"dev_cla\":\"signal_strength\",\"stat_cla\":\"measurement\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(rssi_config.c_str(), payload, true);
+
+  const String ip_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_ip/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display IP Address\",\"uniq_id\":\"%s_display_ip\","
+           "\"stat_t\":\"%s/state/wifi_ip\",\"icon\":\"mdi:ip-network\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(ip_config.c_str(), payload, true);
+
+  const String conn_path_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_connection_path/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Connection Path\",\"uniq_id\":\"%s_display_connection_path\","
+           "\"stat_t\":\"%s/state/connection_path\",\"icon\":\"mdi:connection\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(conn_path_config.c_str(), payload, true);
 
   const String heap_config =
       g_cfg_discovery_prefix + "/sensor/" + node + "_display_free_heap/config";
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display Free Heap\",\"uniq_id\":\"%s_display_free_heap\","
            "\"stat_t\":\"%s/state/free_heap_bytes\",\"unit_of_meas\":\"B\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(heap_config.c_str(), payload, true);
 
@@ -1278,7 +1324,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display Last MQTT Command\",\"uniq_id\":\"%s_display_last_mqtt_command\","
            "\"stat_t\":\"%s/state/last_mqtt_command_ms\",\"unit_of_meas\":\"ms\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(last_mqtt_cmd_config.c_str(), payload, true);
 
@@ -1287,7 +1333,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display Last ESP-NOW RX\",\"uniq_id\":\"%s_display_last_espnow_rx\","
            "\"stat_t\":\"%s/state/last_espnow_rx_ms\",\"unit_of_meas\":\"ms\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(last_espnow_rx_config.c_str(), payload, true);
 
@@ -1296,7 +1342,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display ESP-NOW Send OK\",\"uniq_id\":\"%s_display_espnow_send_ok\","
            "\"stat_t\":\"%s/state/espnow_send_ok_count\",\"icon\":\"mdi:counter\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(espnow_ok_config.c_str(), payload, true);
 
@@ -1305,7 +1351,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display ESP-NOW Send Fail\",\"uniq_id\":\"%s_display_espnow_send_fail\","
            "\"stat_t\":\"%s/state/espnow_send_fail_count\",\"icon\":\"mdi:counter\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(espnow_fail_config.c_str(), payload, true);
 
@@ -1852,6 +1898,12 @@ void refresh_ui() {
                       thermostat::ui::weather_icon_symbol(g_runtime->weather_icon()));
   }
 
+  if (g_home_time_label != nullptr) {
+    lv_label_set_text(g_home_time_label, current_time_text().c_str());
+  }
+  if (g_home_date_label != nullptr) {
+    lv_label_set_text(g_home_date_label, current_date_text().c_str());
+  }
   lv_label_set_text(g_screen_time_label, current_time_text().c_str());
   if (g_screen_weather_label != nullptr) {
     lv_label_set_text(g_screen_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
@@ -2161,6 +2213,8 @@ void create_ui() {
   g_setpoint_label = handles.setpoint_label;
   g_weather_label = handles.weather_label;
   g_weather_icon_label = handles.weather_icon_label;
+  g_home_time_label = handles.home_time_label;
+  g_home_date_label = handles.home_date_label;
   g_screen_time_label = handles.screen_time_label;
   g_screen_weather_label = handles.screen_weather_label;
   g_screen_indoor_label = handles.screen_indoor_label;
