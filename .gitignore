@@ -7,3 +7,6 @@ platformio_override.ini
 dist/
 __pycache__/
 .env
+managed_components/
+sdkconfig.*
+.dummy/
