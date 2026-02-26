@@ -45,6 +45,7 @@ struct UiHandles {
   lv_obj_t *indoor_label = nullptr;
   lv_obj_t *humidity_label = nullptr;
   lv_obj_t *setpoint_label = nullptr;
+  lv_obj_t *outdoor_section = nullptr;
   lv_obj_t *weather_label = nullptr;
   lv_obj_t *weather_icon_label = nullptr;
   lv_obj_t *screen_time_label = nullptr;
@@ -71,6 +72,8 @@ struct UiHandles {
 void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles);
 void set_mode_button_state(FurnaceMode mode);
 void set_fan_button_state(FanMode mode);
+void set_fan_mode_buttons_enabled(bool enabled);
+void set_mode_buttons_enabled(bool enabled);
 void set_temperature_unit_button_state(TemperatureUnit unit);
 void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label,
                                lv_obj_t *indoor_label, uint32_t minute_index);

@@ -229,6 +229,7 @@ lv_obj_t *g_status_label = nullptr;
 lv_obj_t *g_indoor_label = nullptr;
 lv_obj_t *g_humidity_label = nullptr;
 lv_obj_t *g_setpoint_label = nullptr;
+lv_obj_t *g_outdoor_section = nullptr;
 lv_obj_t *g_weather_label = nullptr;
 lv_obj_t *g_weather_icon_label = nullptr;
 lv_obj_t *g_home_time_label = nullptr;
@@ -1907,10 +1908,18 @@ void refresh_ui() {
   lv_label_set_text(g_indoor_label, g_runtime->indoor_temp_text().c_str());
   lv_label_set_text(g_humidity_label, g_runtime->indoor_humidity_text().c_str());
   lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
-  lv_label_set_text(g_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
-  if (g_weather_icon_label != nullptr && g_have_weather_data) {
-    lv_label_set_text(g_weather_icon_label,
-                      thermostat::ui::weather_icon_symbol(g_runtime->weather_icon()));
+  // Show/hide outdoor section based on weather data availability
+  if (g_outdoor_section != nullptr) {
+    if (g_have_weather_data) {
+      lv_obj_clear_flag(g_outdoor_section, LV_OBJ_FLAG_HIDDEN);
+      lv_label_set_text(g_weather_label, g_runtime->weather_text().c_str());
+      if (g_weather_icon_label != nullptr) {
+        lv_label_set_text(g_weather_icon_label,
+                          thermostat::ui::weather_icon_symbol(g_runtime->weather_icon()));
+      }
+    } else {
+      lv_obj_add_flag(g_outdoor_section, LV_OBJ_FLAG_HIDDEN);
+    }
   }
 
   if (g_home_time_label != nullptr) {
@@ -2057,12 +2066,19 @@ void refresh_ui() {
                         LV_ANIM_OFF);
   }
 
+  // Controller connectivity check
+  const uint32_t mqtt_cmd_ms = g_last_mqtt_command_ms;
+  const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
+  const bool controller_connected =
+      (mqtt_cmd_ms > 0 && (now - mqtt_cmd_ms) < g_cfg_controller_timeout_ms) ||
+      (espnow_ms > 0 && (now - espnow_ms) < g_cfg_controller_timeout_ms);
+
   thermostat::ui::set_mode_button_state(g_runtime->local_mode());
   thermostat::ui::set_fan_button_state(g_runtime->local_fan_mode());
   thermostat::ui::set_temperature_unit_button_state(g_runtime->temperature_unit());
   g_screen.on_mode_changed(g_runtime->local_mode());
   if (g_setpoint_column != nullptr) {
-    if (g_screen.setpoint_visible()) {
+    if (controller_connected && g_screen.setpoint_visible()) {
       lv_obj_clear_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_add_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
@@ -2077,20 +2093,30 @@ void refresh_ui() {
     }
   }
 
-  // Fan page status
+  // Fan page status + button state
   if (g_fan_status_label != nullptr) {
-    const FurnaceStateCode cs = g_runtime->controller_state();
-    const char *fan_text = (cs == FurnaceStateCode::HeatOn || cs == FurnaceStateCode::CoolOn ||
-                            cs == FurnaceStateCode::FanOn)
-                               ? "Fan Running"
-                               : "Idle";
-    lv_label_set_text(g_fan_status_label, fan_text);
+    if (!controller_connected) {
+      lv_label_set_text(g_fan_status_label, "Not Connected");
+    } else {
+      const FurnaceStateCode cs = g_runtime->controller_state();
+      const char *fan_text = (cs == FurnaceStateCode::HeatOn || cs == FurnaceStateCode::CoolOn ||
+                              cs == FurnaceStateCode::FanOn)
+                                 ? "Fan Running"
+                                 : "Idle";
+      lv_label_set_text(g_fan_status_label, fan_text);
+    }
   }
+  thermostat::ui::set_fan_mode_buttons_enabled(controller_connected);
 
-  // Mode page status
+  // Mode page status + button state
   if (g_mode_status_label != nullptr) {
-    lv_label_set_text(g_mode_status_label, g_runtime->status_text(now).c_str());
+    if (!controller_connected) {
+      lv_label_set_text(g_mode_status_label, "Not Connected");
+    } else {
+      lv_label_set_text(g_mode_status_label, g_runtime->status_text(now).c_str());
+    }
   }
+  thermostat::ui::set_mode_buttons_enabled(controller_connected);
 }
 
 void tab_event_cb(lv_event_t *) {
@@ -2226,6 +2252,7 @@ void create_ui() {
   g_indoor_label = handles.indoor_label;
   g_humidity_label = handles.humidity_label;
   g_setpoint_label = handles.setpoint_label;
+  g_outdoor_section = handles.outdoor_section;
   g_weather_label = handles.weather_label;
   g_weather_icon_label = handles.weather_icon_label;
   g_home_time_label = handles.home_time_label;
