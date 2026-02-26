@@ -38,6 +38,7 @@ uint32_t g_ctrl_last_mqtt_publish_ms = 0;
 bool g_ctrl_last_lockout = false;
 bool g_ctrl_have_lockout = false;
 uint32_t g_ctrl_last_mqtt_command_ms = 0;
+bool g_ctrl_espnow_only = false;
 String g_ctrl_last_mqtt_error = "none";
 String g_ctrl_last_ota_error = "none";
 String g_ctrl_last_espnow_error = "none";
@@ -1083,6 +1084,8 @@ void ctrl_publish_runtime_state() {
              ps[0], ps[1], ps[2], ps[3], ps[4], ps[5]);
     g_ctrl_mqtt.publish(ctrl_topic_for("state/primary_sensor_mac").c_str(), mac_str, true);
   }
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/espnow_only").c_str(),
+                      g_ctrl_espnow_only ? "true" : "false", true);
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
 }
@@ -1171,11 +1174,18 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
 
-  if (topic_str.startsWith(ctrl_topic_for("cmd/"))) {
+  if (topic_str.startsWith(ctrl_topic_for("cmd/")) && !g_ctrl_espnow_only) {
     g_ctrl_last_mqtt_command_ms = millis();
   }
 
   if (g_controller == nullptr) {
+    return;
+  }
+
+  // ESP-NOW only test mode toggle (always allowed)
+  if (topic_str == ctrl_topic_for("cmd/espnow_only")) {
+    g_ctrl_espnow_only = mqtt_payload::parse_bool(value);
+    ctrl_publish_runtime_state();
     return;
   }
 
@@ -1184,6 +1194,19 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_publish_runtime_state();
     return;
   }
+
+  // When espnow_only is active, block HVAC commands from MQTT
+  if (g_ctrl_espnow_only) {
+    if (topic_str == ctrl_topic_for("cmd/mode") ||
+        topic_str == ctrl_topic_for("cmd/fan_mode") ||
+        topic_str == ctrl_topic_for("cmd/target_temp_c") ||
+        topic_str == ctrl_topic_for("cmd/packed_word") ||
+        topic_str == ctrl_topic_for("cmd/sync") ||
+        topic_str == ctrl_topic_for("cmd/filter_reset")) {
+      return;
+    }
+  }
+
   if (topic_str == ctrl_topic_for("cmd/packed_word")) {
     uint32_t packed = 0;
     if (ctrl_parse_u32_payload(value, &packed)) {
@@ -1242,6 +1265,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 
   // Thermostat mirrored packed command path (MQTT-primary path).
   if (topic_str == display_topic_for("state/packed_command")) {
+    if (g_ctrl_espnow_only) return;
     uint32_t packed = 0;
     if (ctrl_parse_u32_payload(value, &packed)) {
       ctrl_apply_packed_command(packed, true);
@@ -1311,6 +1335,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reset_sequence").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/primary_sensor_mac").c_str());
+  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/espnow_only").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/temp_c").c_str());
   g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str());

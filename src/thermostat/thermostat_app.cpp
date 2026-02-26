@@ -53,6 +53,29 @@ void ThermostatApp::on_controller_telemetry(
   ack_controller_seq(last_controller_seq_);
 }
 
+void ThermostatApp::on_controller_state_update(
+    uint32_t now_ms, FurnaceStateCode state, bool lockout, FurnaceMode mode,
+    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds) {
+  on_controller_heartbeat(now_ms);
+
+  has_controller_telemetry_ = true;
+  controller_state_ = state;
+  controller_lockout_ = lockout;
+  controller_setpoint_c_ = setpoint_c;
+  controller_filter_runtime_seconds_ = filter_runtime_seconds;
+
+  const bool within_debounce =
+      (last_local_interaction_ms_ != 0) &&
+      (static_cast<uint32_t>(now_ms - last_local_interaction_ms_) <
+       config_.local_interaction_debounce_ms);
+
+  if (!within_debounce) {
+    local_mode_ = mode;
+    local_fan_mode_ = fan;
+    local_setpoint_c_ = setpoint_c;
+  }
+}
+
 void ThermostatApp::set_local_mode(FurnaceMode mode, uint32_t now_ms) {
   local_mode_ = mode;
   mark_local_interaction(now_ms);

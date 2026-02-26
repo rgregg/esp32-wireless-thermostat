@@ -109,4 +109,69 @@ TEST_CASE(thermostat_app_reset_local_command_sequence_restarts_at_one) {
   app.set_local_mode(FurnaceMode::Off, 3000);
   ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(1));
 }
+
+TEST_CASE(thermostat_app_controller_state_update_sets_fields) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  // Initially no telemetry
+  ASSERT_TRUE(!app.has_controller_telemetry());
+  ASSERT_TRUE(!app.controller_connected(1000, 30000));
+
+  // Apply MQTT-sourced controller state
+  app.on_controller_state_update(
+      1000, FurnaceStateCode::HeatOn, true,
+      FurnaceMode::Heat, FanMode::AlwaysOn, 23.5f, 7200);
+
+  ASSERT_TRUE(app.has_controller_telemetry());
+  ASSERT_TRUE(app.controller_connected(1000, 30000));
+  ASSERT_EQ(static_cast<int>(app.controller_state()),
+            static_cast<int>(FurnaceStateCode::HeatOn));
+  ASSERT_TRUE(app.controller_lockout());
+  ASSERT_NEAR(app.controller_setpoint_c(), 23.5f, 0.01f);
+  ASSERT_EQ(app.controller_filter_runtime_seconds(), 7200u);
+
+  // Mode/fan/setpoint should also sync (no recent local interaction)
+  ASSERT_EQ(static_cast<int>(app.local_mode()),
+            static_cast<int>(FurnaceMode::Heat));
+  ASSERT_EQ(static_cast<int>(app.local_fan_mode()),
+            static_cast<int>(FanMode::AlwaysOn));
+  ASSERT_NEAR(app.local_setpoint_c(), 23.5f, 0.01f);
+
+  // No ESP-NOW ACK should be sent
+  ASSERT_EQ(tx.ack_count, 0);
+}
+
+TEST_CASE(thermostat_app_controller_state_update_respects_debounce) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  // Local interaction at t=1000
+  app.set_local_mode(FurnaceMode::Cool, 1000);
+
+  // Controller state update within debounce window (default 5000ms)
+  app.on_controller_state_update(
+      3000, FurnaceStateCode::HeatOn, false,
+      FurnaceMode::Heat, FanMode::Automatic, 25.0f, 0);
+
+  // Controller fields should update
+  ASSERT_TRUE(app.has_controller_telemetry());
+  ASSERT_EQ(static_cast<int>(app.controller_state()),
+            static_cast<int>(FurnaceStateCode::HeatOn));
+
+  // But local mode/fan/setpoint should NOT be overwritten (within debounce)
+  ASSERT_EQ(static_cast<int>(app.local_mode()),
+            static_cast<int>(FurnaceMode::Cool));
+
+  // After debounce expires, should sync
+  app.on_controller_state_update(
+      7000, FurnaceStateCode::Idle, false,
+      FurnaceMode::Off, FanMode::Circulate, 20.0f, 3600);
+
+  ASSERT_EQ(static_cast<int>(app.local_mode()),
+            static_cast<int>(FurnaceMode::Off));
+  ASSERT_EQ(static_cast<int>(app.local_fan_mode()),
+            static_cast<int>(FanMode::Circulate));
+  ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
+}
 #endif

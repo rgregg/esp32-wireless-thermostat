@@ -23,6 +23,7 @@
 #include "ota_web_updater.h"
 
 #include "thermostat/thermostat_device_runtime.h"
+#include "mqtt_payload.h"
 #include "weather_icon.h"
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
@@ -300,6 +301,17 @@ uint32_t g_reboot_at_ms = 0;
 bool g_backlight_enabled = false;
 uint32_t g_backlight_enable_at_ms = 0;
 
+// Shadow state for controller telemetry received via MQTT
+FurnaceStateCode g_mqtt_ctrl_state = FurnaceStateCode::Error;
+bool g_mqtt_ctrl_lockout = false;
+FurnaceMode g_mqtt_ctrl_mode = FurnaceMode::Off;
+FanMode g_mqtt_ctrl_fan = FanMode::Automatic;
+float g_mqtt_ctrl_setpoint_c = 20.0f;
+uint32_t g_mqtt_ctrl_filter_runtime_s = 0;
+uint32_t g_mqtt_ctrl_last_update_ms = 0;
+uint32_t g_mqtt_ctrl_last_applied_ms = 0;
+bool g_mqtt_ctrl_available = false;
+
 uint8_t clamp_percent(long value) {
   if (value < 0) {
     return 0;
@@ -374,6 +386,13 @@ void load_runtime_config() {
 
 String topic_for(const char *suffix) {
   String out(g_cfg_mqtt_base_topic);
+  out += "/";
+  out += suffix;
+  return out;
+}
+
+String controller_topic_for(const char *suffix) {
+  String out(g_cfg_controller_base_topic);
   out += "/";
   out += suffix;
   return out;
@@ -1430,6 +1449,69 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     }
   }
 
+  // Controller state topics (MQTT-primary path)
+  if (g_cfg_controller_base_topic.length() > 0) {
+    if (topic_str == controller_topic_for("state/mode")) {
+      g_mqtt_ctrl_mode = mqtt_payload::str_to_mode(normalized);
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/fan_mode")) {
+      g_mqtt_ctrl_fan = mqtt_payload::str_to_fan(normalized);
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/target_temp_c")) {
+      float sp = static_cast<float>(atof(value));
+      if (std::isfinite(sp)) {
+        g_mqtt_ctrl_setpoint_c = sp;
+        g_mqtt_ctrl_last_update_ms = now;
+      }
+    } else if (topic_str == controller_topic_for("state/furnace_state")) {
+      g_mqtt_ctrl_state = static_cast<FurnaceStateCode>(atoi(value));
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/lockout")) {
+      g_mqtt_ctrl_lockout = mqtt_payload::parse_bool(value);
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/filter_runtime_hours")) {
+      float hours = static_cast<float>(atof(value));
+      if (std::isfinite(hours) && hours >= 0.0f) {
+        g_mqtt_ctrl_filter_runtime_s = static_cast<uint32_t>(hours * 3600.0f);
+        g_mqtt_ctrl_last_update_ms = now;
+      }
+    } else if (topic_str == controller_topic_for("state/outdoor_temp_c")) {
+      float temp = static_cast<float>(atof(value));
+      if (std::isfinite(temp) && g_runtime != nullptr) {
+        g_outdoor_temp_c = temp;
+        g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
+        g_have_weather_data = true;
+      }
+    } else if (topic_str == controller_topic_for("state/weather_condition")) {
+      WeatherIcon icon = weather_icon_from_api(normalized);
+      if (icon == WeatherIcon::Unknown) {
+        // Try matching display text for conditions published as English names
+        for (uint8_t i = 0; i <= static_cast<uint8_t>(WeatherIcon::Unknown); ++i) {
+          const auto candidate = static_cast<WeatherIcon>(i);
+          char lower_display[32];
+          const char *display = weather_icon_display_text(candidate);
+          size_t j = 0;
+          for (; display[j] != '\0' && j < sizeof(lower_display) - 1; ++j) {
+            lower_display[j] = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(display[j])));
+          }
+          lower_display[j] = '\0';
+          if (strcmp(normalized, lower_display) == 0) {
+            icon = candidate;
+            break;
+          }
+        }
+      }
+      if (g_runtime != nullptr) {
+        g_weather_icon = icon;
+        g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
+        g_have_weather_data = true;
+      }
+    } else if (topic_str == controller_topic_for("state/availability")) {
+      g_mqtt_ctrl_available = strcmp(normalized, "online") == 0;
+    }
+  }
+
   mqtt_publish_state();
 }
 
@@ -1551,6 +1633,18 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/backlight_active_pct").c_str());
   g_mqtt.subscribe(topic_for("cmd/backlight_screensaver_pct").c_str());
   g_mqtt.subscribe(topic_for("cfg/+/set").c_str());
+
+  if (g_cfg_controller_base_topic.length() > 0) {
+    g_mqtt.subscribe(controller_topic_for("state/mode").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/fan_mode").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/target_temp_c").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/furnace_state").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/lockout").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/filter_runtime_hours").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/outdoor_temp_c").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/weather_condition").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/availability").c_str());
+  }
 
   mqtt_publish_discovery();
   publish_all_cfg_state();
@@ -2274,6 +2368,15 @@ void thermostat_firmware_loop() {
   g_mqtt.loop();
   poll_weather(now);
   ota_rollback_check(WiFi.status() == WL_CONNECTED && g_mqtt.connected());
+
+  // Apply accumulated MQTT controller state to app layer
+  if (g_runtime != nullptr && g_mqtt_ctrl_last_update_ms > g_mqtt_ctrl_last_applied_ms) {
+    g_runtime->on_controller_state_update(
+        now, g_mqtt_ctrl_state, g_mqtt_ctrl_lockout,
+        g_mqtt_ctrl_mode, g_mqtt_ctrl_fan,
+        g_mqtt_ctrl_setpoint_c, g_mqtt_ctrl_filter_runtime_s);
+    g_mqtt_ctrl_last_applied_ms = g_mqtt_ctrl_last_update_ms;
+  }
 
   if (g_mqtt.connected() && (now - g_last_mqtt_publish_ms) >= kMqttPublishMs) {
     g_last_mqtt_publish_ms = now;
