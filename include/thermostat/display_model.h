@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 
+#include <cmath>
 #include <string>
 
 #include "thermostat_types.h"
@@ -40,8 +41,8 @@ class DisplayModel {
  private:
   TemperatureUnit unit_ = TemperatureUnit::Fahrenheit;
   float local_setpoint_c_ = 20.0f;
-  float indoor_temp_c_ = 20.0f;
-  float indoor_humidity_ = 50.0f;
+  float indoor_temp_c_ = NAN;
+  float indoor_humidity_ = NAN;
   float outdoor_temp_c_ = 10.0f;
   WeatherIcon weather_icon_ = WeatherIcon::Unknown;
 };

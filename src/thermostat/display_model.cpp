@@ -34,7 +34,7 @@ std::string DisplayModel::format_setpoint_text() const {
 
 std::string DisplayModel::format_indoor_temperature_text() const {
   if (std::isnan(indoor_temp_c_)) {
-    return "N/A";
+    return "--";
   }
   char buf[16];
   const float v = to_user_temperature(indoor_temp_c_);

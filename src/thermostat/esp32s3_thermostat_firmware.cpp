@@ -265,6 +265,8 @@ uint32_t g_last_mqtt_publish_ms = 0;
 uint32_t g_last_mqtt_command_ms = 0;
 bool g_wifi_has_attempted_stored_connect = false;
 bool g_wifi_provisioning_started = false;
+float g_remote_indoor_temp_c = NAN;
+float g_remote_indoor_humidity = NAN;
 float g_outdoor_temp_c = 6.0f;
 WeatherIcon g_weather_icon = WeatherIcon::Cloudy;
 bool g_have_weather_data = false;
@@ -1213,8 +1215,9 @@ void mqtt_publish_state() {
     g_mqtt.publish(topic_for("state/current_humidity").c_str(), buf, true);
   }
 
-  // Publish sensor data to controller's topic namespace for MQTT-based intake
-  if (g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
+  // Publish local sensor data to controller's topic namespace for MQTT-based intake.
+  // Only when we have a local sensor — don't echo the controller's own values back.
+  if (g_aht_ready && g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
     String mac_str = WiFi.macAddress();
     if (ok_temp) {
       String topic = g_cfg_controller_base_topic + "/sensor/" + mac_str + "/temp_c";
@@ -1570,6 +1573,16 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
         g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
         g_have_weather_data = true;
       }
+    } else if (topic_str == controller_topic_for("state/current_temp_c")) {
+      float temp = static_cast<float>(atof(value));
+      if (std::isfinite(temp)) {
+        g_remote_indoor_temp_c = temp;
+      }
+    } else if (topic_str == controller_topic_for("state/current_humidity")) {
+      float hum = static_cast<float>(atof(value));
+      if (std::isfinite(hum)) {
+        g_remote_indoor_humidity = hum;
+      }
     } else if (topic_str == controller_topic_for("state/availability")) {
       g_mqtt_ctrl_available = strcmp(normalized, "online") == 0;
     }
@@ -1700,6 +1713,8 @@ void ensure_mqtt_connected(uint32_t now_ms) {
     g_mqtt.subscribe(controller_topic_for("state/outdoor_temp_c").c_str());
     g_mqtt.subscribe(controller_topic_for("state/weather_condition").c_str());
     g_mqtt.subscribe(controller_topic_for("state/availability").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/current_temp_c").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/current_humidity").c_str());
   }
 
   mqtt_publish_discovery();
@@ -2351,18 +2366,14 @@ void poll_sensors(uint32_t now_ms) {
 
   g_last_sensor_poll_ms = now_ms;
 
-  float t = 21.5f;
-  float h = 45.0f;
-
   if (g_aht_ready) {
     sensors_event_t humidity, temp;
     if (g_aht.getEvent(&humidity, &temp)) {
-      t = temp.temperature;
-      h = humidity.relative_humidity;
+      g_runtime->on_local_sensor_update(temp.temperature, humidity.relative_humidity);
     }
+  } else if (!std::isnan(g_remote_indoor_temp_c)) {
+    g_runtime->on_local_sensor_update(g_remote_indoor_temp_c, g_remote_indoor_humidity);
   }
-
-  g_runtime->on_local_sensor_update(t, h);
   if (g_have_weather_data) {
     g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
   }
