@@ -1283,6 +1283,10 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 void ctrl_start_wifi_provisioning() {
   if (g_ctrl_wifi_provisioning_started) return;
 #ifdef IMPROV_WIFI_BLE_ENABLED
+  WiFi.disconnect(true);
+  Serial.printf("[Improv] Free internal RAM: %u, largest block: %u\n",
+                heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   ImprovBleConfig cfg = {};
   cfg.device_name = "Controller";
   cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
