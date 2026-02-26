@@ -295,8 +295,6 @@ uint32_t g_cfg_controller_timeout_ms = 30000;
 bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
 bool g_cfg_reboot_required = false;
-uint16_t *g_screenshot_fb = nullptr;
-bool g_screenshot_pending = false;
 uint32_t g_boot_count = 0;
 String g_reset_reason = "unknown";
 String g_last_mqtt_error = "none";
@@ -954,18 +952,23 @@ void write_u32_le(uint8_t *out, uint32_t value) {
 }
 
 void web_handle_screenshot() {
-  if (g_screenshot_fb == nullptr) {
-    g_web.send(503, "text/plain", "screenshot buffer unavailable");
+  // Read directly from the panel framebuffer that LVGL is NOT currently
+  // drawing into (the one being displayed has a complete frame).
+  if (g_buf_1 == nullptr || g_buf_2 == nullptr) {
+    g_web.send(503, "text/plain", "display not initialized");
     return;
   }
-  // Request a fresh capture and wait for the next frame to render it
-  g_screenshot_pending = true;
+
+  // Force a full refresh so both buffers are up to date, then read the
+  // buffer that LVGL just finished drawing (the one now being displayed).
   lv_obj_invalidate(lv_scr_act());
-  const uint32_t deadline = millis() + 200;
-  while (g_screenshot_pending && static_cast<int32_t>(millis() - deadline) < 0) {
-    lv_timer_handler();
-    delay(1);
-  }
+  lv_refr_now(nullptr);
+
+  // After lv_refr_now the draw_buf->buf_act points to the buffer LVGL will
+  // draw into *next*, so the *other* buffer is the freshly completed frame.
+  const auto *fb = reinterpret_cast<const uint16_t *>(
+      g_draw_buf.buf_act == g_buf_1 ? g_buf_2 : g_buf_1);
+
   const uint32_t row_size = ((kDisplayWidth * 3U) + 3U) & ~3U;
   const uint32_t image_size = row_size * kDisplayHeight;
   const uint32_t file_size = 54U + image_size;
@@ -991,7 +994,7 @@ void web_handle_screenshot() {
   for (int y = kDisplayHeight - 1; y >= 0; --y) {
     uint32_t idx = 0;
     for (int x = 0; x < kDisplayWidth; ++x) {
-      const uint16_t px = g_screenshot_fb[(y * kDisplayWidth) + x];
+      const uint16_t px = fb[(y * kDisplayWidth) + x];
       const uint8_t r = static_cast<uint8_t>(((px >> 11) & 0x1F) * 255 / 31);
       const uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x3F) * 255 / 63);
       const uint8_t b = static_cast<uint8_t>((px & 0x1F) * 255 / 31);
@@ -1686,27 +1689,16 @@ void ensure_mdns_ready() {
 }
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
-  if (g_screenshot_pending && g_screenshot_fb != nullptr &&
-      area != nullptr && color_p != nullptr) {
-    const int width = (area->x2 - area->x1 + 1);
-    const int height = (area->y2 - area->y1 + 1);
-    for (int y = 0; y < height; ++y) {
-      const int dst_y = area->y1 + y;
-      if (dst_y < 0 || dst_y >= kDisplayHeight) continue;
-      const int dst_x = area->x1;
-      if (dst_x < 0 || dst_x >= kDisplayWidth) continue;
-      const int copy_w = (dst_x + width <= kDisplayWidth) ? width : (kDisplayWidth - dst_x);
-      memcpy(&g_screenshot_fb[(dst_y * kDisplayWidth) + dst_x],
-             &color_p[y * width], static_cast<size_t>(copy_w) * sizeof(uint16_t));
-    }
-    g_screenshot_pending = false;
-  }
-  // In direct_mode with double buffering, the panel driver detects that
-  // color_p is one of its own framebuffers and does an atomic pointer swap
-  // instead of a memcpy.  Wait for the swap to complete at VSYNC before
-  // letting LVGL draw into the next buffer.
   if (g_panel != nullptr) {
+    // Drain any stale VSYNC signals so the take below waits for the
+    // VSYNC that happens *after* draw_bitmap queues the buffer swap.
+    xSemaphoreTake(g_flush_ready_sem, 0);
+
+    esp_lcd_rgb_panel_restart(g_panel);
     esp_lcd_panel_draw_bitmap(g_panel, 0, 0, kDisplayWidth, kDisplayHeight, color_p);
+
+    // Wait for the buffer swap to actually complete at VSYNC before
+    // letting LVGL draw into the next buffer.
     xSemaphoreTake(g_flush_ready_sem, pdMS_TO_TICKS(100));
   }
   lv_disp_flush_ready(disp_drv);
@@ -2193,19 +2185,6 @@ void create_ui() {
 }
 
 void init_display_and_lvgl() {
-  if (g_screenshot_fb == nullptr) {
-    g_screenshot_fb = static_cast<uint16_t *>(
-        heap_caps_malloc(static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t),
-                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (g_screenshot_fb == nullptr) {
-      g_screenshot_fb = static_cast<uint16_t *>(
-          malloc(static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t)));
-    }
-    if (g_screenshot_fb != nullptr) {
-      memset(g_screenshot_fb, 0, static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t));
-    }
-  }
-
   esp_lcd_rgb_panel_config_t panel_config = {};
   panel_config.clk_src = LCD_CLK_SRC_DEFAULT;
   panel_config.timings.pclk_hz = 14000000;
@@ -2268,6 +2247,7 @@ void init_display_and_lvgl() {
   g_disp_drv.ver_res = kDisplayHeight;
   g_disp_drv.flush_cb = rgb_flush_cb;
   g_disp_drv.draw_buf = &g_draw_buf;
+  g_disp_drv.direct_mode = 1;
   g_disp_drv.full_refresh = 1;
   lv_disp_drv_register(&g_disp_drv);
 
@@ -2304,6 +2284,7 @@ void init_network() {
   WiFi.mode(WIFI_STA);
   WiFi.onEvent(wifi_event_handler);
   WiFi.setAutoReconnect(true);
+  g_mqtt.setBufferSize(1024);
   g_mqtt.setServer(g_cfg_mqtt_host.c_str(), g_cfg_mqtt_port);
   g_mqtt.setCallback(mqtt_on_message);
   configTzTime(THERMOSTAT_TIME_TZ, THERMOSTAT_TIME_NTP_1, THERMOSTAT_TIME_NTP_2,
