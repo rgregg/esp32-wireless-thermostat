@@ -207,11 +207,13 @@ void ControllerApp::publish() {
   t.fan_code = fan_to_code(runtime_.fan_mode());
   t.setpoint_c = runtime_.target_temperature_c();
 
-  if (telemetry_payload_changed(t)) {
-    telemetry_seq_ = static_cast<uint16_t>(telemetry_seq_ + 1);
-    if (telemetry_seq_ == 0) {
-      telemetry_seq_ = 1;
-    }
+  if (!telemetry_payload_changed(t)) {
+    return;  // Nothing changed — skip the send
+  }
+
+  telemetry_seq_ = static_cast<uint16_t>(telemetry_seq_ + 1);
+  if (telemetry_seq_ == 0) {
+    telemetry_seq_ = 1;
   }
   t.seq = telemetry_seq_;
 

@@ -46,7 +46,6 @@ constexpr uint32_t kSensorPollMs = 60000;
 constexpr uint32_t kUiRefreshMs = 500;
 
 constexpr int kBacklightPin = 2;
-constexpr int kBacklightChannel = 0;
 constexpr int kBacklightFreq = 800;
 constexpr int kBacklightResolution = 8;
 
@@ -54,6 +53,7 @@ constexpr uint8_t kGt911Addr = 0x5D;
 
 constexpr int kTouchI2cSda = 19;
 constexpr int kTouchI2cScl = 20;
+constexpr int kTouchRstPin = 38;
 constexpr int kSensorI2cSda = 18;
 constexpr int kSensorI2cScl = 17;
 constexpr uint32_t kNetworkRetryMs = 5000;
@@ -579,7 +579,7 @@ void schedule_reboot() {
 }
 
 void shutdown_display_for_reboot() {
-  ledcWrite(kBacklightChannel, 0);
+  ledcWrite(kBacklightPin, 0);
   if (g_panel != nullptr) {
     esp_lcd_panel_disp_on_off(g_panel, false);
   }
@@ -1530,15 +1530,15 @@ void start_wifi_provisioning() {
   if (g_wifi_provisioning_started) return;
   const String service_name = improv_service_name();
   const bool reset_provisioned = THERMOSTAT_PROV_RESET_PROVISIONED != 0;
-#if CONFIG_BLUEDROID_ENABLED
-  WiFiProv.beginProvision(WIFI_PROV_SCHEME_BLE, WIFI_PROV_SCHEME_HANDLER_FREE_BTDM,
-                          WIFI_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(), nullptr,
-                          nullptr, reset_provisioned);
+#if CONFIG_BLUEDROID_ENABLED || CONFIG_BT_BLUEDROID_ENABLED
+  WiFiProv.beginProvision(NETWORK_PROV_SCHEME_BLE, NETWORK_PROV_SCHEME_HANDLER_FREE_BTDM,
+                          NETWORK_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(),
+                          nullptr, nullptr, reset_provisioned);
   WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "ble");
 #else
-  WiFiProv.beginProvision(WIFI_PROV_SCHEME_SOFTAP, WIFI_PROV_SCHEME_HANDLER_NONE,
-                          WIFI_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(), nullptr,
-                          nullptr, reset_provisioned);
+  WiFiProv.beginProvision(NETWORK_PROV_SCHEME_SOFTAP, NETWORK_PROV_SCHEME_HANDLER_NONE,
+                          NETWORK_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(),
+                          nullptr, nullptr, reset_provisioned);
   WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "softap");
 #endif
   g_wifi_provisioning_started = true;
@@ -1737,6 +1737,7 @@ void poll_touch() {
   const uint8_t points = status & 0x0F;
   if ((status & 0x80) == 0 || points == 0) {
     g_touch.touched = false;
+    gt911_write(0x814E, 0);
     return;
   }
 
@@ -1806,13 +1807,13 @@ void show_page(ThermostatPage page) {
 
 void apply_backlight(bool screensaver_active) {
   if (!g_backlight_enabled) {
-    ledcWrite(kBacklightChannel, 0);
+    ledcWrite(kBacklightPin, 0);
     return;
   }
   const uint8_t duty =
       screensaver_active ? percent_to_duty(g_cfg_backlight_screensaver_pct)
                          : percent_to_duty(g_cfg_backlight_active_pct);
-  ledcWrite(kBacklightChannel, duty);
+  ledcWrite(kBacklightPin, duty);
 }
 
 void refresh_ui() {
@@ -2176,7 +2177,7 @@ void init_display_and_lvgl() {
   }
 
   esp_lcd_rgb_panel_config_t panel_config = {};
-  panel_config.clk_src = LCD_CLK_SRC_PLL160M;
+  panel_config.clk_src = LCD_CLK_SRC_DEFAULT;
   panel_config.timings.pclk_hz = 14000000;
   panel_config.timings.h_res = kDisplayWidth;
   panel_config.timings.v_res = kDisplayHeight;
@@ -2195,7 +2196,8 @@ void init_display_and_lvgl() {
   panel_config.hsync_gpio_num = 39;
   panel_config.disp_gpio_num = -1;
 
-  int pins[16] = {45, 48, 47, 21, 14, 5, 6, 7, 15, 16, 4, 8, 3, 46, 9, 1};
+  // Pin order: R0-R4, G0-G5, B0-B4 (panel uses BGR element order)
+  int pins[16] = {8, 3, 46, 9, 1, 5, 6, 7, 15, 16, 4, 45, 48, 47, 21, 14};
   for (size_t i = 0; i < 16; ++i) {
     panel_config.data_gpio_nums[i] = pins[i];
   }
@@ -2203,6 +2205,8 @@ void init_display_and_lvgl() {
   panel_config.psram_trans_align = 64;
   panel_config.sram_trans_align = 4;
   panel_config.flags.fb_in_psram = 1;
+  panel_config.bounce_buffer_size_px = 10 * kDisplayWidth;
+  panel_config.num_fbs = 2;
 
   delay(kDisplayInitSettleMs);
   if (esp_lcd_new_rgb_panel(&panel_config, &g_panel) == ESP_OK) {
@@ -2212,16 +2216,12 @@ void init_display_and_lvgl() {
 
   lv_init();
 
-  const size_t buf_pixels = kDisplayWidth * 40;
+  constexpr size_t kLvglBufLines = 100;
+  const size_t buf_pixels = kDisplayWidth * kLvglBufLines;
   g_buf_1 = static_cast<lv_color_t *>(
       heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   g_buf_2 = static_cast<lv_color_t *>(
       heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-
-  if (g_buf_1 == nullptr || g_buf_2 == nullptr) {
-    g_buf_1 = static_cast<lv_color_t *>(malloc(buf_pixels * sizeof(lv_color_t)));
-    g_buf_2 = static_cast<lv_color_t *>(malloc(buf_pixels * sizeof(lv_color_t)));
-  }
 
   lv_disp_draw_buf_init(&g_draw_buf, g_buf_1, g_buf_2, buf_pixels);
   lv_disp_drv_init(&g_disp_drv);
@@ -2238,9 +2238,8 @@ void init_display_and_lvgl() {
 }
 
 void init_backlight() {
-  ledcSetup(kBacklightChannel, kBacklightFreq, kBacklightResolution);
-  ledcAttachPin(kBacklightPin, kBacklightChannel);
-  ledcWrite(kBacklightChannel, 0);
+  ledcAttach(kBacklightPin, kBacklightFreq, kBacklightResolution);
+  ledcWrite(kBacklightPin, 0);
   g_backlight_enabled = false;
   g_backlight_enable_at_ms = 0;
 }
@@ -2346,6 +2345,7 @@ void thermostat_firmware_loop() {
   }
 
   if ((now - g_last_ui_tick_ms) >= kUiTickMs) {
+    lv_tick_inc(now - g_last_ui_tick_ms);
     g_last_ui_tick_ms = now;
     lv_timer_handler();
   }

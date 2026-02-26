@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "thermostat/thermostat_transport.h"
@@ -55,6 +56,7 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   static void on_send_static(const uint8_t *mac_addr, int status);
   void on_recv(const uint8_t *src_mac, const uint8_t *data, int len);
   void send_heartbeat(uint32_t now_ms);
+  void send_to_peer(const uint8_t *data, size_t len);
 
   EspNowThermostatConfig config_{};
   bool initialized_ = false;
@@ -69,6 +71,8 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   static EspNowThermostatTransport *instance_;
   uint32_t send_ok_count_ = 0;
   uint32_t send_fail_count_ = 0;
+  uint32_t last_send_ms_ = 0;
+  static constexpr uint32_t kMinSendIntervalMs = 50;
 };
 
 }  // namespace thermostat

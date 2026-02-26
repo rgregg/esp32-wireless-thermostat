@@ -7,6 +7,7 @@
 #if defined(ARDUINO)
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #endif
 
 namespace thermostat {
@@ -28,6 +29,13 @@ bool EspNowThermostatTransport::begin(const EspNowThermostatConfig &config) {
 #if defined(ARDUINO)
   WiFi.mode(WIFI_STA);
 
+  // Set the radio to the configured ESP-NOW channel so peers match the home
+  // channel.  Without this the STA defaults to channel 1 and peer sends fail
+  // with "Peer channel is not equal to the home channel".
+  if (config_.channel > 0) {
+    esp_wifi_set_channel(config_.channel, WIFI_SECOND_CHAN_NONE);
+  }
+
   if (esp_now_init() != ESP_OK) {
     initialized_ = false;
     return false;
@@ -41,7 +49,8 @@ bool EspNowThermostatTransport::begin(const EspNowThermostatConfig &config) {
   esp_now_peer_info_t peer_info;
   memset(&peer_info, 0, sizeof(peer_info));
   memcpy(peer_info.peer_addr, config_.peer_mac, sizeof(peer_info.peer_addr));
-  peer_info.channel = config_.channel;
+  // Use channel 0 so ESP-NOW sends on whatever the current home channel is.
+  peer_info.channel = 0;
   peer_info.encrypt = config_.encrypted;
   if (peer_info.encrypt) {
     memcpy(peer_info.lmk, config_.lmk, sizeof(peer_info.lmk));
@@ -97,9 +106,7 @@ void EspNowThermostatTransport::publish_command_word(uint32_t packed_word) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.packed_word = packed_word;
 
-#if defined(ARDUINO)
-  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
-#endif
+  send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 void EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {
@@ -112,9 +119,7 @@ void EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.seq = seq;
 
-#if defined(ARDUINO)
-  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
-#endif
+  send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 void EspNowThermostatTransport::publish_indoor_temperature_c(float temp_c) {
@@ -127,9 +132,7 @@ void EspNowThermostatTransport::publish_indoor_temperature_c(float temp_c) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.value = temp_c;
 
-#if defined(ARDUINO)
-  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
-#endif
+  send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 void EspNowThermostatTransport::publish_indoor_humidity(float humidity_pct) {
@@ -142,9 +145,7 @@ void EspNowThermostatTransport::publish_indoor_humidity(float humidity_pct) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.value = humidity_pct;
 
-#if defined(ARDUINO)
-  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
-#endif
+  send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 void EspNowThermostatTransport::on_recv_static(const void *recv_info,
@@ -242,8 +243,21 @@ void EspNowThermostatTransport::send_heartbeat(uint32_t now_ms) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.toggle = heartbeat_toggle_ ? 1 : 0;
 
+  send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+}
+
+void EspNowThermostatTransport::send_to_peer(const uint8_t *data, size_t len) {
 #if defined(ARDUINO)
-  esp_now_send(config_.peer_mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+  const uint32_t now = millis();
+  if (last_send_ms_ != 0 &&
+      static_cast<uint32_t>(now - last_send_ms_) < kMinSendIntervalMs) {
+    return;  // Throttle: too soon since last send
+  }
+  last_send_ms_ = now;
+  esp_now_send(config_.peer_mac, data, len);
+#else
+  (void)data;
+  (void)len;
 #endif
 }
 

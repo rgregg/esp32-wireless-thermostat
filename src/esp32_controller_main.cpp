@@ -1380,9 +1380,10 @@ void ctrl_ensure_mdns_ready() {
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    delay(10);
-  }
+  delay(500);
+  Serial.println("\n\n============================");
+  Serial.println("ESP32 Controller Booting...");
+  Serial.println("============================");
   g_ctrl_cfg_ready = g_ctrl_cfg.begin("cfg_ctrl", false);
   ctrl_load_runtime_config();
   g_ctrl_boot_count =
@@ -1475,7 +1476,15 @@ void setup() {
 }
 
 void loop() {
+  static uint32_t last_heartbeat = 0;
   const uint32_t now = millis();
+  if (now - last_heartbeat >= 5000) {
+    last_heartbeat = now;
+    Serial.printf("[%lu] controller alive, wifi=%s, mqtt=%s\n",
+                  now,
+                  WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "no",
+                  g_ctrl_mqtt.connected() ? "yes" : "no");
+  }
   if (g_ctrl_reboot_requested && static_cast<int32_t>(now - g_ctrl_reboot_at_ms) >= 0) {
     ESP.restart();
   }

@@ -64,6 +64,8 @@ class EspNowControllerTransport final : public IControllerTransport {
   static EspNowControllerTransport *instance_;
   uint32_t send_ok_count_ = 0;
   uint32_t send_fail_count_ = 0;
+  uint32_t last_send_ms_ = 0;
+  static constexpr uint32_t kMinSendIntervalMs = 50;
 };
 
 }  // namespace thermostat
