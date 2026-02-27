@@ -6,6 +6,22 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <esp_ota_ops.h>
+#include <stdarg.h>
+#include <stdio.h>
+
+static OtaAuditCallback s_ota_audit_cb = nullptr;
+
+void ota_set_audit_callback(OtaAuditCallback cb) { s_ota_audit_cb = cb; }
+
+static void ota_audit(const char *fmt, ...) {
+  if (!s_ota_audit_cb) return;
+  char buf[96];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  s_ota_audit_cb(buf);
+}
 
 // ---------------------------------------------------------------------------
 // Web OTA upload
@@ -49,22 +65,29 @@ static void handle_update_upload(WebServer &server) {
   switch (upload.status) {
     case UPLOAD_FILE_START:
       Serial.printf("OTA web upload: %s\n", upload.filename.c_str());
+      ota_audit("ota_web: start %s", upload.filename.c_str());
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
         Update.printError(Serial);
+        ota_audit("ota_web: begin failed err=%u", Update.getError());
       }
       break;
 
     case UPLOAD_FILE_WRITE:
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
         Update.printError(Serial);
+        ota_audit("ota_web: write failed err=%u at %u bytes",
+                  Update.getError(), upload.totalSize);
       }
       break;
 
     case UPLOAD_FILE_END:
       if (Update.end(true)) {
         Serial.printf("OTA web upload complete: %u bytes\n", upload.totalSize);
+        ota_audit("ota_web: ok %u bytes", upload.totalSize);
       } else {
         Update.printError(Serial);
+        ota_audit("ota_web: end failed err=%u after %u bytes",
+                  Update.getError(), upload.totalSize);
       }
       break;
 

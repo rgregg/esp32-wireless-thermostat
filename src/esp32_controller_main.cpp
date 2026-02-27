@@ -177,36 +177,6 @@ bool g_ctrl_wifi_reconnect_required = false;
 bool g_ctrl_cfg_reboot_required = false;
 String g_disp_availability = "unknown";
 
-struct CtrlDisplayCfgCacheEntry {
-  const char *key;
-  String value;
-};
-
-CtrlDisplayCfgCacheEntry g_disp_cfg_cache[] = {
-    {"wifi_ssid", "unknown"},
-    {"wifi_password", "unknown"},
-    {"mqtt_host", "unknown"},
-    {"mqtt_port", "unknown"},
-    {"mqtt_user", "unknown"},
-    {"mqtt_password", "unknown"},
-    {"mqtt_client_id", "unknown"},
-    {"mqtt_base_topic", "unknown"},
-    {"discovery_prefix", "unknown"},
-    {"shared_device_id", "unknown"},
-    {"pirateweather_api_key", "unknown"},
-    {"pirateweather_zip", "unknown"},
-    {"display_timeout_s", "unknown"},
-    {"temp_comp_c", "unknown"},
-    {"temperature_unit", "unknown"},
-    {"ota_hostname", "unknown"},
-    {"ota_password", "unknown"},
-    {"espnow_channel", "unknown"},
-    {"espnow_peer_mac", "unknown"},
-    {"espnow_lmk", "unknown"},
-    {"controller_base_topic", "unknown"},
-    {"controller_timeout_ms", "unknown"},
-    {"reboot_required", "unknown"},
-};
 
 void ctrl_load_runtime_config() {
   if (!g_ctrl_cfg_ready) {
@@ -247,44 +217,6 @@ String display_topic_for(const char *suffix) {
   return out;
 }
 
-void ctrl_set_display_cfg_cache(const String &key, const String &value) {
-  for (size_t i = 0; i < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0])); ++i) {
-    if (key == g_disp_cfg_cache[i].key) {
-      g_disp_cfg_cache[i].value = value;
-      return;
-    }
-  }
-}
-
-String ctrl_get_display_cfg_cache(const char *key) {
-  for (size_t i = 0; i < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0])); ++i) {
-    if (strcmp(key, g_disp_cfg_cache[i].key) == 0) {
-      return g_disp_cfg_cache[i].value;
-    }
-  }
-  return "unknown";
-}
-
-bool ctrl_publish_display_cfg_set(const String &key, const String &value) {
-  if (!g_ctrl_mqtt.connected()) {
-    return false;
-  }
-  String topic = display_topic_for("cfg");
-  topic += "/";
-  topic += key;
-  topic += "/set";
-  return g_ctrl_mqtt.publish(topic.c_str(), value.c_str(), true);
-}
-
-bool ctrl_publish_display_cmd(const String &key, const String &value) {
-  if (!g_ctrl_mqtt.connected()) {
-    return false;
-  }
-  String topic = display_topic_for("cmd");
-  topic += "/";
-  topic += key;
-  return g_ctrl_mqtt.publish(topic.c_str(), value.c_str(), true);
-}
 
 void ctrl_schedule_reboot() {
   g_ctrl_reboot_requested = true;
@@ -837,45 +769,20 @@ void ctrl_web_handle_config_get() {
           String(g_cfg_ctrl_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
   body += "\"pirateweather_zip\":\"" + web_ui::json_escape(g_cfg_ctrl_pirateweather_zip) + "\",";
   body += "\"reboot_required\":" + String(g_ctrl_cfg_reboot_required ? "true" : "false");
-  body += "},\"display\":{";
-  body += "\"availability\":\"" + web_ui::json_escape(g_disp_availability) + "\",";
-  for (size_t i = 0; i < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0])); ++i) {
-    body += "\"" + String(g_disp_cfg_cache[i].key) + "\":\"" +
-            web_ui::json_escape(g_disp_cfg_cache[i].value) + "\"";
-    if (i + 1 < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0]))) {
-      body += ",";
-    }
-  }
   body += "}}";
   g_ctrl_web.send(200, "application/json", body);
 }
 
 void ctrl_web_handle_config_post() {
-  int updated_local = 0;
-  int updated_display = 0;
+  int updated = 0;
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
     const String value = g_ctrl_web.arg(i);
-    if (name == "disp_reboot" && mqtt_payload::parse_bool(value.c_str())) {
-      if (ctrl_publish_display_cmd("reboot", "1")) {
-        ++updated_display;
-      }
-      continue;
-    }
-    std::string key_std;
-    if (thermostat::management_paths::parse_prefixed_form_key(name.c_str(), "disp_",
-                                                               &key_std)) {
-      if (ctrl_publish_display_cfg_set(key_std.c_str(), value)) {
-        ++updated_display;
-      }
-      continue;
-    }
     if (ctrl_try_update_runtime_config(name, value.c_str())) {
-      ++updated_local;
+      ++updated;
     }
   }
-  String body = "updated_local=" + String(updated_local) +
-                " updated_display=" + String(updated_display) + "\n";
+  String body = "updated=" + String(updated) + "\n";
   g_ctrl_web.send(200, "text/plain", body);
 }
 
@@ -966,7 +873,6 @@ void ctrl_web_handle_root() {
     {"weather", "Weather"},
     {"hw", "Hardware"},
     {"general", "General"},
-    {"display", "Display (Remote)"},
     {"system", "System"},
   };
   page_begin(html, "Furnace Controller", g_cfg_ctrl_ota_hostname.c_str(),
@@ -1080,117 +986,6 @@ void ctrl_web_handle_root() {
              "^[A-Za-z0-9_-]{1,64}$", "1-64 chars: letters, numbers, underscore, hyphen");
   form_end(html, "Save General");
   card_end(html);
-  tab_end(html);
-
-  // ── Display (Remote) tab ──
-  tab_begin(html, "display");
-  html += F("<div class=\"card\" style=\"border:1px solid var(--ac)\">"
-            "<p style=\"font-size:0.8rem;color:var(--tx2)\">"
-            "These settings are sent to the thermostat display via MQTT. "
-            "Display availability: <strong id=\"st-display_availability\">");
-  html += web_ui::html_escape(g_disp_availability);
-  html += F("</strong></p></div>");
-
-  // Display WiFi
-  card_begin(html, "Display WiFi");
-  form_begin(html);
-  text_field(html, "WiFi SSID", "disp_wifi_ssid",
-             ctrl_get_display_cfg_cache("wifi_ssid"), nullptr, nullptr, nullptr, 64);
-  password_field(html, "WiFi Password", "disp_wifi_password",
-                 ctrl_get_display_cfg_cache("wifi_password") != "unknown");
-  form_end(html, "Save Display WiFi");
-  card_end(html);
-
-  // Display MQTT
-  card_begin(html, "Display MQTT");
-  form_begin(html);
-  text_field(html, "Broker Host", "disp_mqtt_host", ctrl_get_display_cfg_cache("mqtt_host"));
-  number_field(html, "Broker Port", "disp_mqtt_port",
-               ctrl_get_display_cfg_cache("mqtt_port"), "1", "65535", "1");
-  text_field(html, "Username", "disp_mqtt_user", ctrl_get_display_cfg_cache("mqtt_user"));
-  password_field(html, "Password", "disp_mqtt_password",
-                 ctrl_get_display_cfg_cache("mqtt_password") != "unknown");
-  text_field(html, "Client ID", "disp_mqtt_client_id", ctrl_get_display_cfg_cache("mqtt_client_id"));
-  text_field(html, "Base Topic", "disp_mqtt_base_topic", ctrl_get_display_cfg_cache("mqtt_base_topic"));
-  text_field(html, "Controller Base Topic", "disp_controller_base_topic",
-             ctrl_get_display_cfg_cache("controller_base_topic"));
-  form_end(html, "Save Display MQTT");
-  card_end(html);
-
-  // Display ESP-NOW
-  card_begin(html, "Display ESP-NOW");
-  form_begin(html);
-  number_field(html, "Channel", "disp_espnow_channel",
-               ctrl_get_display_cfg_cache("espnow_channel"), "1", "14", "1");
-  mac_field(html, "Peer MAC", "disp_espnow_peer_mac",
-            ctrl_get_display_cfg_cache("espnow_peer_mac"));
-  password_field(html, "Encryption Key (LMK)", "disp_espnow_lmk",
-                 ctrl_get_display_cfg_cache("espnow_lmk") != "unknown",
-                 "^[0-9A-Fa-f]{32}$", "32 hex characters");
-  form_end(html, "Save Display ESP-NOW");
-  card_end(html);
-
-  // Display Settings
-  card_begin(html, "Display Screen");
-  form_begin(html);
-  number_field(html, "Screen Timeout (seconds)", "disp_display_timeout_s",
-               ctrl_get_display_cfg_cache("display_timeout_s"), "30", "600", "1");
-  {
-    static const SelectOption temp_opts[] = {{"c", "Celsius"}, {"f", "Fahrenheit"}};
-    select_field(html, "Temperature Unit", "disp_temperature_unit",
-                 temp_opts, 2, ctrl_get_display_cfg_cache("temperature_unit"));
-  }
-  form_end(html, "Save Display Settings");
-  card_end(html);
-
-  // Display Hardware
-  card_begin(html, "Display Hardware");
-  form_begin(html);
-  number_field(html, "Temp Compensation (\u00b0C)", "disp_temp_comp_c",
-               ctrl_get_display_cfg_cache("temp_comp_c"), "-10", "10", "0.01");
-  number_field(html, "Controller Timeout (ms)", "disp_controller_timeout_ms",
-               ctrl_get_display_cfg_cache("controller_timeout_ms"), "1000", "600000", "1");
-  text_field(html, "OTA Hostname", "disp_ota_hostname", ctrl_get_display_cfg_cache("ota_hostname"));
-  password_field(html, "OTA Password", "disp_ota_password",
-                 ctrl_get_display_cfg_cache("ota_password") != "unknown");
-  form_end(html, "Save Display Hardware");
-  card_end(html);
-
-  // Display Weather
-  card_begin(html, "Display Weather");
-  form_begin(html);
-  password_field(html, "PirateWeather API Key", "disp_pirateweather_api_key",
-                 ctrl_get_display_cfg_cache("pirateweather_api_key") != "unknown");
-  text_field(html, "ZIP Code", "disp_pirateweather_zip",
-             ctrl_get_display_cfg_cache("pirateweather_zip"),
-             "US ZIP: 12345 or 12345-6789",
-             "^[0-9]{5}(-[0-9]{4})?$", "US ZIP format");
-  form_end(html, "Save Display Weather");
-  card_end(html);
-
-  // Display General
-  card_begin(html, "Display Identity");
-  form_begin(html);
-  text_field(html, "Discovery Prefix", "disp_discovery_prefix",
-             ctrl_get_display_cfg_cache("discovery_prefix"));
-  text_field(html, "Shared Device ID", "disp_shared_device_id",
-             ctrl_get_display_cfg_cache("shared_device_id"),
-             "1-64 chars: letters, numbers, underscore, hyphen",
-             "^[A-Za-z0-9_-]{1,64}$");
-  form_end(html, "Save Display Identity");
-  card_end(html);
-
-  if (ctrl_get_display_cfg_cache("reboot_required") == "true") {
-    html += F("<div class=\"card\" style=\"border:1px solid var(--wn)\">"
-              "<p style=\"color:var(--wn)\">Display reboot required.</p></div>");
-  }
-
-  // Reboot display via MQTT
-  html += F("<div class=\"card\"><form method=\"post\" action=\"/config\">");
-  hidden_field(html, "disp_reboot", "1");
-  html += F("<button type=\"submit\" class=\"btn btn-d\" "
-            "onclick=\"return confirm('Reboot the display via MQTT?')\">"
-            "Reboot Display (via MQTT)</button></form></div>");
   tab_end(html);
 
   // ── System tab ──
@@ -1374,12 +1169,6 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_try_update_runtime_config(cfg_key.c_str(), value);
     return;
   }
-  std::string disp_cfg_key;
-  if (thermostat::management_paths::parse_cfg_state_topic(
-          g_cfg_display_mqtt_base_topic.c_str(), topic_str.c_str(), &disp_cfg_key)) {
-    ctrl_set_display_cfg_cache(disp_cfg_key.c_str(), value);
-    return;
-  }
   if (topic_str == display_topic_for("state/availability")) {
     if (g_disp_availability != value) {
       ctrl_audit("display: %s->%s [mqtt]", g_disp_availability.c_str(), value);
@@ -1495,7 +1284,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   if (topic_str == ctrl_topic_for("cmd/reset_sequence") && mqtt_payload::parse_bool(value)) {
     g_controller->app().reset_remote_command_sequence();
     g_ctrl_mqtt_seq = 0;
-    ctrl_publish_display_cmd("reset_sequence", "1");
+    g_ctrl_mqtt.publish(display_topic_for("cmd/reset_sequence").c_str(), "1", false);
     ctrl_publish_runtime_state();
     return;
   }
@@ -1650,7 +1439,6 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str());
-  g_ctrl_mqtt.subscribe(display_topic_for("cfg/+/state").c_str());
   ctrl_publish_discovery();
   ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
@@ -1683,8 +1471,12 @@ void ctrl_ensure_ota_ready() {
     }
     ArduinoOTA.onError([](ota_error_t error) {
       g_ctrl_last_ota_error = String("ota_error_") + String(static_cast<unsigned>(error));
+      ctrl_audit("ota_arduino: failed err=%u", static_cast<unsigned>(error));
     });
-    ArduinoOTA.onEnd([]() { g_ctrl_last_ota_error = "none"; });
+    ArduinoOTA.onEnd([]() {
+      g_ctrl_last_ota_error = "none";
+      ctrl_audit("ota_arduino: ok");
+    });
     ArduinoOTA.begin();
     g_ctrl_ota_started = true;
   }
@@ -1800,6 +1592,7 @@ void setup() {
   // Wire audit log
   g_audit_log.set_publish_callback(ctrl_audit_publish);
   g_controller->app().runtime_mut().set_audit_callback(ctrl_runtime_audit_bridge);
+  ota_set_audit_callback(ctrl_runtime_audit_bridge);
 
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
