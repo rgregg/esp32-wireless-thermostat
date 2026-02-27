@@ -14,25 +14,32 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
-#include <WiFiProv.h>
+#include "improv_ble_provisioning.h"
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <esp_system.h>
 #include "ota_web_updater.h"
+#include "web/web_ui_escape.h"
+#include "web/web_ui_shell.h"
+#include "web/web_ui_fields.h"
 
 #include "thermostat/thermostat_device_runtime.h"
+#include "mqtt_payload.h"
 #include "weather_icon.h"
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
 #include "management_paths.h"
 
 #include <Adafruit_AHTX0.h>
+#include <Adafruit_Si7021.h>
 
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 namespace thermostat {
 namespace {
@@ -45,7 +52,6 @@ constexpr uint32_t kSensorPollMs = 60000;
 constexpr uint32_t kUiRefreshMs = 500;
 
 constexpr int kBacklightPin = 2;
-constexpr int kBacklightChannel = 0;
 constexpr int kBacklightFreq = 800;
 constexpr int kBacklightResolution = 8;
 
@@ -53,6 +59,7 @@ constexpr uint8_t kGt911Addr = 0x5D;
 
 constexpr int kTouchI2cSda = 19;
 constexpr int kTouchI2cScl = 20;
+constexpr int kTouchRstPin = 38;
 constexpr int kSensorI2cSda = 18;
 constexpr int kSensorI2cScl = 17;
 constexpr uint32_t kNetworkRetryMs = 5000;
@@ -117,17 +124,6 @@ constexpr uint32_t kRebootPanelOffDelayMs = 200;
 #define THERMOSTAT_PIRATEWEATHER_ZIP ""
 #endif
 
-#ifndef THERMOSTAT_PROV_POP
-#define THERMOSTAT_PROV_POP "thermostat-setup"
-#endif
-
-#ifndef THERMOSTAT_PROV_SERVICE_NAME
-#define THERMOSTAT_PROV_SERVICE_NAME "PROV_ESP32_THERMOSTAT"
-#endif
-
-#ifndef THERMOSTAT_PROV_RESET_PROVISIONED
-#define THERMOSTAT_PROV_RESET_PROVISIONED 0
-#endif
 
 #ifndef THERMOSTAT_DISPLAY_TIMEOUT_S
 #define THERMOSTAT_DISPLAY_TIMEOUT_S 300
@@ -187,7 +183,21 @@ struct TouchState {
   int16_t y = 0;
 };
 
+uint16_t g_touch_x_max = kDisplayWidth;
+uint16_t g_touch_y_max = kDisplayHeight;
+
 esp_lcd_panel_handle_t g_panel = nullptr;
+SemaphoreHandle_t g_flush_ready_sem = nullptr;
+
+// Called from ISR when the panel finishes swapping framebuffers at VSYNC
+bool IRAM_ATTR on_vsync_ready(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *,
+                               void *) {
+  BaseType_t high_task_wakeup = pdFALSE;
+  if (g_flush_ready_sem != nullptr) {
+    xSemaphoreGiveFromISR(g_flush_ready_sem, &high_task_wakeup);
+  }
+  return high_task_wakeup == pdTRUE;
+}
 
 lv_disp_draw_buf_t g_draw_buf;
 lv_color_t *g_buf_1 = nullptr;
@@ -196,10 +206,12 @@ lv_disp_drv_t g_disp_drv;
 lv_indev_drv_t g_indev_drv;
 
 TouchState g_touch{};
+enum class SensorType : uint8_t { None, AHT, Si7021 };
+SensorType g_sensor_type = SensorType::None;
 Adafruit_AHTX0 g_aht;
-bool g_aht_ready = false;
 TwoWire g_touch_i2c(0);
 TwoWire g_sensor_i2c(1);
+Adafruit_Si7021 g_si7021(&g_sensor_i2c);
 Preferences g_cfg;
 bool g_cfg_ready = false;
 WiFiClient g_wifi_client;
@@ -223,8 +235,11 @@ lv_obj_t *g_status_label = nullptr;
 lv_obj_t *g_indoor_label = nullptr;
 lv_obj_t *g_humidity_label = nullptr;
 lv_obj_t *g_setpoint_label = nullptr;
+lv_obj_t *g_outdoor_section = nullptr;
 lv_obj_t *g_weather_label = nullptr;
 lv_obj_t *g_weather_icon_label = nullptr;
+lv_obj_t *g_home_time_label = nullptr;
+lv_obj_t *g_home_date_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_screen_weather_label = nullptr;
 lv_obj_t *g_screen_indoor_label = nullptr;
@@ -257,6 +272,8 @@ uint32_t g_last_mqtt_publish_ms = 0;
 uint32_t g_last_mqtt_command_ms = 0;
 bool g_wifi_has_attempted_stored_connect = false;
 bool g_wifi_provisioning_started = false;
+float g_remote_indoor_temp_c = NAN;
+float g_remote_indoor_humidity = NAN;
 float g_outdoor_temp_c = 6.0f;
 WeatherIcon g_weather_icon = WeatherIcon::Cloudy;
 bool g_have_weather_data = false;
@@ -289,7 +306,6 @@ uint32_t g_cfg_controller_timeout_ms = 30000;
 bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
 bool g_cfg_reboot_required = false;
-uint16_t *g_screenshot_fb = nullptr;
 uint32_t g_boot_count = 0;
 String g_reset_reason = "unknown";
 String g_last_mqtt_error = "none";
@@ -299,6 +315,17 @@ bool g_reboot_requested = false;
 uint32_t g_reboot_at_ms = 0;
 bool g_backlight_enabled = false;
 uint32_t g_backlight_enable_at_ms = 0;
+
+// Shadow state for controller telemetry received via MQTT
+FurnaceStateCode g_mqtt_ctrl_state = FurnaceStateCode::Error;
+bool g_mqtt_ctrl_lockout = false;
+FurnaceMode g_mqtt_ctrl_mode = FurnaceMode::Off;
+FanMode g_mqtt_ctrl_fan = FanMode::Automatic;
+float g_mqtt_ctrl_setpoint_c = 20.0f;
+uint32_t g_mqtt_ctrl_filter_runtime_s = 0;
+uint32_t g_mqtt_ctrl_last_update_ms = 0;
+uint32_t g_mqtt_ctrl_last_applied_ms = 0;
+bool g_mqtt_ctrl_available = false;
 
 uint8_t clamp_percent(long value) {
   if (value < 0) {
@@ -374,6 +401,13 @@ void load_runtime_config() {
 
 String topic_for(const char *suffix) {
   String out(g_cfg_mqtt_base_topic);
+  out += "/";
+  out += suffix;
+  return out;
+}
+
+String controller_topic_for(const char *suffix) {
+  String out(g_cfg_controller_base_topic);
   out += "/";
   out += suffix;
   return out;
@@ -503,6 +537,11 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
       g_runtime->set_temperature_unit(g_cfg_temp_unit_f ? TemperatureUnit::Fahrenheit
                                                         : TemperatureUnit::Celsius);
     }
+    // Forward unit preference to controller so its HA climate entity matches
+    if (g_mqtt.connected() && g_cfg_controller_base_topic.length() > 0) {
+      String topic = g_cfg_controller_base_topic + "/cfg/temperature_unit/set";
+      g_mqtt.publish(topic.c_str(), g_cfg_temp_unit_f ? "f" : "c", false);
+    }
   } else if (key == "ota_hostname") {
     g_cfg_ota_hostname = value;
     g_cfg.putString("ota_host", value);
@@ -560,7 +599,7 @@ void schedule_reboot() {
 }
 
 void shutdown_display_for_reboot() {
-  ledcWrite(kBacklightChannel, 0);
+  ledcWrite(kBacklightPin, 0);
   if (g_panel != nullptr) {
     esp_lcd_panel_disp_on_off(g_panel, false);
   }
@@ -840,61 +879,34 @@ const char *reset_reason_text(esp_reset_reason_t reason) {
   }
 }
 
-String json_escape(const String &in) {
-  String out;
-  out.reserve(in.length() + 8);
-  for (size_t i = 0; i < in.length(); ++i) {
-    const char c = in[i];
-    if (c == '"' || c == '\\') {
-      out += '\\';
-    }
-    out += c;
-  }
-  return out;
-}
-
-String html_escape(const String &in) {
-  String out;
-  out.reserve(in.length() + 16);
-  for (size_t i = 0; i < in.length(); ++i) {
-    const char c = in[i];
-    switch (c) {
-      case '&': out += "&amp;"; break;
-      case '"': out += "&quot;"; break;
-      case '<': out += "&lt;"; break;
-      case '>': out += "&gt;"; break;
-      default: out += c; break;
-    }
-  }
-  return out;
-}
+// web_ui::html_escape() and web_ui::json_escape() are now in web_ui namespace via web_ui_escape.h
 
 void web_handle_config_get() {
   String body = "{";
-  body += "\"wifi_ssid\":\"" + json_escape(g_cfg_wifi_ssid) + "\",";
+  body += "\"wifi_ssid\":\"" + web_ui::json_escape(g_cfg_wifi_ssid) + "\",";
   body += "\"wifi_password\":\"" + String(g_cfg_wifi_password.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"mqtt_host\":\"" + json_escape(g_cfg_mqtt_host) + "\",";
+  body += "\"mqtt_host\":\"" + web_ui::json_escape(g_cfg_mqtt_host) + "\",";
   body += "\"mqtt_port\":" + String(g_cfg_mqtt_port) + ",";
-  body += "\"mqtt_user\":\"" + json_escape(g_cfg_mqtt_user) + "\",";
+  body += "\"mqtt_user\":\"" + web_ui::json_escape(g_cfg_mqtt_user) + "\",";
   body += "\"mqtt_password\":\"" + String(g_cfg_mqtt_password.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"mqtt_client_id\":\"" + json_escape(g_cfg_mqtt_client_id) + "\",";
-  body += "\"mqtt_base_topic\":\"" + json_escape(g_cfg_mqtt_base_topic) + "\",";
-  body += "\"discovery_prefix\":\"" + json_escape(g_cfg_discovery_prefix) + "\",";
-  body += "\"shared_device_id\":\"" + json_escape(g_cfg_shared_device_id) + "\",";
+  body += "\"mqtt_client_id\":\"" + web_ui::json_escape(g_cfg_mqtt_client_id) + "\",";
+  body += "\"mqtt_base_topic\":\"" + web_ui::json_escape(g_cfg_mqtt_base_topic) + "\",";
+  body += "\"discovery_prefix\":\"" + web_ui::json_escape(g_cfg_discovery_prefix) + "\",";
+  body += "\"shared_device_id\":\"" + web_ui::json_escape(g_cfg_shared_device_id) + "\",";
   body += "\"pirateweather_api_key\":\"" +
           String(g_cfg_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"pirateweather_zip\":\"" + json_escape(g_cfg_pirateweather_zip) + "\",";
+  body += "\"pirateweather_zip\":\"" + web_ui::json_escape(g_cfg_pirateweather_zip) + "\",";
   body += "\"display_timeout_s\":" + String(g_display_timeout_ms / 1000UL) + ",";
   body += "\"backlight_active_pct\":" + String(g_cfg_backlight_active_pct) + ",";
   body += "\"backlight_screensaver_pct\":" + String(g_cfg_backlight_screensaver_pct) + ",";
   body += "\"temp_comp_c\":" + String(g_cfg_temp_comp_c, 2) + ",";
   body += "\"temperature_unit\":\"" + String(g_cfg_temp_unit_f ? "f" : "c") + "\",";
-  body += "\"ota_hostname\":\"" + json_escape(g_cfg_ota_hostname) + "\",";
+  body += "\"ota_hostname\":\"" + web_ui::json_escape(g_cfg_ota_hostname) + "\",";
   body += "\"ota_password\":\"" + String(g_cfg_ota_password.length() > 0 ? "set" : "unset") + "\",";
   body += "\"espnow_channel\":" + String(g_cfg_espnow_channel) + ",";
-  body += "\"espnow_peer_mac\":\"" + json_escape(g_cfg_espnow_peer_mac) + "\",";
+  body += "\"espnow_peer_mac\":\"" + web_ui::json_escape(g_cfg_espnow_peer_mac) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"controller_base_topic\":\"" + json_escape(g_cfg_controller_base_topic) + "\",";
+  body += "\"controller_base_topic\":\"" + web_ui::json_escape(g_cfg_controller_base_topic) + "\",";
   body += "\"controller_timeout_ms\":" + String(g_cfg_controller_timeout_ms) + ",";
   body += "\"reboot_required\":" + String(g_cfg_reboot_required ? "true" : "false");
   body += "}";
@@ -916,6 +928,85 @@ void web_handle_reboot_post() {
   g_web.send(200, "text/plain", "rebooting\n");
 }
 
+void web_handle_status_get() {
+  const uint32_t now = millis();
+  char buf[2048];
+  const uint32_t mqtt_ctrl_ms = g_mqtt_ctrl_last_update_ms;
+  const uint32_t mqtt_cmd_ms = g_last_mqtt_command_ms;
+  const uint32_t espnow_hb_ms = g_runtime ? g_runtime->last_controller_heartbeat_ms() : 0;
+  char remote_temp_str[16], remote_hum_str[16];
+  if (std::isnan(g_remote_indoor_temp_c)) {
+    strcpy(remote_temp_str, "null");
+  } else {
+    snprintf(remote_temp_str, sizeof(remote_temp_str), "%.2f", static_cast<double>(g_remote_indoor_temp_c));
+  }
+  if (std::isnan(g_remote_indoor_humidity)) {
+    strcpy(remote_hum_str, "null");
+  } else {
+    snprintf(remote_hum_str, sizeof(remote_hum_str), "%.2f", static_cast<double>(g_remote_indoor_humidity));
+  }
+  snprintf(buf, sizeof(buf),
+    "{"
+    "\"uptime_ms\":%lu,"
+    "\"wifi_connected\":%s,"
+    "\"wifi_ip\":\"%s\","
+    "\"wifi_rssi\":%d,"
+    "\"mqtt_connected\":%s,"
+    "\"aht_sensor_ready\":%s,"
+    "\"sensor_type\":\"%s\","
+    "\"remote_indoor_temp_c\":%s,"
+    "\"remote_indoor_humidity\":%s,"
+    "\"indoor_temp_text\":\"%s\","
+    "\"indoor_humidity_text\":\"%s\","
+    "\"setpoint_text\":\"%s\","
+    "\"status_text\":\"%s\","
+    "\"weather_text\":\"%s\","
+    "\"have_weather_data\":%s,"
+    "\"outdoor_temp_c\":%.1f,"
+    "\"mqtt_ctrl_last_update_ms\":%lu,"
+    "\"mqtt_ctrl_last_applied_ms\":%lu,"
+    "\"last_mqtt_command_ms\":%lu,"
+    "\"espnow_heartbeat_ms\":%lu,"
+    "\"controller_timeout_ms\":%lu,"
+    "\"controller_base_topic\":\"%s\","
+    "\"mqtt_ctrl_mode\":\"%s\","
+    "\"mqtt_ctrl_state\":%u,"
+    "\"mqtt_ctrl_available\":%s,"
+    "\"free_heap\":%lu,"
+    "\"firmware_version\":\"%s\""
+    "}",
+    static_cast<unsigned long>(now),
+    WiFi.status() == WL_CONNECTED ? "true" : "false",
+    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "",
+    WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+    g_mqtt.connected() ? "true" : "false",
+    g_sensor_type != SensorType::None ? "true" : "false",
+    g_sensor_type == SensorType::AHT ? "aht" :
+    g_sensor_type == SensorType::Si7021 ? "si7021" : "none",
+    remote_temp_str,
+    remote_hum_str,
+    g_runtime ? g_runtime->indoor_temp_text().c_str() : "",
+    g_runtime ? g_runtime->indoor_humidity_text().c_str() : "",
+    g_runtime ? g_runtime->setpoint_text().c_str() : "",
+    g_runtime ? g_runtime->status_text(now).c_str() : "",
+    g_runtime ? g_runtime->weather_text().c_str() : "",
+    g_have_weather_data ? "true" : "false",
+    static_cast<double>(g_outdoor_temp_c),
+    static_cast<unsigned long>(mqtt_ctrl_ms),
+    static_cast<unsigned long>(g_mqtt_ctrl_last_applied_ms),
+    static_cast<unsigned long>(mqtt_cmd_ms),
+    static_cast<unsigned long>(espnow_hb_ms),
+    static_cast<unsigned long>(g_cfg_controller_timeout_ms),
+    g_cfg_controller_base_topic.c_str(),
+    mqtt_payload::mode_to_str(g_mqtt_ctrl_mode),
+    static_cast<unsigned>(g_mqtt_ctrl_state),
+    g_mqtt_ctrl_available ? "true" : "false",
+    static_cast<unsigned long>(ESP.getFreeHeap()),
+    THERMOSTAT_FIRMWARE_VERSION
+  );
+  g_web.send(200, "application/json", buf);
+}
+
 void write_u16_le(uint8_t *out, uint16_t value) {
   out[0] = static_cast<uint8_t>(value & 0xFFu);
   out[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
@@ -929,10 +1020,23 @@ void write_u32_le(uint8_t *out, uint32_t value) {
 }
 
 void web_handle_screenshot() {
-  if (g_screenshot_fb == nullptr) {
-    g_web.send(503, "text/plain", "screenshot buffer unavailable");
+  // Read directly from the panel framebuffer that LVGL is NOT currently
+  // drawing into (the one being displayed has a complete frame).
+  if (g_buf_1 == nullptr || g_buf_2 == nullptr) {
+    g_web.send(503, "text/plain", "display not initialized");
     return;
   }
+
+  // Force a full refresh so both buffers are up to date, then read the
+  // buffer that LVGL just finished drawing (the one now being displayed).
+  lv_obj_invalidate(lv_scr_act());
+  lv_refr_now(nullptr);
+
+  // After lv_refr_now the draw_buf->buf_act points to the buffer LVGL will
+  // draw into *next*, so the *other* buffer is the freshly completed frame.
+  const auto *fb = reinterpret_cast<const uint16_t *>(
+      g_draw_buf.buf_act == g_buf_1 ? g_buf_2 : g_buf_1);
+
   const uint32_t row_size = ((kDisplayWidth * 3U) + 3U) & ~3U;
   const uint32_t image_size = row_size * kDisplayHeight;
   const uint32_t file_size = 54U + image_size;
@@ -958,7 +1062,7 @@ void web_handle_screenshot() {
   for (int y = kDisplayHeight - 1; y >= 0; --y) {
     uint32_t idx = 0;
     for (int x = 0; x < kDisplayWidth; ++x) {
-      const uint16_t px = g_screenshot_fb[(y * kDisplayWidth) + x];
+      const uint16_t px = fb[(y * kDisplayWidth) + x];
       const uint8_t r = static_cast<uint8_t>(((px >> 11) & 0x1F) * 255 / 31);
       const uint8_t g = static_cast<uint8_t>(((px >> 5) & 0x3F) * 255 / 63);
       const uint8_t b = static_cast<uint8_t>((px & 0x1F) * 255 / 31);
@@ -974,72 +1078,180 @@ void web_handle_screenshot() {
 }
 
 void web_handle_root() {
+  using namespace web_ui;
   String html;
-  html.reserve(8192);
-  html += "<html><body><h1>Thermostat Display Config</h1>";
-  html += "<p><a href=\"/config\">JSON config</a> | <a href=\"/screenshot\">Screenshot</a> | <a href=\"/update\">Firmware Update</a></p>";
+  html.reserve(12288);
 
-  html += "<fieldset><legend>Networking Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "wifi_ssid: <input name=\"wifi_ssid\" maxlength=\"64\" value=\"" + html_escape(g_cfg_wifi_ssid) +
-          "\"><br>";
-  html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
-  html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + html_escape(g_cfg_mqtt_host) + "\"><br>";
-  html += "mqtt_port: <input name=\"mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" value=\"" +
-          String(g_cfg_mqtt_port) + "\"><br>";
-  html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + html_escape(g_cfg_mqtt_user) + "\"><br>";
-  html += "mqtt_password: <input name=\"mqtt_password\" value=\"\"><br>";
-  html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + html_escape(g_cfg_mqtt_client_id) + "\"><br>";
-  html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + html_escape(g_cfg_mqtt_base_topic) + "\"><br>";
-  html += "espnow_channel: <input name=\"espnow_channel\" type=\"number\" min=\"1\" max=\"14\" step=\"1\" value=\"" +
-          String(g_cfg_espnow_channel) + "\"><br>";
-  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
-          html_escape(g_cfg_espnow_peer_mac) + "\"><br>";
-  html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
-  html += "controller_base_topic: <input name=\"controller_base_topic\" value=\"" + html_escape(g_cfg_controller_base_topic) + "\"><br>";
-  html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
+  static const TabDef tabs[] = {
+    {"status", "Status"},
+    {"wifi", "WiFi"},
+    {"mqtt", "MQTT"},
+    {"espnow", "ESP-NOW"},
+    {"display", "Display"},
+    {"weather", "Weather"},
+    {"hw", "Hardware"},
+    {"general", "General"},
+    {"system", "System"},
+  };
+  page_begin(html, "Thermostat Display", g_cfg_ota_hostname.c_str(),
+             tabs, sizeof(tabs) / sizeof(tabs[0]));
 
-  html += "<fieldset><legend>Hardware Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "temp_comp_c: <input name=\"temp_comp_c\" type=\"number\" min=\"-10\" max=\"10\" step=\"0.01\" value=\"" +
-          String(g_cfg_temp_comp_c, 2) + "\"><br>";
-  html += "controller_timeout_ms: <input name=\"controller_timeout_ms\" type=\"number\" min=\"1000\" max=\"600000\" step=\"1\" value=\"" +
-          String(g_cfg_controller_timeout_ms) + "\"><br>";
-  html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + html_escape(g_cfg_ota_hostname) + "\"><br>";
-  html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
-  html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
+  // ── Status tab ──
+  tab_begin(html, "status", true);
+  card_begin(html, "Display Status");
+  status_grid_begin(html);
+  status_item(html, "Uptime", "uptime_ms");
+  status_item(html, "WiFi", "wifi_connected");
+  status_item(html, "IP Address", "wifi_ip");
+  status_item(html, "RSSI", "wifi_rssi");
+  status_item(html, "MQTT", "mqtt_connected");
+  status_item(html, "Sensor", "sensor_type");
+  status_item(html, "Remote Temp", "remote_indoor_temp_c");
+  status_item(html, "Remote Humidity", "remote_indoor_humidity");
+  status_item(html, "Indoor Temp", "indoor_temp_text");
+  status_item(html, "Indoor Humidity", "indoor_humidity_text");
+  status_item(html, "Setpoint", "setpoint_text");
+  status_item(html, "Status", "status_text");
+  status_item(html, "Weather", "weather_text");
+  status_item(html, "Controller Mode", "mqtt_ctrl_mode");
+  status_item(html, "Controller State", "mqtt_ctrl_state");
+  status_item(html, "Controller Available", "mqtt_ctrl_available");
+  status_item(html, "Free Heap", "free_heap");
+  status_grid_end(html);
+  card_end(html);
+  if (g_cfg_reboot_required) {
+    html += F("<div class=\"card\" style=\"border:1px solid var(--wn)\">"
+              "<p style=\"color:var(--wn)\">Reboot required for pending changes.</p></div>");
+  }
+  tab_end(html);
 
-  html += "<fieldset><legend>Display Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "display_timeout_s: <input name=\"display_timeout_s\" type=\"number\" min=\"30\" max=\"600\" step=\"1\" value=\"" +
-          String(g_display_timeout_ms / 1000UL) + "\"><br>";
-  html += "backlight_active_pct: <input name=\"backlight_active_pct\" type=\"number\" min=\"0\" max=\"100\" step=\"1\" value=\"" +
-          String(g_cfg_backlight_active_pct) + "\"><br>";
-  html += "backlight_screensaver_pct: <input name=\"backlight_screensaver_pct\" type=\"number\" min=\"0\" max=\"100\" step=\"1\" value=\"" +
-          String(g_cfg_backlight_screensaver_pct) + "\"><br>";
-  html += "temperature_unit (c/f): <input name=\"temperature_unit\" pattern=\"^(c|f|celsius|fahrenheit)$\" title=\"Use c, f, celsius, or fahrenheit\" value=\"" +
-          String(g_cfg_temp_unit_f ? "f" : "c") + "\"><br>";
-  html += "<button type=\"submit\">Save Display</button></form></fieldset>";
+  // ── WiFi tab ──
+  tab_begin(html, "wifi");
+  card_begin(html, "WiFi Settings");
+  form_begin(html);
+  text_field(html, "WiFi SSID", "wifi_ssid", g_cfg_wifi_ssid, nullptr, nullptr, nullptr, 64);
+  password_field(html, "WiFi Password", "wifi_password", g_cfg_wifi_password.length() > 0);
+  form_end(html, "Save WiFi");
+  card_end(html);
+  tab_end(html);
 
-  html += "<fieldset><legend>Weather</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "pirateweather_api_key: <input name=\"pirateweather_api_key\" value=\"\"><br>";
-  html += "pirateweather_zip: <input name=\"pirateweather_zip\" pattern=\"^[0-9]{5}(-[0-9]{4})?$\" title=\"US ZIP format: 12345 or 12345-6789\" value=\"" +
-          html_escape(g_cfg_pirateweather_zip) + "\"><br>";
-  html += "<button type=\"submit\">Save Weather</button></form></fieldset>";
+  // ── MQTT tab ──
+  tab_begin(html, "mqtt");
+  card_begin(html, "MQTT Broker");
+  form_begin(html);
+  text_field(html, "Broker Host", "mqtt_host", g_cfg_mqtt_host);
+  number_field(html, "Broker Port", "mqtt_port", String(g_cfg_mqtt_port), "1", "65535", "1");
+  text_field(html, "Username", "mqtt_user", g_cfg_mqtt_user);
+  password_field(html, "Password", "mqtt_password", g_cfg_mqtt_password.length() > 0);
+  text_field(html, "Client ID", "mqtt_client_id", g_cfg_mqtt_client_id);
+  text_field(html, "Base Topic", "mqtt_base_topic", g_cfg_mqtt_base_topic,
+             "e.g. thermostat/furnace-display");
+  text_field(html, "Controller Base Topic", "controller_base_topic",
+             g_cfg_controller_base_topic,
+             "MQTT base topic of the furnace controller");
+  form_end(html, "Save MQTT");
+  card_end(html);
+  tab_end(html);
 
-  html += "<fieldset><legend>Miscellaneous</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "discovery_prefix: <input name=\"discovery_prefix\" value=\"" + html_escape(g_cfg_discovery_prefix) +
-          "\"><br>";
-  html += "shared_device_id: <input name=\"shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" + html_escape(g_cfg_shared_device_id) +
-          "\"><br>";
-  html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
+  // ── ESP-NOW tab ──
+  tab_begin(html, "espnow");
+  card_begin(html, "ESP-NOW Settings");
+  form_begin(html);
+  number_field(html, "Channel", "espnow_channel", String(g_cfg_espnow_channel), "1", "14", "1");
+  mac_field(html, "Peer MAC", "espnow_peer_mac", g_cfg_espnow_peer_mac);
+  password_field(html, "Encryption Key (LMK)", "espnow_lmk",
+                 g_cfg_espnow_lmk.length() > 0,
+                 "^[0-9A-Fa-f]{32}$", "32 hex characters");
+  form_end(html, "Save ESP-NOW");
+  card_end(html);
+  tab_end(html);
 
-  html += "<p>reboot_required=" + String(g_cfg_reboot_required ? "true" : "false") + "</p>";
-  html += "<form method=\"post\" action=\"/reboot\"><button type=\"submit\">Reboot Display</button></form>";
-  html += "<p><img src=\"/screenshot\" style=\"max-width:95vw;border:1px solid #ccc\"></p>";
-  html += "</body></html>";
+  // ── Display tab ──
+  tab_begin(html, "display");
+  card_begin(html, "Screen Settings");
+  form_begin(html);
+  number_field(html, "Screen Timeout (seconds)", "display_timeout_s",
+               String(g_display_timeout_ms / 1000UL), "30", "600", "1");
+  number_field(html, "Active Brightness (%)", "backlight_active_pct",
+               String(g_cfg_backlight_active_pct), "0", "100", "1");
+  number_field(html, "Screensaver Brightness (%)", "backlight_screensaver_pct",
+               String(g_cfg_backlight_screensaver_pct), "0", "100", "1");
+  {
+    static const SelectOption temp_opts[] = {{"c", "Celsius"}, {"f", "Fahrenheit"}};
+    select_field(html, "Temperature Unit", "temperature_unit",
+                 temp_opts, 2, String(g_cfg_temp_unit_f ? "f" : "c"));
+  }
+  form_end(html, "Save Display");
+  card_end(html);
+  tab_end(html);
+
+  // ── Weather tab ──
+  tab_begin(html, "weather");
+  card_begin(html, "PirateWeather");
+  form_begin(html);
+  password_field(html, "API Key", "pirateweather_api_key",
+                 g_cfg_pirateweather_api_key.length() > 0);
+  text_field(html, "ZIP Code", "pirateweather_zip", g_cfg_pirateweather_zip,
+             "US ZIP: 12345 or 12345-6789",
+             "^[0-9]{5}(-[0-9]{4})?$", "US ZIP format");
+  form_end(html, "Save Weather");
+  card_end(html);
+  tab_end(html);
+
+  // ── Hardware tab ──
+  tab_begin(html, "hw");
+  card_begin(html, "Sensor & Connectivity");
+  form_begin(html);
+  number_field(html, "Temp Compensation (\u00b0C)", "temp_comp_c",
+               String(g_cfg_temp_comp_c, 2), "-10", "10", "0.01",
+               "Offset applied to AHT sensor readings");
+  number_field(html, "Controller Timeout (ms)", "controller_timeout_ms",
+               String(g_cfg_controller_timeout_ms), "1000", "600000", "1",
+               "Time before controller is considered disconnected");
+  text_field(html, "OTA Hostname", "ota_hostname", g_cfg_ota_hostname);
+  password_field(html, "OTA Password", "ota_password", g_cfg_ota_password.length() > 0);
+  form_end(html, "Save Hardware");
+  card_end(html);
+  tab_end(html);
+
+  // ── General tab ──
+  tab_begin(html, "general");
+  card_begin(html, "Identity");
+  form_begin(html);
+  text_field(html, "Discovery Prefix", "discovery_prefix", g_cfg_discovery_prefix,
+             "MQTT discovery prefix for Home Assistant");
+  text_field(html, "Shared Device ID", "shared_device_id", g_cfg_shared_device_id,
+             "1-64 chars: letters, numbers, underscore, hyphen",
+             "^[A-Za-z0-9_-]{1,64}$", "1-64 chars: letters, numbers, underscore, hyphen");
+  form_end(html, "Save General");
+  card_end(html);
+  tab_end(html);
+
+  // ── System tab ──
+  tab_begin(html, "system");
+  card_begin(html, "Firmware Update");
+  html += F("<form method=\"post\" action=\"/update\" enctype=\"multipart/form-data\">");
+  file_upload(html);
+  html += F("<div class=\"mt\"><button type=\"submit\" class=\"btn btn-p\">Upload Firmware</button></div>");
+  html += F("</form>");
+  card_end(html);
+
+  card_begin(html, "Device Control");
+  reboot_button(html, "Reboot Display");
+  card_end(html);
+
+  card_begin(html, "Screenshot");
+  html += F("<p><img src=\"/screenshot\" style=\"max-width:100%;border-radius:0.375rem\"></p>");
+  card_end(html);
+
+  card_begin(html, "Links");
+  html += F("<p style=\"font-size:0.85rem\"><a href=\"/config\" style=\"color:var(--ac)\">JSON Config</a>"
+            " &middot; <a href=\"/status\" style=\"color:var(--ac)\">JSON Status</a>"
+            " &middot; <a href=\"/screenshot\" style=\"color:var(--ac)\">Screenshot (BMP)</a></p>");
+  card_end(html);
+  tab_end(html);
+
+  page_end(html);
   g_web.send(200, "text/html", html);
 }
 
@@ -1047,6 +1259,7 @@ void ensure_web_ready() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (!g_web_started) {
     g_web.on("/", HTTP_GET, web_handle_root);
+    g_web.on("/status", HTTP_GET, web_handle_status_get);
     g_web.on("/config", HTTP_GET, web_handle_config_get);
     g_web.on("/config", HTTP_POST, web_handle_config_post);
     g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
@@ -1060,13 +1273,25 @@ void ensure_web_ready() {
 
 std::string current_time_text() {
   time_t now = time(nullptr);
-  if (now <= 0) {
+  if (now < 1700000000L) {
     return "--:--";
   }
   struct tm local_tm {};
   localtime_r(&now, &local_tm);
   char buf[24];
   strftime(buf, sizeof(buf), "%I:%M %p", &local_tm);
+  return std::string(buf[0] == '0' ? buf + 1 : buf);
+}
+
+std::string current_date_text() {
+  time_t now = time(nullptr);
+  if (now < 1700000000L) {
+    return "--- date ---";
+  }
+  struct tm local_tm {};
+  localtime_r(&now, &local_tm);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%A, %b %d", &local_tm);
   return std::string(buf);
 }
 
@@ -1126,6 +1351,19 @@ void mqtt_publish_state() {
   g_mqtt.publish(topic_for("state/error_ota").c_str(), g_last_ota_error.c_str(), true);
   g_mqtt.publish(topic_for("state/error_espnow").c_str(), g_last_espnow_error.c_str(), true);
 
+  {
+    const uint32_t now_ms = millis();
+    const uint32_t mqtt_ms = std::max(g_last_mqtt_command_ms, g_mqtt_ctrl_last_update_ms);
+    const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
+    const bool mqtt_active = mqtt_ms > 0 && (now_ms - mqtt_ms) < g_cfg_controller_timeout_ms;
+    const bool espnow_active = espnow_ms > 0 && (now_ms - espnow_ms) < g_cfg_controller_timeout_ms;
+    const char *path = espnow_active && mqtt_active ? "mqtt+esp-now"
+                       : mqtt_active                ? "mqtt"
+                       : espnow_active              ? "esp-now"
+                                                    : "disconnected";
+    g_mqtt.publish(topic_for("state/connection_path").c_str(), path, true);
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     g_mqtt.publish(topic_for("state/wifi_ip").c_str(), WiFi.localIP().toString().c_str(), true);
     g_mqtt.publish(topic_for("state/wifi_mac").c_str(), WiFi.macAddress().c_str(), true);
@@ -1136,22 +1374,23 @@ void mqtt_publish_state() {
     g_mqtt.publish(topic_for("state/wifi_rssi").c_str(), buf, true);
   }
 
-  bool ok_temp = false;
-  const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok_temp);
+  const float indoor_c = g_runtime->local_indoor_temperature_c();
+  const bool ok_temp = std::isfinite(indoor_c);
   if (ok_temp) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_c);
     g_mqtt.publish(topic_for("state/current_temp_c").c_str(), buf, true);
   }
 
-  bool ok_humidity = false;
-  const float indoor_h = parse_numeric_prefix(g_runtime->indoor_humidity_text(), &ok_humidity);
+  const float indoor_h = g_runtime->local_indoor_humidity();
+  const bool ok_humidity = std::isfinite(indoor_h);
   if (ok_humidity) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_h);
     g_mqtt.publish(topic_for("state/current_humidity").c_str(), buf, true);
   }
 
-  // Publish sensor data to controller's topic namespace for MQTT-based intake
-  if (g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
+  // Publish local sensor data to controller's topic namespace for MQTT-based intake.
+  // Only when we have a local sensor — don't echo the controller's own values back.
+  if (g_sensor_type != SensorType::None && g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
     String mac_str = WiFi.macAddress();
     if (ok_temp) {
       String topic = g_cfg_controller_base_topic + "/sensor/" + mac_str + "/temp_c";
@@ -1184,7 +1423,8 @@ void mqtt_publish_discovery() {
            "{\"name\":\"Display Timeout\",\"uniq_id\":\"%s_display_timeout\","
            "\"cmd_t\":\"%s/cmd/display_timeout_s\",\"stat_t\":\"%s/state/display_timeout_s\","
            "\"min\":30,\"max\":600,\"step\":5,\"mode\":\"box\",\"unit_of_meas\":\"s\","
-           "\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+           "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
            node.c_str(), base.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(timeout_config.c_str(), payload, true);
 
@@ -1224,16 +1464,34 @@ void mqtt_publish_discovery() {
            "{\"name\":\"Display WiFi RSSI\",\"uniq_id\":\"%s_display_wifi_rssi\","
            "\"stat_t\":\"%s/state/wifi_rssi\",\"unit_of_meas\":\"dBm\","
            "\"dev_cla\":\"signal_strength\",\"stat_cla\":\"measurement\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(rssi_config.c_str(), payload, true);
+
+  const String ip_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_ip/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display IP Address\",\"uniq_id\":\"%s_display_ip\","
+           "\"stat_t\":\"%s/state/wifi_ip\",\"icon\":\"mdi:ip-network\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(ip_config.c_str(), payload, true);
+
+  const String conn_path_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_display_connection_path/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Display Connection Path\",\"uniq_id\":\"%s_display_connection_path\","
+           "\"stat_t\":\"%s/state/connection_path\",\"icon\":\"mdi:connection\","
+           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(conn_path_config.c_str(), payload, true);
 
   const String heap_config =
       g_cfg_discovery_prefix + "/sensor/" + node + "_display_free_heap/config";
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display Free Heap\",\"uniq_id\":\"%s_display_free_heap\","
            "\"stat_t\":\"%s/state/free_heap_bytes\",\"unit_of_meas\":\"B\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(heap_config.c_str(), payload, true);
 
@@ -1242,7 +1500,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display Last MQTT Command\",\"uniq_id\":\"%s_display_last_mqtt_command\","
            "\"stat_t\":\"%s/state/last_mqtt_command_ms\",\"unit_of_meas\":\"ms\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(last_mqtt_cmd_config.c_str(), payload, true);
 
@@ -1251,7 +1509,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display Last ESP-NOW RX\",\"uniq_id\":\"%s_display_last_espnow_rx\","
            "\"stat_t\":\"%s/state/last_espnow_rx_ms\",\"unit_of_meas\":\"ms\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(last_espnow_rx_config.c_str(), payload, true);
 
@@ -1260,7 +1518,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display ESP-NOW Send OK\",\"uniq_id\":\"%s_display_espnow_send_ok\","
            "\"stat_t\":\"%s/state/espnow_send_ok_count\",\"icon\":\"mdi:counter\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(espnow_ok_config.c_str(), payload, true);
 
@@ -1269,7 +1527,7 @@ void mqtt_publish_discovery() {
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Display ESP-NOW Send Fail\",\"uniq_id\":\"%s_display_espnow_send_fail\","
            "\"stat_t\":\"%s/state/espnow_send_fail_count\",\"icon\":\"mdi:counter\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(espnow_fail_config.c_str(), payload, true);
 
@@ -1319,6 +1577,27 @@ void mqtt_publish_discovery() {
            "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(reboot_config.c_str(), payload, true);
+
+  const String temp_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_indoor_temperature/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Indoor Temperature\",\"uniq_id\":\"%s_indoor_temperature\","
+           "\"stat_t\":\"%s/state/current_temp_c\",\"unit_of_meas\":\"\xC2\xB0""C\","
+           "\"dev_cla\":\"temperature\",\"stat_cla\":\"measurement\","
+           "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+           "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(temp_config.c_str(), payload, true);
+
+  const String hum_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_indoor_humidity/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Indoor Humidity\",\"uniq_id\":\"%s_indoor_humidity\","
+           "\"stat_t\":\"%s/state/current_humidity\",\"unit_of_meas\":\"%%\","
+           "\"dev_cla\":\"humidity\",\"stat_cla\":\"measurement\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(hum_config.c_str(), payload, true);
 
   g_mqtt_discovery_sent = true;
 }
@@ -1430,34 +1709,98 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     }
   }
 
-  mqtt_publish_state();
-}
-
-String improv_service_name() {
-  const String configured(THERMOSTAT_PROV_SERVICE_NAME);
-  if (configured.length() > 0) return configured;
-  String mac = WiFi.macAddress();
-  mac.replace(":", "");
-  if (mac.length() >= 6) {
-    return String("PROV_") + mac.substring(mac.length() - 6);
+  // Controller state topics (MQTT-primary path)
+  if (g_cfg_controller_base_topic.length() > 0) {
+    if (topic_str == controller_topic_for("state/mode")) {
+      g_mqtt_ctrl_mode = mqtt_payload::str_to_mode(normalized);
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/fan_mode")) {
+      g_mqtt_ctrl_fan = mqtt_payload::str_to_fan(normalized);
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/target_temp_c")) {
+      float sp = static_cast<float>(atof(value));
+      if (std::isfinite(sp)) {
+        g_mqtt_ctrl_setpoint_c = sp;
+        g_mqtt_ctrl_last_update_ms = now;
+      }
+    } else if (topic_str == controller_topic_for("state/furnace_state")) {
+      g_mqtt_ctrl_state = static_cast<FurnaceStateCode>(atoi(value));
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/lockout")) {
+      g_mqtt_ctrl_lockout = mqtt_payload::parse_bool(value);
+      g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/filter_runtime_hours")) {
+      float hours = static_cast<float>(atof(value));
+      if (std::isfinite(hours) && hours >= 0.0f) {
+        g_mqtt_ctrl_filter_runtime_s = static_cast<uint32_t>(hours * 3600.0f);
+        g_mqtt_ctrl_last_update_ms = now;
+      }
+    } else if (topic_str == controller_topic_for("state/outdoor_temp_c")) {
+      float temp = static_cast<float>(atof(value));
+      if (std::isfinite(temp) && g_runtime != nullptr) {
+        g_outdoor_temp_c = temp;
+        g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
+        g_have_weather_data = true;
+      }
+    } else if (topic_str == controller_topic_for("state/weather_condition")) {
+      WeatherIcon icon = weather_icon_from_api(normalized);
+      if (icon == WeatherIcon::Unknown) {
+        // Try matching display text for conditions published as English names
+        for (uint8_t i = 0; i <= static_cast<uint8_t>(WeatherIcon::Unknown); ++i) {
+          const auto candidate = static_cast<WeatherIcon>(i);
+          char lower_display[32];
+          const char *display = weather_icon_display_text(candidate);
+          size_t j = 0;
+          for (; display[j] != '\0' && j < sizeof(lower_display) - 1; ++j) {
+            lower_display[j] = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(display[j])));
+          }
+          lower_display[j] = '\0';
+          if (strcmp(normalized, lower_display) == 0) {
+            icon = candidate;
+            break;
+          }
+        }
+      }
+      if (g_runtime != nullptr) {
+        g_weather_icon = icon;
+        g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
+        g_have_weather_data = true;
+      }
+    } else if (topic_str == controller_topic_for("state/current_temp_c")) {
+      float temp = static_cast<float>(atof(value));
+      if (std::isfinite(temp)) {
+        g_remote_indoor_temp_c = temp;
+      }
+    } else if (topic_str == controller_topic_for("state/current_humidity")) {
+      float hum = static_cast<float>(atof(value));
+      if (std::isfinite(hum)) {
+        g_remote_indoor_humidity = hum;
+      }
+    } else if (topic_str == controller_topic_for("state/availability")) {
+      g_mqtt_ctrl_available = strcmp(normalized, "online") == 0;
+    }
   }
-  return "PROV_ESP32_THERMOSTAT";
+
+  mqtt_publish_state();
 }
 
 void start_wifi_provisioning() {
   if (g_wifi_provisioning_started) return;
-  const String service_name = improv_service_name();
-  const bool reset_provisioned = THERMOSTAT_PROV_RESET_PROVISIONED != 0;
-#if CONFIG_BLUEDROID_ENABLED
-  WiFiProv.beginProvision(WIFI_PROV_SCHEME_BLE, WIFI_PROV_SCHEME_HANDLER_FREE_BTDM,
-                          WIFI_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(), nullptr,
-                          nullptr, reset_provisioned);
-  WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "ble");
-#else
-  WiFiProv.beginProvision(WIFI_PROV_SCHEME_SOFTAP, WIFI_PROV_SCHEME_HANDLER_NONE,
-                          WIFI_PROV_SECURITY_1, THERMOSTAT_PROV_POP, service_name.c_str(), nullptr,
-                          nullptr, reset_provisioned);
-  WiFiProv.printQR(service_name.c_str(), THERMOSTAT_PROV_POP, "softap");
+#ifdef IMPROV_WIFI_BLE_ENABLED
+  ImprovBleConfig cfg = {};
+  cfg.device_name = "Thermostat";
+  cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  cfg.hardware_variant = "ESP32-S3";
+  cfg.device_url = nullptr;
+  improv_ble_start(cfg, [](const char *ssid, const char *password) {
+    g_cfg_wifi_ssid = ssid;
+    g_cfg_wifi_password = password;
+    g_cfg.putString("wifi_ssid", ssid);
+    g_cfg.putString("wifi_pwd", password);
+    g_cfg_wifi_reconnect_required = true;
+  });
 #endif
   g_wifi_provisioning_started = true;
 }
@@ -1466,10 +1809,12 @@ void wifi_event_handler(arduino_event_t *event) {
   if (event == nullptr) return;
   switch (event->event_id) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+#ifdef IMPROV_WIFI_BLE_ENABLED
+      if (improv_ble_is_active()) {
+        improv_ble_stop();
+      }
+#endif
       g_wifi_provisioning_started = false;
-      break;
-    case ARDUINO_EVENT_PROV_START:
-      g_wifi_provisioning_started = true;
       break;
     default:
       break;
@@ -1552,9 +1897,39 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/backlight_screensaver_pct").c_str());
   g_mqtt.subscribe(topic_for("cfg/+/set").c_str());
 
+  if (g_cfg_controller_base_topic.length() > 0) {
+    g_mqtt.subscribe(controller_topic_for("state/mode").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/fan_mode").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/target_temp_c").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/furnace_state").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/lockout").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/filter_runtime_hours").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/outdoor_temp_c").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/weather_condition").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/availability").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/current_temp_c").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/current_humidity").c_str());
+  }
+
   mqtt_publish_discovery();
   publish_all_cfg_state();
   mqtt_publish_state();
+
+  // Device registry: publish our identity so other devices/tools can discover us
+  if (g_cfg_shared_device_id.length() > 0) {
+    String mac = WiFi.macAddress();
+    String reg_topic = g_cfg_shared_device_id + "/devices/" + mac;
+    char reg_buf[256];
+    snprintf(reg_buf, sizeof(reg_buf),
+             "{\"mac\":\"%s\",\"ip\":\"%s\",\"type\":\"thermostat\","
+             "\"name\":\"%s\",\"base_topic\":\"%s\",\"firmware\":\"%s\"}",
+             mac.c_str(),
+             WiFi.localIP().toString().c_str(),
+             g_cfg_ota_hostname.c_str(),
+             g_cfg_mqtt_base_topic.c_str(),
+             THERMOSTAT_FIRMWARE_VERSION);
+    g_mqtt.publish(reg_topic.c_str(), reg_buf, true);
+  }
 }
 
 void ensure_ota_ready() {
@@ -1585,22 +1960,17 @@ void ensure_mdns_ready() {
 }
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
-  if (g_screenshot_fb != nullptr && area != nullptr && color_p != nullptr) {
-    const int width = (area->x2 - area->x1 + 1);
-    const int height = (area->y2 - area->y1 + 1);
-    for (int y = 0; y < height; ++y) {
-      const int dst_y = area->y1 + y;
-      if (dst_y < 0 || dst_y >= kDisplayHeight) continue;
-      const int dst_x = area->x1;
-      if (dst_x < 0 || dst_x >= kDisplayWidth) continue;
-      const int copy_w = (dst_x + width <= kDisplayWidth) ? width : (kDisplayWidth - dst_x);
-      memcpy(&g_screenshot_fb[(dst_y * kDisplayWidth) + dst_x],
-             &color_p[y * width], static_cast<size_t>(copy_w) * sizeof(uint16_t));
-    }
-  }
   if (g_panel != nullptr) {
-    esp_lcd_panel_draw_bitmap(g_panel, area->x1, area->y1, area->x2 + 1, area->y2 + 1,
-                              color_p);
+    // Drain any stale VSYNC signals so the take below waits for the
+    // VSYNC that happens *after* draw_bitmap queues the buffer swap.
+    xSemaphoreTake(g_flush_ready_sem, 0);
+
+    esp_lcd_rgb_panel_restart(g_panel);
+    esp_lcd_panel_draw_bitmap(g_panel, 0, 0, kDisplayWidth, kDisplayHeight, color_p);
+
+    // Wait for the buffer swap to actually complete at VSYNC before
+    // letting LVGL draw into the next buffer.
+    xSemaphoreTake(g_flush_ready_sem, pdMS_TO_TICKS(100));
   }
   lv_disp_flush_ready(disp_drv);
 }
@@ -1633,6 +2003,9 @@ bool gt911_write(uint16_t reg, uint8_t val) {
   return g_touch_i2c.endTransmission() == 0;
 }
 
+void show_page(ThermostatPage page);
+void apply_backlight(bool screensaver_active);
+
 void poll_touch() {
   uint8_t status = 0;
   if (!gt911_read(0x814E, &status, 1)) {
@@ -1643,6 +2016,7 @@ void poll_touch() {
   const uint8_t points = status & 0x0F;
   if ((status & 0x80) == 0 || points == 0) {
     g_touch.touched = false;
+    gt911_write(0x814E, 0);
     return;
   }
 
@@ -1652,12 +2026,20 @@ void poll_touch() {
     return;
   }
 
-  const uint16_t x = static_cast<uint16_t>(data[1] << 8 | data[0]);
-  const uint16_t y = static_cast<uint16_t>(data[3] << 8 | data[2]);
+  const uint16_t raw_x = static_cast<uint16_t>(data[1] << 8 | data[0]);
+  const uint16_t raw_y = static_cast<uint16_t>(data[3] << 8 | data[2]);
+
+  // Scale touch coordinates to display resolution if GT911 config differs
+  const int16_t x = (g_touch_x_max != kDisplayWidth)
+                        ? static_cast<int16_t>(static_cast<uint32_t>(raw_x) * kDisplayWidth / g_touch_x_max)
+                        : static_cast<int16_t>(raw_x);
+  const int16_t y = (g_touch_y_max != kDisplayHeight)
+                        ? static_cast<int16_t>(static_cast<uint32_t>(raw_y) * kDisplayHeight / g_touch_y_max)
+                        : static_cast<int16_t>(raw_y);
 
   g_touch.touched = true;
-  g_touch.x = static_cast<int16_t>(x);
-  g_touch.y = static_cast<int16_t>(y);
+  g_touch.x = x;
+  g_touch.y = y;
 
   gt911_write(0x814E, 0);
 }
@@ -1668,7 +2050,12 @@ void touch_read_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = g_touch.x;
     data->point.y = g_touch.y;
+    const bool was_screensaver = g_screen.screensaver_active();
     g_screen.on_user_interaction(millis());
+    if (was_screensaver && !g_screen.screensaver_active()) {
+      show_page(g_screen.current_page());
+      apply_backlight(false);
+    }
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
@@ -1712,13 +2099,13 @@ void show_page(ThermostatPage page) {
 
 void apply_backlight(bool screensaver_active) {
   if (!g_backlight_enabled) {
-    ledcWrite(kBacklightChannel, 0);
+    ledcWrite(kBacklightPin, 0);
     return;
   }
   const uint8_t duty =
       screensaver_active ? percent_to_duty(g_cfg_backlight_screensaver_pct)
                          : percent_to_duty(g_cfg_backlight_active_pct);
-  ledcWrite(kBacklightChannel, duty);
+  ledcWrite(kBacklightPin, duty);
 }
 
 void refresh_ui() {
@@ -1730,12 +2117,26 @@ void refresh_ui() {
   lv_label_set_text(g_indoor_label, g_runtime->indoor_temp_text().c_str());
   lv_label_set_text(g_humidity_label, g_runtime->indoor_humidity_text().c_str());
   lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
-  lv_label_set_text(g_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
-  if (g_weather_icon_label != nullptr && g_have_weather_data) {
-    lv_label_set_text(g_weather_icon_label,
-                      thermostat::ui::weather_icon_symbol(g_runtime->weather_icon()));
+  // Show/hide outdoor section based on weather data availability
+  if (g_outdoor_section != nullptr) {
+    if (g_have_weather_data) {
+      lv_obj_clear_flag(g_outdoor_section, LV_OBJ_FLAG_HIDDEN);
+      lv_label_set_text(g_weather_label, g_runtime->weather_text().c_str());
+      if (g_weather_icon_label != nullptr) {
+        lv_label_set_text(g_weather_icon_label,
+                          thermostat::ui::weather_icon_symbol(g_runtime->weather_icon()));
+      }
+    } else {
+      lv_obj_add_flag(g_outdoor_section, LV_OBJ_FLAG_HIDDEN);
+    }
   }
 
+  if (g_home_time_label != nullptr) {
+    lv_label_set_text(g_home_time_label, current_time_text().c_str());
+  }
+  if (g_home_date_label != nullptr) {
+    lv_label_set_text(g_home_date_label, current_date_text().c_str());
+  }
   lv_label_set_text(g_screen_time_label, current_time_text().c_str());
   if (g_screen_weather_label != nullptr) {
     lv_label_set_text(g_screen_weather_label, g_have_weather_data ? g_runtime->weather_text().c_str() : "");
@@ -1874,12 +2275,21 @@ void refresh_ui() {
                         LV_ANIM_OFF);
   }
 
+  // Controller connectivity check
+  const uint32_t mqtt_cmd_ms = g_last_mqtt_command_ms;
+  const uint32_t mqtt_ctrl_ms = g_mqtt_ctrl_last_update_ms;
+  const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
+  const bool controller_connected =
+      (mqtt_cmd_ms > 0 && (now - mqtt_cmd_ms) < g_cfg_controller_timeout_ms) ||
+      (mqtt_ctrl_ms > 0 && (now - mqtt_ctrl_ms) < g_cfg_controller_timeout_ms) ||
+      (espnow_ms > 0 && (now - espnow_ms) < g_cfg_controller_timeout_ms);
+
   thermostat::ui::set_mode_button_state(g_runtime->local_mode());
   thermostat::ui::set_fan_button_state(g_runtime->local_fan_mode());
   thermostat::ui::set_temperature_unit_button_state(g_runtime->temperature_unit());
   g_screen.on_mode_changed(g_runtime->local_mode());
   if (g_setpoint_column != nullptr) {
-    if (g_screen.setpoint_visible()) {
+    if (controller_connected && g_screen.setpoint_visible()) {
       lv_obj_clear_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_add_flag(g_setpoint_column, LV_OBJ_FLAG_HIDDEN);
@@ -1894,20 +2304,30 @@ void refresh_ui() {
     }
   }
 
-  // Fan page status
+  // Fan page status + button state
   if (g_fan_status_label != nullptr) {
-    const FurnaceStateCode cs = g_runtime->controller_state();
-    const char *fan_text = (cs == FurnaceStateCode::HeatOn || cs == FurnaceStateCode::CoolOn ||
-                            cs == FurnaceStateCode::FanOn)
-                               ? "Fan Running"
-                               : "Idle";
-    lv_label_set_text(g_fan_status_label, fan_text);
+    if (!controller_connected) {
+      lv_label_set_text(g_fan_status_label, "Not Connected");
+    } else {
+      const FurnaceStateCode cs = g_runtime->controller_state();
+      const char *fan_text = (cs == FurnaceStateCode::HeatOn || cs == FurnaceStateCode::CoolOn ||
+                              cs == FurnaceStateCode::FanOn)
+                                 ? "Fan Running"
+                                 : "Idle";
+      lv_label_set_text(g_fan_status_label, fan_text);
+    }
   }
+  thermostat::ui::set_fan_mode_buttons_enabled(controller_connected);
 
-  // Mode page status
+  // Mode page status + button state
   if (g_mode_status_label != nullptr) {
-    lv_label_set_text(g_mode_status_label, g_runtime->status_text(now).c_str());
+    if (!controller_connected) {
+      lv_label_set_text(g_mode_status_label, "Not Connected");
+    } else {
+      lv_label_set_text(g_mode_status_label, g_runtime->status_text(now).c_str());
+    }
   }
+  thermostat::ui::set_mode_buttons_enabled(controller_connected);
 }
 
 void tab_event_cb(lv_event_t *) {
@@ -1923,6 +2343,7 @@ void tab_event_cb(lv_event_t *) {
   } else if (strcmp(txt, "SETTINGS") == 0) {
     g_screen.on_tab_selected(ThermostatPage::Settings, now);
   }
+  show_page(g_screen.current_page());
 }
 
 void btn_setpoint_up_cb(lv_event_t *) {
@@ -2042,8 +2463,11 @@ void create_ui() {
   g_indoor_label = handles.indoor_label;
   g_humidity_label = handles.humidity_label;
   g_setpoint_label = handles.setpoint_label;
+  g_outdoor_section = handles.outdoor_section;
   g_weather_label = handles.weather_label;
   g_weather_icon_label = handles.weather_icon_label;
+  g_home_time_label = handles.home_time_label;
+  g_home_date_label = handles.home_date_label;
   g_screen_time_label = handles.screen_time_label;
   g_screen_weather_label = handles.screen_weather_label;
   g_screen_indoor_label = handles.screen_indoor_label;
@@ -2068,21 +2492,8 @@ void create_ui() {
 }
 
 void init_display_and_lvgl() {
-  if (g_screenshot_fb == nullptr) {
-    g_screenshot_fb = static_cast<uint16_t *>(
-        heap_caps_malloc(static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t),
-                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (g_screenshot_fb == nullptr) {
-      g_screenshot_fb = static_cast<uint16_t *>(
-          malloc(static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t)));
-    }
-    if (g_screenshot_fb != nullptr) {
-      memset(g_screenshot_fb, 0, static_cast<size_t>(kDisplayWidth) * kDisplayHeight * sizeof(uint16_t));
-    }
-  }
-
   esp_lcd_rgb_panel_config_t panel_config = {};
-  panel_config.clk_src = LCD_CLK_SRC_PLL160M;
+  panel_config.clk_src = LCD_CLK_SRC_DEFAULT;
   panel_config.timings.pclk_hz = 14000000;
   panel_config.timings.h_res = kDisplayWidth;
   panel_config.timings.v_res = kDisplayHeight;
@@ -2101,33 +2512,41 @@ void init_display_and_lvgl() {
   panel_config.hsync_gpio_num = 39;
   panel_config.disp_gpio_num = -1;
 
-  int pins[16] = {45, 48, 47, 21, 14, 5, 6, 7, 15, 16, 4, 8, 3, 46, 9, 1};
+  // Pin order: R0-R4, G0-G5, B0-B4 (panel uses BGR element order)
+  int pins[16] = {8, 3, 46, 9, 1, 5, 6, 7, 15, 16, 4, 45, 48, 47, 21, 14};
   for (size_t i = 0; i < 16; ++i) {
     panel_config.data_gpio_nums[i] = pins[i];
   }
 
-  panel_config.psram_trans_align = 64;
-  panel_config.sram_trans_align = 4;
   panel_config.flags.fb_in_psram = 1;
+  panel_config.bounce_buffer_size_px = 10 * kDisplayWidth;
+  panel_config.num_fbs = 2;
 
   delay(kDisplayInitSettleMs);
   if (esp_lcd_new_rgb_panel(&panel_config, &g_panel) == ESP_OK) {
     esp_lcd_panel_reset(g_panel);
     esp_lcd_panel_init(g_panel);
+
+    // Register VSYNC callback so the flush can wait for the buffer swap
+    g_flush_ready_sem = xSemaphoreCreateBinary();
+    esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+    cbs.on_vsync = on_vsync_ready;
+    esp_lcd_rgb_panel_register_event_callbacks(g_panel, &cbs, nullptr);
   }
+
+  // Get the panel's two PSRAM framebuffers for double-buffered direct mode.
+  // LVGL draws dirty areas into one buffer while the panel DMA reads the other.
+  // On flush, esp_lcd_panel_draw_bitmap detects the source is a panel buffer
+  // and does an atomic pointer swap instead of a copy.
+  void *panel_fb0 = nullptr;
+  void *panel_fb1 = nullptr;
+  esp_lcd_rgb_panel_get_frame_buffer(g_panel, 2, &panel_fb0, &panel_fb1);
 
   lv_init();
 
-  const size_t buf_pixels = kDisplayWidth * 40;
-  g_buf_1 = static_cast<lv_color_t *>(
-      heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  g_buf_2 = static_cast<lv_color_t *>(
-      heap_caps_malloc(buf_pixels * sizeof(lv_color_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-
-  if (g_buf_1 == nullptr || g_buf_2 == nullptr) {
-    g_buf_1 = static_cast<lv_color_t *>(malloc(buf_pixels * sizeof(lv_color_t)));
-    g_buf_2 = static_cast<lv_color_t *>(malloc(buf_pixels * sizeof(lv_color_t)));
-  }
+  const size_t buf_pixels = kDisplayWidth * kDisplayHeight;
+  g_buf_1 = static_cast<lv_color_t *>(panel_fb0);
+  g_buf_2 = static_cast<lv_color_t *>(panel_fb1);
 
   lv_disp_draw_buf_init(&g_draw_buf, g_buf_1, g_buf_2, buf_pixels);
   lv_disp_drv_init(&g_disp_drv);
@@ -2135,6 +2554,8 @@ void init_display_and_lvgl() {
   g_disp_drv.ver_res = kDisplayHeight;
   g_disp_drv.flush_cb = rgb_flush_cb;
   g_disp_drv.draw_buf = &g_draw_buf;
+  g_disp_drv.direct_mode = 1;
+  g_disp_drv.full_refresh = 1;
   lv_disp_drv_register(&g_disp_drv);
 
   lv_indev_drv_init(&g_indev_drv);
@@ -2144,9 +2565,8 @@ void init_display_and_lvgl() {
 }
 
 void init_backlight() {
-  ledcSetup(kBacklightChannel, kBacklightFreq, kBacklightResolution);
-  ledcAttachPin(kBacklightPin, kBacklightChannel);
-  ledcWrite(kBacklightChannel, 0);
+  ledcAttach(kBacklightPin, kBacklightFreq, kBacklightResolution);
+  ledcWrite(kBacklightPin, 0);
   g_backlight_enabled = false;
   g_backlight_enable_at_ms = 0;
 }
@@ -2154,13 +2574,42 @@ void init_backlight() {
 void init_sensors() {
   g_touch_i2c.begin(kTouchI2cSda, kTouchI2cScl, 400000U);
   g_sensor_i2c.begin(kSensorI2cSda, kSensorI2cScl, 100000U);
-  g_aht_ready = g_aht.begin(&g_sensor_i2c);
+
+  // Try AHT20 first (I2C addr 0x38)
+  if (g_aht.begin(&g_sensor_i2c)) {
+    // Validate with a test read — ghost devices return 0.0/0.0
+    sensors_event_t h, t;
+    if (g_aht.getEvent(&h, &t) &&
+        !(t.temperature == 0.0f && h.relative_humidity == 0.0f)) {
+      g_sensor_type = SensorType::AHT;
+      Serial.println("[sensor] AHT detected");
+    }
+  }
+  // Try Si7021 if AHT not found (I2C addr 0x40)
+  if (g_sensor_type == SensorType::None && g_si7021.begin()) {
+    g_sensor_type = SensorType::Si7021;
+    Serial.println("[sensor] Si7021 detected");
+  }
+  if (g_sensor_type == SensorType::None) {
+    Serial.println("[sensor] no sensor detected");
+  }
+
+  // Read GT911 configured resolution for coordinate scaling
+  uint8_t res[4] = {0};
+  if (gt911_read(0x8048, res, 4)) {
+    const uint16_t x_max = static_cast<uint16_t>(res[1] << 8 | res[0]);
+    const uint16_t y_max = static_cast<uint16_t>(res[3] << 8 | res[2]);
+    if (x_max > 0) g_touch_x_max = x_max;
+    if (y_max > 0) g_touch_y_max = y_max;
+    Serial.printf("[touch] GT911 resolution: %ux%u\n", g_touch_x_max, g_touch_y_max);
+  }
 }
 
 void init_network() {
   WiFi.mode(WIFI_STA);
   WiFi.onEvent(wifi_event_handler);
   WiFi.setAutoReconnect(true);
+  g_mqtt.setBufferSize(1024);
   g_mqtt.setServer(g_cfg_mqtt_host.c_str(), g_cfg_mqtt_port);
   g_mqtt.setCallback(mqtt_on_message);
   configTzTime(THERMOSTAT_TIME_TZ, THERMOSTAT_TIME_NTP_1, THERMOSTAT_TIME_NTP_2,
@@ -2173,18 +2622,20 @@ void poll_sensors(uint32_t now_ms) {
 
   g_last_sensor_poll_ms = now_ms;
 
-  float t = 21.5f;
-  float h = 45.0f;
-
-  if (g_aht_ready) {
+  if (g_sensor_type == SensorType::AHT) {
     sensors_event_t humidity, temp;
     if (g_aht.getEvent(&humidity, &temp)) {
-      t = temp.temperature;
-      h = humidity.relative_humidity;
+      g_runtime->on_local_sensor_update(temp.temperature, humidity.relative_humidity);
     }
+  } else if (g_sensor_type == SensorType::Si7021) {
+    float temp = g_si7021.readTemperature();
+    float hum = g_si7021.readHumidity();
+    if (std::isfinite(temp) && std::isfinite(hum)) {
+      g_runtime->on_local_sensor_update(temp, hum);
+    }
+  } else if (!std::isnan(g_remote_indoor_temp_c)) {
+    g_runtime->on_local_sensor_update(g_remote_indoor_temp_c, g_remote_indoor_humidity);
   }
-
-  g_runtime->on_local_sensor_update(t, h);
   if (g_have_weather_data) {
     g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
   }
@@ -2237,7 +2688,7 @@ void thermostat_firmware_setup() {
 }
 
 void thermostat_firmware_loop() {
-  const uint32_t now = millis();
+  uint32_t now = millis();
   if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
     shutdown_display_for_reboot();
     delay(kRebootPanelOffDelayMs);
@@ -2252,9 +2703,17 @@ void thermostat_firmware_loop() {
   }
 
   if ((now - g_last_ui_tick_ms) >= kUiTickMs) {
+    lv_tick_inc(now - g_last_ui_tick_ms);
     g_last_ui_tick_ms = now;
     lv_timer_handler();
   }
+
+  // Re-capture time after LVGL processing so the runtime tick uses a
+  // timestamp >= any millis() call made inside touch_read_cb.  Without
+  // this, on_user_interaction(millis()) can set last_interaction_ms to a
+  // value slightly *after* `now`, causing an unsigned underflow in
+  // g_screen.tick(now) that immediately triggers the screensaver.
+  now = millis();
 
   if ((now - g_last_runtime_tick_ms) >= kRuntimeTickMs) {
     g_last_runtime_tick_ms = now;
@@ -2274,6 +2733,15 @@ void thermostat_firmware_loop() {
   g_mqtt.loop();
   poll_weather(now);
   ota_rollback_check(WiFi.status() == WL_CONNECTED && g_mqtt.connected());
+
+  // Apply accumulated MQTT controller state to app layer
+  if (g_runtime != nullptr && g_mqtt_ctrl_last_update_ms > g_mqtt_ctrl_last_applied_ms) {
+    g_runtime->on_controller_state_update(
+        now, g_mqtt_ctrl_state, g_mqtt_ctrl_lockout,
+        g_mqtt_ctrl_mode, g_mqtt_ctrl_fan,
+        g_mqtt_ctrl_setpoint_c, g_mqtt_ctrl_filter_runtime_s);
+    g_mqtt_ctrl_last_applied_ms = g_mqtt_ctrl_last_update_ms;
+  }
 
   if (g_mqtt.connected() && (now - g_last_mqtt_publish_ms) >= kMqttPublishMs) {
     g_last_mqtt_publish_ms = now;

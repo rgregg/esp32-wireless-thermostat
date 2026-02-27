@@ -16,12 +16,14 @@ TEST_CASE(controller_runtime_failsafe_lockout) {
   thermostat::ControllerTickInput t1;
   t1.now_ms = 2000;
   t1.cool_call = true;
+  t1.has_indoor_temp = true;
   rt.tick(t1);
   ASSERT_TRUE(rt.cool_demand());
 
   thermostat::ControllerTickInput t2;
   t2.now_ms = 8000;
   t2.cool_call = true;
+  t2.has_indoor_temp = true;
   rt.tick(t2);
   ASSERT_TRUE(rt.failsafe_active());
   ASSERT_TRUE(!rt.cool_demand());
@@ -29,6 +31,7 @@ TEST_CASE(controller_runtime_failsafe_lockout) {
   rt.note_heartbeat(9000);
   thermostat::ControllerTickInput t3;
   t3.now_ms = 9001;
+  t3.has_indoor_temp = true;
   rt.tick(t3);
   ASSERT_TRUE(!rt.failsafe_active());
 
@@ -36,6 +39,7 @@ TEST_CASE(controller_runtime_failsafe_lockout) {
   thermostat::ControllerTickInput t4;
   t4.now_ms = 9100;
   t4.heat_call = true;
+  t4.has_indoor_temp = true;
   rt.tick(t4);
   ASSERT_TRUE(!rt.heat_demand());
 }
@@ -59,15 +63,18 @@ TEST_CASE(controller_runtime_filter_runtime_and_circulate) {
   rt.note_heartbeat(1);
   thermostat::ControllerTickInput first;
   first.now_ms = 1000;
+  first.has_indoor_temp = true;
   rt.tick(first);
 
   thermostat::ControllerTickInput second;
   second.now_ms = 61000;
+  second.has_indoor_temp = true;
   rt.tick(second);
 
   ASSERT_TRUE(rt.fan_demand());
   thermostat::ControllerTickInput third;
   third.now_ms = 121000;
+  third.has_indoor_temp = true;
   rt.tick(third);
   ASSERT_TRUE(rt.filter_runtime_seconds() >= 60);
 }
@@ -87,38 +94,67 @@ TEST_CASE(controller_runtime_enforces_min_run_min_off_and_min_idle) {
   thermostat::ControllerTickInput t1;
   t1.now_ms = 1000;
   t1.heat_call = true;
+  t1.has_indoor_temp = true;
   rt.tick(t1);
   ASSERT_TRUE(!rt.heat_demand());
 
   thermostat::ControllerTickInput t2;
   t2.now_ms = 31000;
   t2.heat_call = true;
+  t2.has_indoor_temp = true;
   rt.tick(t2);
   ASSERT_TRUE(rt.heat_demand());
 
   thermostat::ControllerTickInput t3;
   t3.now_ms = 60000;
   t3.heat_call = false;
+  t3.has_indoor_temp = true;
   rt.tick(t3);
   ASSERT_TRUE(rt.heat_demand());
 
   thermostat::ControllerTickInput t4;
   t4.now_ms = 211000;
   t4.heat_call = false;
+  t4.has_indoor_temp = true;
   rt.tick(t4);
   ASSERT_TRUE(!rt.heat_demand());
 
   thermostat::ControllerTickInput t5;
   t5.now_ms = 220000;
   t5.heat_call = true;
+  t5.has_indoor_temp = true;
   rt.tick(t5);
   ASSERT_TRUE(!rt.heat_demand());
 
   thermostat::ControllerTickInput t6;
   t6.now_ms = 392000;
   t6.heat_call = true;
+  t6.has_indoor_temp = true;
   rt.tick(t6);
   ASSERT_TRUE(rt.heat_demand());
+}
+
+TEST_CASE(controller_runtime_failsafe_activates_without_indoor_temp) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 5000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1000);
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 2000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = false;  // No sensor data
+  rt.tick(t1);
+
+  // Failsafe should activate immediately when there's no indoor temp,
+  // regardless of heartbeat freshness
+  ASSERT_TRUE(rt.failsafe_active());
+  ASSERT_TRUE(!rt.heat_demand());
 }
 
 TEST_CASE(controller_runtime_reset_remote_command_sequence_allows_reseed) {

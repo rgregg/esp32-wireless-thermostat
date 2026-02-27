@@ -1,8 +1,12 @@
 #include "controller/controller_runtime.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
+#include "controller/audit_log.h"
 #include "espnow_cmd_word.h"
+#include "mqtt_payload.h"
 #include "thermostat/thermostat_state.h"
 
 namespace {
@@ -12,6 +16,25 @@ constexpr uint32_t kOneMinuteMs = 60000;
 }  // namespace
 
 namespace thermostat {
+
+static const char *hvac_state_str(ControllerRuntime::HvacState s) {
+  switch (s) {
+    case ControllerRuntime::HvacState::Idle: return "idle";
+    case ControllerRuntime::HvacState::Heating: return "heating";
+    case ControllerRuntime::HvacState::Cooling: return "cooling";
+    default: return "?";
+  }
+}
+
+void ControllerRuntime::audit(const char *fmt, ...) const {
+  if (!audit_cb_) return;
+  char buf[80];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  audit_cb_(buf);
+}
 
 ControllerRuntime::ControllerRuntime(const ControllerConfig &config)
     : config_(config) {
@@ -25,6 +48,9 @@ void ControllerRuntime::note_heartbeat(uint32_t now_ms) {
 }
 
 void ControllerRuntime::set_hvac_lockout(bool locked_out) {
+  if (locked_out != hvac_lockout_) {
+    audit("lockout: %s [internal]", locked_out ? "on" : "off");
+  }
   hvac_lockout_ = locked_out;
   if (hvac_lockout_) {
     hvac_state_ = HvacState::Idle;
@@ -92,20 +118,50 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
     return result;
   }
 
+  const FurnaceMode old_mode = mode_;
+  const FanMode old_fan = fan_mode_;
+  const float old_setpoint = target_temperature_c_;
+
   mode_ = cmd.mode;
   fan_mode_ = cmd.fan;
   target_temperature_c_ = static_cast<float>(cmd.setpoint_decic) / 10.0f;
 
+  // Audit changes with source MAC when available
+  char src_str[32];
+  if (source_mac) {
+    char mac_buf[18];
+    format_mac(mac_buf, sizeof(mac_buf), source_mac);
+    snprintf(src_str, sizeof(src_str), "espnow %s", mac_buf);
+  } else {
+    strcpy(src_str, "mqtt");
+  }
+  if (mode_ != old_mode) {
+    audit("mode: %s->%s [%s]",
+          mqtt_payload::mode_to_str(old_mode),
+          mqtt_payload::mode_to_str(mode_), src_str);
+  }
+  if (fan_mode_ != old_fan) {
+    audit("fan: %s->%s [%s]",
+          mqtt_payload::fan_to_str(old_fan),
+          mqtt_payload::fan_to_str(fan_mode_), src_str);
+  }
+  if (target_temperature_c_ != old_setpoint) {
+    audit("setpoint: %.1f->%.1f [%s]",
+          static_cast<double>(old_setpoint),
+          static_cast<double>(target_temperature_c_), src_str);
+  }
+
   if (cmd.filter_reset) {
     filter_runtime_seconds_ = 0;
     result.filter_reset_requested = true;
+    audit("filter_reset [%s]", src_str);
   }
 
   return result;
 }
 
 void ControllerRuntime::tick(const ControllerTickInput &in) {
-  update_failsafe(in.now_ms);
+  update_failsafe(in.now_ms, in.has_indoor_temp);
   apply_hvac_calls(in.now_ms, in.heat_call, in.cool_call);
   run_minute_tasks(in.now_ms);
   enforce_safety_interlocks(in.now_ms);
@@ -145,9 +201,19 @@ void ControllerRuntime::enforce_safety_interlocks(uint32_t now_ms) {
   }
 }
 
-void ControllerRuntime::update_failsafe(uint32_t now_ms) {
-  failsafe_active_ = is_failsafe_timed_out(now_ms, heartbeat_last_seen_ms_,
+void ControllerRuntime::update_failsafe(uint32_t now_ms, bool has_indoor_temp) {
+  const bool was_active = failsafe_active_;
+  failsafe_active_ = !has_indoor_temp ||
+                     is_failsafe_timed_out(now_ms, heartbeat_last_seen_ms_,
                                            config_.failsafe_timeout_ms);
+  if (failsafe_active_ != was_active) {
+    if (failsafe_active_) {
+      audit("failsafe: on (%s) [internal]",
+            !has_indoor_temp ? "no indoor temp" : "heartbeat timeout");
+    } else {
+      audit("failsafe: off [internal]");
+    }
+  }
 }
 
 void ControllerRuntime::apply_hvac_calls(uint32_t now_ms, bool heat_call, bool cool_call) {
@@ -253,6 +319,9 @@ bool ControllerRuntime::elapsed_at_least(uint32_t now_ms,
 }
 
 void ControllerRuntime::enter_idle(uint32_t now_ms) {
+  if (hvac_state_ != HvacState::Idle) {
+    audit("furnace: %s->idle [internal]", hvac_state_str(hvac_state_));
+  }
   if (hvac_state_ == HvacState::Heating) {
     last_heating_off_ms_ = now_ms;
     has_heating_off_timestamp_ = true;
@@ -268,6 +337,7 @@ void ControllerRuntime::enter_idle(uint32_t now_ms) {
 }
 
 void ControllerRuntime::enter_heating(uint32_t now_ms) {
+  audit("furnace: %s->heating [internal]", hvac_state_str(hvac_state_));
   hvac_state_ = HvacState::Heating;
   hvac_state_since_ms_ = now_ms;
   relay_.heat = true;
@@ -277,6 +347,7 @@ void ControllerRuntime::enter_heating(uint32_t now_ms) {
 }
 
 void ControllerRuntime::enter_cooling(uint32_t now_ms) {
+  audit("furnace: %s->cooling [internal]", hvac_state_str(hvac_state_));
   hvac_state_ = HvacState::Cooling;
   hvac_state_since_ms_ = now_ms;
   relay_.heat = false;

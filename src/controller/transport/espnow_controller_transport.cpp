@@ -7,6 +7,7 @@
 #if defined(ARDUINO)
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #endif
 
 namespace thermostat {
@@ -39,15 +40,25 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
 #if defined(ARDUINO)
   WiFi.mode(WIFI_STA);
 
+  // Set the radio to the configured ESP-NOW channel so peers match the home
+  // channel.  Without this the STA defaults to channel 1 and peer sends fail
+  // with "Peer channel is not equal to the home channel".
+  if (config_.channel > 0) {
+    esp_wifi_set_channel(config_.channel, WIFI_SECOND_CHAN_NONE);
+  }
+
   if (esp_now_init() != ESP_OK) {
     initialized_ = false;
     return false;
   }
 
-  esp_now_register_recv_cb(
-      reinterpret_cast<esp_now_recv_cb_t>(&EspNowControllerTransport::on_recv_static));
-  esp_now_register_send_cb(
-      reinterpret_cast<esp_now_send_cb_t>(&EspNowControllerTransport::on_send_static));
+  esp_now_register_recv_cb([](const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+    EspNowControllerTransport::on_recv_static(info, data, len);
+  });
+  esp_now_register_send_cb([](const esp_now_send_info_t *info, esp_now_send_status_t status) {
+    const uint8_t *mac = (info != nullptr) ? info->des_addr : nullptr;
+    EspNowControllerTransport::on_send_static(mac, static_cast<int>(status));
+  });
 
   for (int i = 0; i < config_.peer_count; ++i) {
     if (is_all_zero_mac(config_.peer_macs[i])) {
@@ -56,7 +67,9 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
     esp_now_peer_info_t peer_info;
     memset(&peer_info, 0, sizeof(peer_info));
     memcpy(peer_info.peer_addr, config_.peer_macs[i], sizeof(peer_info.peer_addr));
-    peer_info.channel = config_.channel;
+    // Use channel 0 so ESP-NOW sends on whatever the current home channel is.
+    // The home channel is set above (or overridden later by WiFi.begin).
+    peer_info.channel = 0;
     peer_info.encrypt = config_.encrypted;
     if (peer_info.encrypt) {
       memcpy(peer_info.lmk, config_.lmk, sizeof(peer_info.lmk));
@@ -109,6 +122,12 @@ void EspNowControllerTransport::set_callbacks(CommandWordCallback command_cb,
 
 void EspNowControllerTransport::send_to_all_peers(const uint8_t *data, size_t len) {
 #if defined(ARDUINO)
+  const uint32_t now = millis();
+  if (last_send_ms_ != 0 &&
+      static_cast<uint32_t>(now - last_send_ms_) < kMinSendIntervalMs) {
+    return;  // Throttle: too soon since last send
+  }
+  last_send_ms_ = now;
   for (int i = 0; i < config_.peer_count; ++i) {
     if (!is_all_zero_mac(config_.peer_macs[i])) {
       esp_now_send(config_.peer_macs[i], data, len);
@@ -173,7 +192,12 @@ void EspNowControllerTransport::on_recv_static(const void *recv_info,
   if (instance_ == nullptr) {
     return;
   }
+#if defined(ARDUINO)
+  const auto *info = reinterpret_cast<const esp_now_recv_info_t *>(recv_info);
+  const uint8_t *src_mac = info->src_addr;
+#else
   const uint8_t *src_mac = reinterpret_cast<const uint8_t *>(recv_info);
+#endif
   instance_->on_recv(src_mac, data, len);
 }
 

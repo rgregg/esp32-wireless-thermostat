@@ -28,6 +28,7 @@ struct ControllerTickInput {
   uint32_t now_ms = 0;
   bool heat_call = false;
   bool cool_call = false;
+  bool has_indoor_temp = false;
 };
 
 struct CommandApplyResult {
@@ -39,7 +40,11 @@ struct CommandApplyResult {
 
 class ControllerRuntime {
  public:
+  using AuditCallback = void (*)(const char *msg);
+
   explicit ControllerRuntime(const ControllerConfig &config = ControllerConfig());
+
+  void set_audit_callback(AuditCallback cb) { audit_cb_ = cb; }
 
   void note_heartbeat(uint32_t now_ms);
   void set_hvac_lockout(bool locked_out);
@@ -68,18 +73,21 @@ class ControllerRuntime {
     return static_cast<float>(filter_runtime_seconds_) / 3600.0f;
   }
 
+  void set_fan_circulate_period_min(uint16_t v) { config_.fan_circulate_period_min = v; }
+  void set_fan_circulate_duration_min(uint16_t v) { config_.fan_circulate_duration_min = v; }
+
   FurnaceStateCode furnace_state() const;
   ThermostatSnapshot snapshot() const;
 
- private:
   enum class HvacState : uint8_t {
     Idle = 0,
     Heating = 1,
     Cooling = 2,
   };
 
+ private:
   void enforce_safety_interlocks(uint32_t now_ms);
-  void update_failsafe(uint32_t now_ms);
+  void update_failsafe(uint32_t now_ms, bool has_indoor_temp);
   void apply_hvac_calls(uint32_t now_ms, bool heat_call, bool cool_call);
   bool elapsed_at_least(uint32_t now_ms, uint32_t start_ms, uint32_t duration_ms) const;
   void enter_idle(uint32_t now_ms);
@@ -111,6 +119,9 @@ class ControllerRuntime {
 
   int fan_circulate_elapsed_min_ = 0;
   uint32_t last_minute_tick_ms_ = 0;
+  AuditCallback audit_cb_ = nullptr;
+
+  void audit(const char *fmt, ...) const;
 
   static constexpr int kMaxCommandSources = 10;
   struct CommandSource {

@@ -21,6 +21,13 @@ class ThermostatApp {
   void on_controller_heartbeat(uint32_t now_ms);
   void on_controller_telemetry(uint32_t now_ms,
                                const ThermostatControllerTelemetry &telemetry);
+  void on_controller_state_update(uint32_t now_ms,
+                                  FurnaceStateCode state,
+                                  bool lockout,
+                                  FurnaceMode mode,
+                                  FanMode fan,
+                                  float setpoint_c,
+                                  uint32_t filter_runtime_seconds);
 
   void set_local_mode(FurnaceMode mode, uint32_t now_ms);
   void set_local_fan_mode(FanMode mode, uint32_t now_ms);

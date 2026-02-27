@@ -1,5 +1,6 @@
 #include "controller/controller_app.h"
 
+#include <cmath>
 #include <string.h>
 
 #include "espnow_cmd_word.h"
@@ -24,6 +25,7 @@ ControllerApp::ControllerApp(IControllerTransport &transport,
     : transport_(transport), config_(config), runtime_(config) {
   indoor_temp_c_ = config_.indoor_temp_fallback_c;
   indoor_humidity_pct_ = config_.indoor_humidity_fallback_pct;
+  has_indoor_temp_ = std::isfinite(indoor_temp_c_);
   load_persisted_state();
 }
 
@@ -89,7 +91,6 @@ void ControllerApp::on_indoor_temperature_c(float temp_c, const uint8_t *src_mac
   }
   indoor_temp_c_ = temp_c;
   has_indoor_temp_ = true;
-  persist_indoor_state();
 }
 
 void ControllerApp::on_indoor_humidity(float humidity_pct, const uint8_t *src_mac) {
@@ -103,7 +104,6 @@ void ControllerApp::on_indoor_humidity(float humidity_pct, const uint8_t *src_ma
   }
   indoor_humidity_pct_ = humidity_pct;
   has_indoor_humidity_ = true;
-  persist_indoor_state();
 }
 
 void ControllerApp::set_primary_sensor_mac(const uint8_t *mac) {
@@ -128,6 +128,7 @@ void ControllerApp::tick(uint32_t now_ms, bool heat_call, bool cool_call) {
   in.now_ms = now_ms;
   in.heat_call = heat_call;
   in.cool_call = cool_call;
+  in.has_indoor_temp = has_indoor_temp_;
   runtime_.tick(in);
   maybe_persist_filter_runtime();
   publish();
@@ -207,11 +208,13 @@ void ControllerApp::publish() {
   t.fan_code = fan_to_code(runtime_.fan_mode());
   t.setpoint_c = runtime_.target_temperature_c();
 
-  if (telemetry_payload_changed(t)) {
-    telemetry_seq_ = static_cast<uint16_t>(telemetry_seq_ + 1);
-    if (telemetry_seq_ == 0) {
-      telemetry_seq_ = 1;
-    }
+  if (!telemetry_payload_changed(t)) {
+    return;  // Nothing changed — skip the send
+  }
+
+  telemetry_seq_ = static_cast<uint16_t>(telemetry_seq_ + 1);
+  if (telemetry_seq_ == 0) {
+    telemetry_seq_ = 1;
   }
   t.seq = telemetry_seq_;
 
@@ -224,25 +227,11 @@ void ControllerApp::load_persisted_state() {
 #if defined(ARDUINO)
   Preferences prefs;
   if (prefs.begin("thermostat", true)) {
-    indoor_temp_c_ = prefs.getFloat("indoor_t", indoor_temp_c_);
-    indoor_humidity_pct_ = prefs.getFloat("indoor_h", indoor_humidity_pct_);
     const uint32_t saved_filter = prefs.getUInt("filter_rt", 0);
     runtime_.set_filter_runtime_seconds(saved_filter);
     persisted_filter_runtime_s_ = saved_filter;
     prefs.end();
   }
-#endif
-}
-
-void ControllerApp::persist_indoor_state() const {
-#if defined(ARDUINO)
-  Preferences prefs;
-  if (!prefs.begin("thermostat", false)) {
-    return;
-  }
-  prefs.putFloat("indoor_t", indoor_temp_c_);
-  prefs.putFloat("indoor_h", indoor_humidity_pct_);
-  prefs.end();
 #endif
 }
 

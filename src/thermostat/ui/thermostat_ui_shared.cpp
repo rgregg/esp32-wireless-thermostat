@@ -354,22 +354,29 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_width(out_handles->home_time_label, LV_PCT(100));
   lv_obj_set_style_text_align(out_handles->home_time_label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
-  make_transparent(left_col, LV_PCT(100), 22);
+  lv_obj_t *outdoor_section = make_transparent(left_col, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_set_layout(outdoor_section, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(outdoor_section, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(outdoor_section, 4, LV_PART_MAIN);
+  out_handles->outdoor_section = outdoor_section;
+  lv_obj_add_flag(outdoor_section, LV_OBJ_FLAG_HIDDEN);  // hidden until weather data arrives
 
-  lv_obj_t *outdoor_title = lv_label_create(left_col);
+  make_transparent(outdoor_section, LV_PCT(100), 14);
+
+  lv_obj_t *outdoor_title = lv_label_create(outdoor_section);
   lv_label_set_text(outdoor_title, "OUTDOOR");
   style_label(outdoor_title, font20());
   lv_obj_set_width(outdoor_title, LV_PCT(100));
   lv_obj_set_style_text_align(outdoor_title, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
 
   static lv_point_t outdoor_line_pts[] = {{0, 0}, {286, 0}};
-  lv_obj_t *outdoor_line = lv_line_create(left_col);
+  lv_obj_t *outdoor_line = lv_line_create(outdoor_section);
   lv_line_set_points(outdoor_line, outdoor_line_pts, 2);
   lv_obj_set_style_line_width(outdoor_line, 1, LV_PART_MAIN);
   lv_obj_set_style_line_color(outdoor_line, lv_color_hex(kColorWhite), LV_PART_MAIN);
   lv_obj_set_style_line_opa(outdoor_line, LV_OPA_70, LV_PART_MAIN);
 
-  lv_obj_t *weather_row = make_transparent(left_col, LV_PCT(100), LV_SIZE_CONTENT);
+  lv_obj_t *weather_row = make_transparent(outdoor_section, LV_PCT(100), LV_SIZE_CONTENT);
   lv_obj_set_layout(weather_row, LV_LAYOUT_FLEX);
   lv_obj_set_flex_flow(weather_row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(weather_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -880,6 +887,30 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
 void set_mode_button_state(FurnaceMode mode) { apply_mode_state(mode); }
 void set_fan_button_state(FanMode mode) { apply_fan_state(mode); }
 void set_temperature_unit_button_state(TemperatureUnit unit) { apply_temperature_unit_state(unit); }
+
+void set_fan_mode_buttons_enabled(bool enabled) {
+  lv_obj_t *btns[] = {g_fan_auto_btn, g_fan_on_btn, g_fan_circ_btn};
+  for (auto *btn : btns) {
+    if (btn == nullptr) continue;
+    if (enabled) {
+      lv_obj_clear_state(btn, LV_STATE_DISABLED);
+    } else {
+      lv_obj_add_state(btn, LV_STATE_DISABLED);
+    }
+  }
+}
+
+void set_mode_buttons_enabled(bool enabled) {
+  lv_obj_t *btns[] = {g_mode_heat_btn, g_mode_cool_btn, g_mode_off_btn};
+  for (auto *btn : btns) {
+    if (btn == nullptr) continue;
+    if (enabled) {
+      lv_obj_clear_state(btn, LV_STATE_DISABLED);
+    } else {
+      lv_obj_add_state(btn, LV_STATE_DISABLED);
+    }
+  }
+}
 
 const lv_font_t *font_mdi_weather_30() { return &thermostat_font_mdi_weather_30; }
 

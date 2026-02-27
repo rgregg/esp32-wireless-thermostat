@@ -74,6 +74,41 @@ TEST_CASE(controller_app_uses_fallback_indoor_temperature_without_remote_updates
   ASSERT_TRUE(app.runtime().heat_demand());
 }
 
+TEST_CASE(controller_app_nan_fallback_does_not_enable_indoor_temp) {
+  FakeControllerTransport tx;
+  thermostat::ControllerConfig cfg;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_idle_time_ms = 0;
+  cfg.indoor_temp_fallback_c = NAN;
+  thermostat::ControllerApp app(tx, cfg);
+
+  // NaN fallback should not mark indoor temp as available
+  ASSERT_TRUE(!app.has_indoor_temperature());
+}
+
+TEST_CASE(controller_app_real_sensor_overrides_fallback) {
+  FakeControllerTransport tx;
+  thermostat::ControllerConfig cfg;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_idle_time_ms = 0;
+  cfg.indoor_temp_fallback_c = 19.0f;
+  thermostat::ControllerApp app(tx, cfg);
+
+  // Starts with fallback
+  ASSERT_TRUE(app.has_indoor_temperature());
+  ASSERT_TRUE(app.indoor_temperature_c() == 19.0f);
+
+  // Real sensor update overrides fallback
+  app.on_indoor_temperature_c(22.5f);
+  ASSERT_TRUE(app.indoor_temperature_c() == 22.5f);
+}
+
 TEST_CASE(controller_app_primary_sensor_auto_claims_first_mac) {
   FakeControllerTransport tx;
   thermostat::ControllerApp app(tx);

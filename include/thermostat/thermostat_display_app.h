@@ -25,6 +25,13 @@ class ThermostatDisplayApp {
 
   void on_local_sensor_update(float indoor_temp_c, float indoor_humidity);
   void on_outdoor_weather_update(float outdoor_temp_c, WeatherIcon icon);
+  void on_controller_state_update(uint32_t now_ms,
+                                  FurnaceStateCode state,
+                                  bool lockout,
+                                  FurnaceMode mode,
+                                  FanMode fan,
+                                  float setpoint_c,
+                                  uint32_t filter_runtime_seconds);
 
   void on_user_set_setpoint(float user_value, uint32_t now_ms);
   void on_user_set_setpoint_c(float setpoint_c, uint32_t now_ms);
@@ -40,6 +47,8 @@ class ThermostatDisplayApp {
   std::string setpoint_text() const { return model_.format_setpoint_text(); }
   std::string indoor_temp_text() const { return model_.format_indoor_temperature_text(); }
   std::string indoor_humidity_text() const { return model_.format_indoor_humidity_text(); }
+  float local_indoor_temperature_c() const { return model_.local_indoor_temperature_c(); }
+  float local_indoor_humidity() const { return model_.local_indoor_humidity(); }
   std::string weather_text() const { return model_.format_weather_text(); }
   WeatherIcon weather_icon() const { return model_.weather_icon(); }
   uint32_t filter_runtime_hours() const {

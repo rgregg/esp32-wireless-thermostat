@@ -68,4 +68,26 @@ TEST_CASE(thermostat_display_app_status_text) {
 
   ASSERT_TRUE(display.status_text(1500, 30000) == "Heat on");
 }
+
+TEST_CASE(thermostat_display_app_controller_state_update_pass_through) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+  thermostat::ThermostatDisplayApp display(app);
+
+  display.on_controller_state_update(
+      1000, FurnaceStateCode::CoolOn, false,
+      FurnaceMode::Cool, FanMode::Circulate, 24.0f, 3600);
+
+  // Verify state propagated through to app
+  ASSERT_TRUE(app.has_controller_telemetry());
+  ASSERT_EQ(static_cast<int>(app.controller_state()),
+            static_cast<int>(FurnaceStateCode::CoolOn));
+  ASSERT_EQ(static_cast<int>(display.local_mode()),
+            static_cast<int>(FurnaceMode::Cool));
+  ASSERT_EQ(static_cast<int>(display.local_fan_mode()),
+            static_cast<int>(FanMode::Circulate));
+
+  // Heartbeat updated - controller connected
+  ASSERT_TRUE(display.status_text(1500, 30000) == "Cool on");
+}
 #endif
