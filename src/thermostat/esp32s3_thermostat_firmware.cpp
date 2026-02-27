@@ -33,6 +33,7 @@
 #include "management_paths.h"
 
 #include <Adafruit_AHTX0.h>
+#include <Adafruit_Si7021.h>
 
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
@@ -205,10 +206,12 @@ lv_disp_drv_t g_disp_drv;
 lv_indev_drv_t g_indev_drv;
 
 TouchState g_touch{};
+enum class SensorType : uint8_t { None, AHT, Si7021 };
+SensorType g_sensor_type = SensorType::None;
 Adafruit_AHTX0 g_aht;
-bool g_aht_ready = false;
 TwoWire g_touch_i2c(0);
 TwoWire g_sensor_i2c(1);
+Adafruit_Si7021 g_si7021(&g_sensor_i2c);
 Preferences g_cfg;
 bool g_cfg_ready = false;
 WiFiClient g_wifi_client;
@@ -945,6 +948,7 @@ void web_handle_status_get() {
     "\"wifi_rssi\":%d,"
     "\"mqtt_connected\":%s,"
     "\"aht_sensor_ready\":%s,"
+    "\"sensor_type\":\"%s\","
     "\"remote_indoor_temp_c\":%s,"
     "\"remote_indoor_humidity\":%s,"
     "\"indoor_temp_text\":\"%s\","
@@ -971,7 +975,9 @@ void web_handle_status_get() {
     WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "",
     WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
     g_mqtt.connected() ? "true" : "false",
-    g_aht_ready ? "true" : "false",
+    g_sensor_type != SensorType::None ? "true" : "false",
+    g_sensor_type == SensorType::AHT ? "aht" :
+    g_sensor_type == SensorType::Si7021 ? "si7021" : "none",
     remote_temp_str,
     remote_hum_str,
     g_runtime ? g_runtime->indoor_temp_text().c_str() : "",
@@ -1094,7 +1100,7 @@ void web_handle_root() {
   status_item(html, "IP Address", "wifi_ip");
   status_item(html, "RSSI", "wifi_rssi");
   status_item(html, "MQTT", "mqtt_connected");
-  status_item(html, "AHT Sensor", "aht_sensor_ready");
+  status_item(html, "Sensor", "sensor_type");
   status_item(html, "Remote Temp", "remote_indoor_temp_c");
   status_item(html, "Remote Humidity", "remote_indoor_humidity");
   status_item(html, "Indoor Temp", "indoor_temp_text");
@@ -1379,7 +1385,7 @@ void mqtt_publish_state() {
 
   // Publish local sensor data to controller's topic namespace for MQTT-based intake.
   // Only when we have a local sensor — don't echo the controller's own values back.
-  if (g_aht_ready && g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
+  if (g_sensor_type != SensorType::None && g_cfg_controller_base_topic.length() > 0 && WiFi.status() == WL_CONNECTED) {
     String mac_str = WiFi.macAddress();
     if (ok_temp) {
       String topic = g_cfg_controller_base_topic + "/sensor/" + mac_str + "/temp_c";
@@ -2542,14 +2548,24 @@ void init_backlight() {
 void init_sensors() {
   g_touch_i2c.begin(kTouchI2cSda, kTouchI2cScl, 400000U);
   g_sensor_i2c.begin(kSensorI2cSda, kSensorI2cScl, 100000U);
-  g_aht_ready = g_aht.begin(&g_sensor_i2c);
-  if (g_aht_ready) {
+
+  // Try AHT20 first (I2C addr 0x38)
+  if (g_aht.begin(&g_sensor_i2c)) {
     // Validate with a test read — ghost devices return 0.0/0.0
     sensors_event_t h, t;
-    if (!g_aht.getEvent(&h, &t) ||
-        (t.temperature == 0.0f && h.relative_humidity == 0.0f)) {
-      g_aht_ready = false;
+    if (g_aht.getEvent(&h, &t) &&
+        !(t.temperature == 0.0f && h.relative_humidity == 0.0f)) {
+      g_sensor_type = SensorType::AHT;
+      Serial.println("[sensor] AHT detected");
     }
+  }
+  // Try Si7021 if AHT not found (I2C addr 0x40)
+  if (g_sensor_type == SensorType::None && g_si7021.begin()) {
+    g_sensor_type = SensorType::Si7021;
+    Serial.println("[sensor] Si7021 detected");
+  }
+  if (g_sensor_type == SensorType::None) {
+    Serial.println("[sensor] no sensor detected");
   }
 
   // Read GT911 configured resolution for coordinate scaling
@@ -2580,10 +2596,16 @@ void poll_sensors(uint32_t now_ms) {
 
   g_last_sensor_poll_ms = now_ms;
 
-  if (g_aht_ready) {
+  if (g_sensor_type == SensorType::AHT) {
     sensors_event_t humidity, temp;
     if (g_aht.getEvent(&humidity, &temp)) {
       g_runtime->on_local_sensor_update(temp.temperature, humidity.relative_humidity);
+    }
+  } else if (g_sensor_type == SensorType::Si7021) {
+    float temp = g_si7021.readTemperature();
+    float hum = g_si7021.readHumidity();
+    if (std::isfinite(temp) && std::isfinite(hum)) {
+      g_runtime->on_local_sensor_update(temp, hum);
     }
   } else if (!std::isnan(g_remote_indoor_temp_c)) {
     g_runtime->on_local_sensor_update(g_remote_indoor_temp_c, g_remote_indoor_humidity);
