@@ -1880,6 +1880,22 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   mqtt_publish_discovery();
   publish_all_cfg_state();
   mqtt_publish_state();
+
+  // Device registry: publish our identity so other devices/tools can discover us
+  if (g_cfg_shared_device_id.length() > 0) {
+    String mac = WiFi.macAddress();
+    String reg_topic = g_cfg_shared_device_id + "/devices/" + mac;
+    char reg_buf[256];
+    snprintf(reg_buf, sizeof(reg_buf),
+             "{\"mac\":\"%s\",\"ip\":\"%s\",\"type\":\"thermostat\","
+             "\"name\":\"%s\",\"base_topic\":\"%s\",\"firmware\":\"%s\"}",
+             mac.c_str(),
+             WiFi.localIP().toString().c_str(),
+             g_cfg_ota_hostname.c_str(),
+             g_cfg_mqtt_base_topic.c_str(),
+             THERMOSTAT_FIRMWARE_VERSION);
+    g_mqtt.publish(reg_topic.c_str(), reg_buf, true);
+  }
 }
 
 void ensure_ota_ready() {

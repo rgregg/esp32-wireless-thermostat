@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -27,12 +28,14 @@
 #include <WebServer.h>
 #include <esp_system.h>
 #include "ota_web_updater.h"
+#include "controller/audit_log.h"
 #include "web/web_ui_escape.h"
 #include "web/web_ui_shell.h"
 #include "web/web_ui_fields.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
 thermostat::ControllerRelayIo g_relay_io;
+thermostat::AuditLog g_audit_log;
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
 WebServer g_ctrl_web(80);
@@ -780,6 +783,37 @@ void ctrl_publish_discovery() {
 
 // html_escape() and json_escape() are now in web_ui namespace via web_ui_escape.h
 
+// Audit log: MQTT publish callback and helpers
+void ctrl_audit_publish(const char *msg) {
+  if (g_ctrl_mqtt.connected()) {
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/audit").c_str(), msg, false);
+  }
+}
+
+void ctrl_audit(const char *fmt, ...) {
+  char buf[80];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  g_audit_log.add(millis(), "%s", buf);
+}
+
+void ctrl_runtime_audit_bridge(const char *msg) {
+  // Bridge from runtime audit callback → global audit log with timestamp
+  g_audit_log.add(millis(), "%s", msg);
+}
+
+void ctrl_web_handle_log_get() {
+  String body;
+  body.reserve(g_audit_log.count() * 80);
+  for (size_t i = 0; i < g_audit_log.count(); ++i) {
+    body += g_audit_log.entry(i);
+    body += '\n';
+  }
+  g_ctrl_web.send(200, "text/plain", body);
+}
+
 void ctrl_web_handle_config_get() {
   String body = "{\"controller\":{";
   body += "\"wifi_ssid\":\"" + web_ui::json_escape(g_cfg_ctrl_wifi_ssid) + "\",";
@@ -1174,7 +1208,8 @@ void ctrl_web_handle_root() {
 
   card_begin(html, "Links");
   html += F("<p style=\"font-size:0.85rem\"><a href=\"/config\" style=\"color:var(--ac)\">JSON Config</a>"
-            " &middot; <a href=\"/status\" style=\"color:var(--ac)\">JSON Status</a></p>");
+            " &middot; <a href=\"/status\" style=\"color:var(--ac)\">JSON Status</a>"
+            " &middot; <a href=\"/log\" style=\"color:var(--ac)\">Audit Log</a></p>");
   card_end(html);
   tab_end(html);
 
@@ -1189,6 +1224,7 @@ void ctrl_ensure_web_ready() {
   if (!g_ctrl_web_started) {
     g_ctrl_web.on("/", HTTP_GET, ctrl_web_handle_root);
     g_ctrl_web.on("/status", HTTP_GET, ctrl_web_handle_status_get);
+    g_ctrl_web.on("/log", HTTP_GET, ctrl_web_handle_log_get);
     g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
@@ -1345,6 +1381,9 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
   if (topic_str == display_topic_for("state/availability")) {
+    if (g_disp_availability != value) {
+      ctrl_audit("display: %s->%s [mqtt]", g_disp_availability.c_str(), value);
+    }
     g_disp_availability = value;
     // Display being online serves as heartbeat — it can relay commands
     if (g_controller != nullptr && strcmp(value, "online") == 0) {
@@ -1363,6 +1402,8 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       const float fval = static_cast<float>(atof(value));
       if (strcmp(sensor_suffix, "temp_c") == 0) {
         if (isfinite(fval) && fval >= -40.0f && fval <= 85.0f) {
+          ctrl_audit("indoor_temp: %.1fC [mqtt/sensor %s]",
+                     static_cast<double>(fval), sensor_mac);
           g_controller->app().on_indoor_temperature_c(fval, parsed_mac);
           // Valid temperature from primary sensor keeps failsafe from triggering
           g_controller->app().on_heartbeat(millis());
@@ -1393,7 +1434,9 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
 
   if (topic_str == ctrl_topic_for("cmd/lockout")) {
-    g_controller->app().set_hvac_lockout(mqtt_payload::parse_bool(value));
+    const bool new_lockout = mqtt_payload::parse_bool(value);
+    ctrl_audit("lockout: %s [mqtt]", new_lockout ? "on" : "off");
+    g_controller->app().set_hvac_lockout(new_lockout);
     ctrl_publish_runtime_state();
     return;
   }
@@ -1611,6 +1654,22 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   ctrl_publish_discovery();
   ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
+
+  // Device registry: publish our identity so other devices/tools can discover us
+  if (g_cfg_shared_device_id.length() > 0) {
+    String mac = WiFi.macAddress();
+    String reg_topic = g_cfg_shared_device_id + "/devices/" + mac;
+    char reg_buf[256];
+    snprintf(reg_buf, sizeof(reg_buf),
+             "{\"mac\":\"%s\",\"ip\":\"%s\",\"type\":\"controller\","
+             "\"name\":\"%s\",\"base_topic\":\"%s\",\"firmware\":\"%s\"}",
+             mac.c_str(),
+             WiFi.localIP().toString().c_str(),
+             g_cfg_ctrl_ota_hostname.c_str(),
+             g_cfg_ctrl_mqtt_base_topic.c_str(),
+             THERMOSTAT_FIRMWARE_VERSION);
+    g_ctrl_mqtt.publish(reg_topic.c_str(), reg_buf, true);
+  }
 }
 
 void ctrl_ensure_ota_ready() {
@@ -1738,8 +1797,13 @@ void setup() {
     }
   }
 
+  // Wire audit log
+  g_audit_log.set_publish_callback(ctrl_audit_publish);
+  g_controller->app().runtime_mut().set_audit_callback(ctrl_runtime_audit_bridge);
+
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
+  ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
   ota_rollback_begin();
 }
 

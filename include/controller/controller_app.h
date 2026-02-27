@@ -61,6 +61,7 @@ class ControllerApp {
   void tick(uint32_t now_ms, bool heat_call, bool cool_call);
 
   const ControllerRuntime &runtime() const { return runtime_; }
+  ControllerRuntime &runtime_mut() { return runtime_; }
 
   bool has_indoor_temperature() const { return has_indoor_temp_; }
   float indoor_temperature_c() const { return indoor_temp_c_; }
