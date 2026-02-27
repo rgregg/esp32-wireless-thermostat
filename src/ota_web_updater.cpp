@@ -10,6 +10,9 @@
 #include <stdio.h>
 
 static OtaAuditCallback s_ota_audit_cb = nullptr;
+static uint32_t s_rollback_start_ms = 0;
+static bool s_rollback_confirmed = false;
+static constexpr uint32_t kRollbackTimeoutMs = 180000; // 3 minutes
 
 void ota_set_audit_callback(OtaAuditCallback cb) { s_ota_audit_cb = cb; }
 
@@ -66,6 +69,14 @@ static void handle_update_upload(WebServer &server) {
     case UPLOAD_FILE_START:
       Serial.printf("OTA web upload: %s\n", upload.filename.c_str());
       ota_audit("ota_web: start %s", upload.filename.c_str());
+      // If the current firmware hasn't been confirmed valid yet, do it now.
+      // The device is clearly healthy enough to serve a web upload, and an
+      // unconfirmed OTA state blocks writing to the other partition.
+      if (!s_rollback_confirmed) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        s_rollback_confirmed = true;
+        ota_audit("ota_web: auto-confirmed rollback before update");
+      }
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
         Update.printError(Serial);
         ota_audit("ota_web: begin failed err=%u", Update.getError());
@@ -128,10 +139,6 @@ void ota_web_setup(WebServer &server) {
 // ---------------------------------------------------------------------------
 // Rollback logic
 // ---------------------------------------------------------------------------
-
-static uint32_t s_rollback_start_ms = 0;
-static bool s_rollback_confirmed = false;
-static constexpr uint32_t kRollbackTimeoutMs = 180000; // 3 minutes
 
 void ota_rollback_begin() {
   s_rollback_start_ms = millis();
