@@ -25,7 +25,9 @@ class DisplayModel {
   float local_setpoint_c() const { return local_setpoint_c_; }
 
   void set_local_indoor_temperature_c(float value);
+  float local_indoor_temperature_c() const { return indoor_temp_c_; }
   void set_local_indoor_humidity(float value);
+  float local_indoor_humidity() const { return indoor_humidity_; }
   void set_outdoor_temperature_c(float value);
   void set_weather_icon(WeatherIcon icon);
 

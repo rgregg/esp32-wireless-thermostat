@@ -138,6 +138,14 @@ std::string ThermostatDeviceRuntime::indoor_humidity_text() const {
   return display_.indoor_humidity_text();
 }
 
+float ThermostatDeviceRuntime::local_indoor_temperature_c() const {
+  return display_.local_indoor_temperature_c();
+}
+
+float ThermostatDeviceRuntime::local_indoor_humidity() const {
+  return display_.local_indoor_humidity();
+}
+
 std::string ThermostatDeviceRuntime::weather_text() const {
   return display_.weather_text();
 }

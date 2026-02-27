@@ -1369,15 +1369,15 @@ void mqtt_publish_state() {
     g_mqtt.publish(topic_for("state/wifi_rssi").c_str(), buf, true);
   }
 
-  bool ok_temp = false;
-  const float indoor_c = parse_numeric_prefix(g_runtime->indoor_temp_text(), &ok_temp);
+  const float indoor_c = g_runtime->local_indoor_temperature_c();
+  const bool ok_temp = std::isfinite(indoor_c);
   if (ok_temp) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_c);
     g_mqtt.publish(topic_for("state/current_temp_c").c_str(), buf, true);
   }
 
-  bool ok_humidity = false;
-  const float indoor_h = parse_numeric_prefix(g_runtime->indoor_humidity_text(), &ok_humidity);
+  const float indoor_h = g_runtime->local_indoor_humidity();
+  const bool ok_humidity = std::isfinite(indoor_h);
   if (ok_humidity) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_h);
     g_mqtt.publish(topic_for("state/current_humidity").c_str(), buf, true);

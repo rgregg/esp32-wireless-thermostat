@@ -59,6 +59,8 @@ class ThermostatDeviceRuntime {
   std::string setpoint_text() const;
   std::string indoor_temp_text() const;
   std::string indoor_humidity_text() const;
+  float local_indoor_temperature_c() const;
+  float local_indoor_humidity() const;
   std::string weather_text() const;
   WeatherIcon weather_icon() const;
   uint32_t filter_runtime_hours() const;
