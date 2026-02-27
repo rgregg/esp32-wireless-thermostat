@@ -578,19 +578,24 @@ void ctrl_publish_discovery() {
   const String climate_topic = String("homeassistant/climate/") + dev_id + "/config";
 
   char payload[1500];
+  // Use HA's ~ (tilde) abbreviation to keep the climate payload compact.
+  // All topic references starting with ~ are expanded by HA using the base topic.
   snprintf(
       payload, sizeof(payload),
-      "{\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\",\"mode_cmd_t\":\"%s/cmd/"
-      "mode\",\"mode_stat_t\":\"%s/state/mode\",\"temp_cmd_t\":\"%s/cmd/target_temp_c\","
-      "\"temp_stat_t\":\"%s/state/target_temp_c\",\"curr_temp_t\":\"%s/state/current_temp_c\","
-      "\"fan_mode_cmd_t\":\"%s/cmd/fan_mode\",\"fan_mode_stat_t\":\"%s/state/fan_mode\","
-      "\"curr_hum_t\":\"%s/state/current_humidity\",\"modes\":[\"off\",\"heat\",\"cool\"],"
-      "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],\"avty_t\":\"%s/state/availability\","
-      "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\",\"min_temp\":5,\"max_temp\":35,"
-      "\"temp_step\":0.5,\"temp_unit\":\"C\",\"dev\":{\"ids\":[\"%s\"],"
+      "{\"~\":\"%s\",\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\","
+      "\"mode_cmd_t\":\"~/cmd/mode\",\"mode_stat_t\":\"~/state/mode\","
+      "\"temp_cmd_t\":\"~/cmd/target_temp_c\",\"temp_stat_t\":\"~/state/target_temp_c\","
+      "\"curr_temp_t\":\"~/state/current_temp_c\","
+      "\"fan_mode_cmd_t\":\"~/cmd/fan_mode\",\"fan_mode_stat_t\":\"~/state/fan_mode\","
+      "\"curr_hum_t\":\"~/state/current_humidity\","
+      "\"modes\":[\"off\",\"heat\",\"cool\"],"
+      "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],"
+      "\"avty_t\":\"~/state/availability\","
+      "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\","
+      "\"min_temp\":5,\"max_temp\":35,\"temp_step\":0.5,\"temp_unit\":\"C\","
+      "\"dev\":{\"ids\":[\"%s\"],"
       "\"name\":\"Wireless Thermostat System\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      dev_id.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(), base.c_str(),
-      base.c_str(), base.c_str(), base.c_str(), base.c_str(), dev_id.c_str());
+      base.c_str(), dev_id.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(climate_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
@@ -1577,6 +1582,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.onEvent(ctrl_wifi_event_handler);
   WiFi.setAutoReconnect(true);
+  g_ctrl_mqtt.setBufferSize(1024);
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 

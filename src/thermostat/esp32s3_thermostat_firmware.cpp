@@ -1573,6 +1573,27 @@ void mqtt_publish_discovery() {
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(reboot_config.c_str(), payload, true);
 
+  const String temp_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_indoor_temperature/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Indoor Temperature\",\"uniq_id\":\"%s_indoor_temperature\","
+           "\"stat_t\":\"%s/state/current_temp_c\",\"unit_of_meas\":\"\xC2\xB0""C\","
+           "\"dev_cla\":\"temperature\",\"stat_cla\":\"measurement\","
+           "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+           "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(temp_config.c_str(), payload, true);
+
+  const String hum_config =
+      g_cfg_discovery_prefix + "/sensor/" + node + "_indoor_humidity/config";
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Indoor Humidity\",\"uniq_id\":\"%s_indoor_humidity\","
+           "\"stat_t\":\"%s/state/current_humidity\",\"unit_of_meas\":\"%%\","
+           "\"dev_cla\":\"humidity\",\"stat_cla\":\"measurement\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           node.c_str(), base.c_str(), node.c_str());
+  g_mqtt.publish(hum_config.c_str(), payload, true);
+
   g_mqtt_discovery_sent = true;
 }
 
