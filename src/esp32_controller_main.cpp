@@ -175,6 +175,7 @@ String g_cfg_ctrl_pirateweather_zip = THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP;
 bool g_ctrl_mqtt_reconfigure_required = false;
 bool g_ctrl_wifi_reconnect_required = false;
 bool g_ctrl_cfg_reboot_required = false;
+bool g_ctrl_temp_unit_f = false;
 String g_disp_availability = "unknown";
 
 
@@ -201,6 +202,7 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_primary_sensor_mac = g_ctrl_cfg.getString("pri_sensor", g_cfg_ctrl_primary_sensor_mac);
   g_cfg_ctrl_pirateweather_api_key = g_ctrl_cfg.getString("pw_key", g_cfg_ctrl_pirateweather_api_key);
   g_cfg_ctrl_pirateweather_zip = g_ctrl_cfg.getString("pw_zip", g_cfg_ctrl_pirateweather_zip);
+  g_ctrl_temp_unit_f = g_ctrl_cfg.getBool("temp_u_f", g_ctrl_temp_unit_f);
 }
 
 String ctrl_topic_for(const char *suffix) {
@@ -258,6 +260,7 @@ void ctrl_publish_all_cfg_state() {
   ctrl_publish_cfg_value("primary_sensor_mac", g_cfg_ctrl_primary_sensor_mac);
   ctrl_publish_cfg_value("pirateweather_api_key", g_cfg_ctrl_pirateweather_api_key);
   ctrl_publish_cfg_value("pirateweather_zip", g_cfg_ctrl_pirateweather_zip);
+  ctrl_publish_cfg_value("temperature_unit", g_ctrl_temp_unit_f ? "f" : "c");
   ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0");
 }
 
@@ -358,6 +361,10 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_ctrl_pirateweather_zip = value;
     g_ctrl_cfg.putString("pw_zip", value);
     g_ctrl_last_weather_poll_ms = 0;
+  } else if (key == "temperature_unit") {
+    g_ctrl_temp_unit_f = (value == "f" || value == "fahrenheit");
+    g_ctrl_cfg.putBool("temp_u_f", g_ctrl_temp_unit_f);
+    g_ctrl_mqtt_discovery_sent = false;
   } else {
     known = false;
   }
@@ -580,6 +587,11 @@ void ctrl_publish_discovery() {
   char payload[1500];
   // Use HA's ~ (tilde) abbreviation to keep the climate payload compact.
   // All topic references starting with ~ are expanded by HA using the base topic.
+  // Unit-dependent fields: temp_unit, temp_step, min_temp, max_temp.
+  const char *unit_str = g_ctrl_temp_unit_f ? "F" : "C";
+  const char *step_str = g_ctrl_temp_unit_f ? "1" : "0.5";
+  int min_temp = g_ctrl_temp_unit_f ? 41 : 5;
+  int max_temp = g_ctrl_temp_unit_f ? 95 : 35;
   snprintf(
       payload, sizeof(payload),
       "{\"~\":\"%s\",\"name\":\"Furnace Thermostat\",\"uniq_id\":\"%s_climate\","
@@ -592,10 +604,12 @@ void ctrl_publish_discovery() {
       "\"fan_modes\":[\"auto\",\"on\",\"circulate\"],"
       "\"avty_t\":\"~/state/availability\","
       "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\","
-      "\"min_temp\":5,\"max_temp\":35,\"temp_step\":0.5,\"temp_unit\":\"C\","
+      "\"min_temp\":%d,\"max_temp\":%d,\"temp_step\":%s,\"temp_unit\":\"%s\","
       "\"dev\":{\"ids\":[\"%s\"],"
       "\"name\":\"Wireless Thermostat System\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      base.c_str(), dev_id.c_str(), dev_id.c_str());
+      base.c_str(), dev_id.c_str(),
+      min_temp, max_temp, step_str, unit_str,
+      dev_id.c_str());
   g_ctrl_mqtt.publish(climate_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
@@ -631,42 +645,42 @@ void ctrl_publish_discovery() {
            "{\"name\":\"Controller WiFi RSSI\",\"uniq_id\":\"%s_controller_wifi_rssi\","
            "\"stat_t\":\"%s/state/wifi_rssi\",\"unit_of_meas\":\"dBm\","
            "\"dev_cla\":\"signal_strength\",\"stat_cla\":\"measurement\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(rssi_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Free Heap\",\"uniq_id\":\"%s_controller_free_heap\","
            "\"stat_t\":\"%s/state/free_heap_bytes\",\"unit_of_meas\":\"B\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(heap_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Last MQTT Command\",\"uniq_id\":\"%s_controller_last_mqtt_command\","
            "\"stat_t\":\"%s/state/last_mqtt_command_ms\",\"unit_of_meas\":\"ms\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(last_mqtt_cmd_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Last ESP-NOW RX\",\"uniq_id\":\"%s_controller_last_espnow_rx\","
            "\"stat_t\":\"%s/state/last_espnow_rx_ms\",\"unit_of_meas\":\"ms\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(last_espnow_rx_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller ESP-NOW Send OK\",\"uniq_id\":\"%s_controller_espnow_send_ok\","
            "\"stat_t\":\"%s/state/espnow_send_ok_count\",\"icon\":\"mdi:counter\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(espnow_ok_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller ESP-NOW Send Fail\",\"uniq_id\":\"%s_controller_espnow_send_fail\","
            "\"stat_t\":\"%s/state/espnow_send_fail_count\",\"icon\":\"mdi:counter\","
-           "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+           "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(espnow_fail_topic.c_str(), payload, true);
 
@@ -714,6 +728,20 @@ void ctrl_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(filter_change_topic.c_str(), payload, true);
+
+  // Relay state binary sensors
+  static const char *relay_names[] = {"Heat Relay", "Cool Relay", "Fan Relay"};
+  static const char *relay_ids[] = {"relay_heat", "relay_cool", "relay_fan"};
+  for (int i = 0; i < 3; ++i) {
+    String topic = String("homeassistant/binary_sensor/") + dev_id + "_" + relay_ids[i] + "/config";
+    snprintf(payload, sizeof(payload),
+             "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\","
+             "\"stat_t\":\"%s/state/%s\",\"icon\":\"mdi:electric-switch\","
+             "\"entity_category\":\"diagnostic\",\"dev\":{\"ids\":[\"%s\"]}}",
+             relay_names[i], dev_id.c_str(), relay_ids[i],
+             base.c_str(), relay_ids[i], dev_id.c_str());
+    g_ctrl_mqtt.publish(topic.c_str(), payload, true);
+  }
 
   g_ctrl_mqtt_discovery_sent = true;
 }
@@ -838,6 +866,9 @@ void ctrl_web_handle_status_get() {
     "\"espnow_only\":%s,"
     "\"display_availability\":\"%s\","
     "\"filter_runtime_hours\":%.2f,"
+    "\"relay_heat\":%s,"
+    "\"relay_cool\":%s,"
+    "\"relay_fan\":%s,"
     "\"free_heap\":%lu,"
     "\"firmware_version\":\"%s\""
     "}",
@@ -861,6 +892,9 @@ void ctrl_web_handle_status_get() {
     g_ctrl_espnow_only ? "true" : "false",
     g_disp_availability.c_str(),
     static_cast<double>(rt.filter_runtime_hours()),
+    g_relay_io.latched_output().heat ? "true" : "false",
+    g_relay_io.latched_output().cool ? "true" : "false",
+    g_relay_io.latched_output().fan ? "true" : "false",
     static_cast<unsigned long>(ESP.getFreeHeap()),
     THERMOSTAT_FIRMWARE_VERSION
   );
@@ -1052,11 +1086,17 @@ void ctrl_publish_runtime_state() {
   g_ctrl_mqtt.publish(ctrl_topic_for("state/lockout").c_str(), lockout ? "1" : "0", true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/mode").c_str(), mode, true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/fan_mode").c_str(), fan, true);
-  snprintf(buf, sizeof(buf), "%.1f", rt.target_temperature_c());
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/target_temp_c").c_str(), buf, true);
+  {
+    float target = rt.target_temperature_c();
+    if (g_ctrl_temp_unit_f) target = target * 9.0f / 5.0f + 32.0f;
+    snprintf(buf, sizeof(buf), g_ctrl_temp_unit_f ? "%.0f" : "%.1f", static_cast<double>(target));
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/target_temp_c").c_str(), buf, true);
+  }
   const auto &app = g_controller->app();
   if (app.has_indoor_temperature()) {
-    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_temperature_c()));
+    float current = app.indoor_temperature_c();
+    if (g_ctrl_temp_unit_f) current = current * 9.0f / 5.0f + 32.0f;
+    snprintf(buf, sizeof(buf), g_ctrl_temp_unit_f ? "%.0f" : "%.1f", static_cast<double>(current));
     g_ctrl_mqtt.publish(ctrl_topic_for("state/current_temp_c").c_str(), buf, true);
   }
   if (app.has_indoor_humidity()) {
@@ -1120,6 +1160,12 @@ void ctrl_publish_runtime_state() {
   }
   g_ctrl_mqtt.publish(ctrl_topic_for("state/espnow_only").c_str(),
                       g_ctrl_espnow_only ? "true" : "false", true);
+  {
+    const auto &relay = g_relay_io.latched_output();
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/relay_heat").c_str(), relay.heat ? "ON" : "OFF", true);
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/relay_cool").c_str(), relay.cool ? "ON" : "OFF", true);
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/relay_fan").c_str(), relay.fan ? "ON" : "OFF", true);
+  }
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
 }
@@ -1273,6 +1319,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   if (topic_str == ctrl_topic_for("cmd/target_temp_c")) {
     float sp = static_cast<float>(atof(value));
     if (!isfinite(sp)) return;  // reject NaN/Inf
+    if (g_ctrl_temp_unit_f) sp = (sp - 32.0f) * 5.0f / 9.0f;
     if (sp < 0.0f) sp = 0.0f;
     if (sp > 40.0f) sp = 40.0f;
     g_ctrl_shadow_setpoint_c = sp;

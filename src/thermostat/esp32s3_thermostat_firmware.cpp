@@ -537,6 +537,11 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
       g_runtime->set_temperature_unit(g_cfg_temp_unit_f ? TemperatureUnit::Fahrenheit
                                                         : TemperatureUnit::Celsius);
     }
+    // Forward unit preference to controller so its HA climate entity matches
+    if (g_mqtt.connected() && g_cfg_controller_base_topic.length() > 0) {
+      String topic = g_cfg_controller_base_topic + "/cfg/temperature_unit/set";
+      g_mqtt.publish(topic.c_str(), g_cfg_temp_unit_f ? "f" : "c", false);
+    }
   } else if (key == "ota_hostname") {
     g_cfg_ota_hostname = value;
     g_cfg.putString("ota_host", value);
