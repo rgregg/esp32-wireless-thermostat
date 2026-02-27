@@ -27,6 +27,9 @@
 #include <WebServer.h>
 #include <esp_system.h>
 #include "ota_web_updater.h"
+#include "web/web_ui_escape.h"
+#include "web/web_ui_shell.h"
+#include "web/web_ui_fields.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
 thermostat::ControllerRelayIo g_relay_io;
@@ -775,63 +778,36 @@ void ctrl_publish_discovery() {
   g_ctrl_mqtt_discovery_sent = true;
 }
 
-String ctrl_json_escape(const String &in) {
-  String out;
-  out.reserve(in.length() + 8);
-  for (size_t i = 0; i < in.length(); ++i) {
-    const char c = in[i];
-    if (c == '"' || c == '\\') {
-      out += '\\';
-    }
-    out += c;
-  }
-  return out;
-}
-
-String ctrl_html_escape(const String &in) {
-  String out;
-  out.reserve(in.length() + 16);
-  for (size_t i = 0; i < in.length(); ++i) {
-    const char c = in[i];
-    switch (c) {
-      case '&': out += "&amp;"; break;
-      case '"': out += "&quot;"; break;
-      case '<': out += "&lt;"; break;
-      case '>': out += "&gt;"; break;
-      default: out += c; break;
-    }
-  }
-  return out;
-}
+// html_escape() and json_escape() are now in web_ui namespace via web_ui_escape.h
 
 void ctrl_web_handle_config_get() {
   String body = "{\"controller\":{";
-  body += "\"wifi_ssid\":\"" + ctrl_json_escape(g_cfg_ctrl_wifi_ssid) + "\",";
+  body += "\"wifi_ssid\":\"" + web_ui::json_escape(g_cfg_ctrl_wifi_ssid) + "\",";
   body += "\"wifi_password\":\"" + String(g_cfg_ctrl_wifi_password.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"mqtt_host\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_host) + "\",";
+  body += "\"mqtt_host\":\"" + web_ui::json_escape(g_cfg_ctrl_mqtt_host) + "\",";
   body += "\"mqtt_port\":" + String(g_cfg_ctrl_mqtt_port) + ",";
-  body += "\"mqtt_user\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_user) + "\",";
+  body += "\"mqtt_user\":\"" + web_ui::json_escape(g_cfg_ctrl_mqtt_user) + "\",";
   body += "\"mqtt_password\":\"" + String(g_cfg_ctrl_mqtt_password.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"mqtt_client_id\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_client_id) + "\",";
-  body += "\"mqtt_base_topic\":\"" + ctrl_json_escape(g_cfg_ctrl_mqtt_base_topic) + "\",";
-  body += "\"display_mqtt_base_topic\":\"" + ctrl_json_escape(g_cfg_display_mqtt_base_topic) + "\",";
-  body += "\"shared_device_id\":\"" + ctrl_json_escape(g_cfg_shared_device_id) + "\",";
-  body += "\"ota_hostname\":\"" + ctrl_json_escape(g_cfg_ctrl_ota_hostname) + "\",";
+  body += "\"mqtt_client_id\":\"" + web_ui::json_escape(g_cfg_ctrl_mqtt_client_id) + "\",";
+  body += "\"mqtt_base_topic\":\"" + web_ui::json_escape(g_cfg_ctrl_mqtt_base_topic) + "\",";
+  body += "\"display_mqtt_base_topic\":\"" + web_ui::json_escape(g_cfg_display_mqtt_base_topic) + "\",";
+  body += "\"shared_device_id\":\"" + web_ui::json_escape(g_cfg_shared_device_id) + "\",";
+  body += "\"ota_hostname\":\"" + web_ui::json_escape(g_cfg_ctrl_ota_hostname) + "\",";
   body += "\"ota_password\":\"" + String(g_cfg_ctrl_ota_password.length() > 0 ? "set" : "unset") + "\",";
   body += "\"espnow_channel\":" + String(g_cfg_ctrl_espnow_channel) + ",";
-  body += "\"espnow_peer_mac\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_mac) + "\",";
-  body += "\"espnow_peer_macs\":\"" + ctrl_json_escape(g_cfg_ctrl_espnow_peer_macs) + "\",";
+  body += "\"espnow_peer_mac\":\"" + web_ui::json_escape(g_cfg_ctrl_espnow_peer_mac) + "\",";
+  body += "\"espnow_peer_macs\":\"" + web_ui::json_escape(g_cfg_ctrl_espnow_peer_macs) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_ctrl_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"primary_sensor_mac\":\"" + ctrl_json_escape(g_cfg_ctrl_primary_sensor_mac) + "\",";
+  body += "\"primary_sensor_mac\":\"" + web_ui::json_escape(g_cfg_ctrl_primary_sensor_mac) + "\",";
   body += "\"pirateweather_api_key\":\"" +
           String(g_cfg_ctrl_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"pirateweather_zip\":\"" + ctrl_json_escape(g_cfg_ctrl_pirateweather_zip) + "\",";
+  body += "\"pirateweather_zip\":\"" + web_ui::json_escape(g_cfg_ctrl_pirateweather_zip) + "\",";
   body += "\"reboot_required\":" + String(g_ctrl_cfg_reboot_required ? "true" : "false");
   body += "},\"display\":{";
-  body += "\"availability\":\"" + ctrl_json_escape(g_disp_availability) + "\",";
+  body += "\"availability\":\"" + web_ui::json_escape(g_disp_availability) + "\",";
   for (size_t i = 0; i < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0])); ++i) {
     body += "\"" + String(g_disp_cfg_cache[i].key) + "\":\"" +
-            ctrl_json_escape(g_disp_cfg_cache[i].value) + "\"";
+            web_ui::json_escape(g_disp_cfg_cache[i].value) + "\"";
     if (i + 1 < (sizeof(g_disp_cfg_cache) / sizeof(g_disp_cfg_cache[0]))) {
       body += ",";
     }
@@ -944,123 +920,265 @@ void ctrl_web_handle_status_get() {
 }
 
 void ctrl_web_handle_root() {
+  using namespace web_ui;
   String html;
-  html.reserve(12288);
-  html += "<html><body><h1>System Config (Controller + Display)</h1>";
-  html += "<p><a href=\"/config\">JSON config</a> | <a href=\"/update\">Firmware Update</a></p>";
-  html += "<h2>Controller</h2>";
-  html += "<fieldset><legend>Networking Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "wifi_ssid: <input name=\"wifi_ssid\" maxlength=\"64\" value=\"" + ctrl_html_escape(g_cfg_ctrl_wifi_ssid) + "\"><br>";
-  html += "wifi_password: <input name=\"wifi_password\" value=\"\"><br>";
-  html += "mqtt_host: <input name=\"mqtt_host\" value=\"" + ctrl_html_escape(g_cfg_ctrl_mqtt_host) + "\"><br>";
-  html += "mqtt_port: <input name=\"mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" value=\"" +
-          String(g_cfg_ctrl_mqtt_port) + "\"><br>";
-  html += "mqtt_user: <input name=\"mqtt_user\" value=\"" + ctrl_html_escape(g_cfg_ctrl_mqtt_user) + "\"><br>";
-  html += "mqtt_password: <input name=\"mqtt_password\" value=\"\"><br>";
-  html += "mqtt_client_id: <input name=\"mqtt_client_id\" value=\"" + ctrl_html_escape(g_cfg_ctrl_mqtt_client_id) + "\"><br>";
-  html += "mqtt_base_topic: <input name=\"mqtt_base_topic\" value=\"" + ctrl_html_escape(g_cfg_ctrl_mqtt_base_topic) + "\"><br>";
-  html += "display_mqtt_base_topic: <input name=\"display_mqtt_base_topic\" value=\"" +
-          ctrl_html_escape(g_cfg_display_mqtt_base_topic) + "\"><br>";
-  html += "espnow_channel: <input name=\"espnow_channel\" type=\"number\" min=\"1\" max=\"14\" step=\"1\" value=\"" +
-          String(g_cfg_ctrl_espnow_channel) + "\"><br>";
-  html += "espnow_peer_mac: <input name=\"espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" + ctrl_html_escape(g_cfg_ctrl_espnow_peer_mac) +
-          "\"><br>";
-  html += "espnow_peer_macs: <input name=\"espnow_peer_macs\" title=\"Comma-separated MACs: AA:BB:CC:DD:EE:FF,11:22:33:44:55:66\" value=\"" + ctrl_html_escape(g_cfg_ctrl_espnow_peer_macs) +
-          "\"><br>";
-  html += "espnow_lmk: <input name=\"espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
-  html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
+  html.reserve(16384);
 
-  html += "<fieldset><legend>Hardware Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "primary_sensor_mac: <input name=\"primary_sensor_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF (FF:FF:FF:FF:FF:FF = accept all)\" value=\"" + ctrl_html_escape(g_cfg_ctrl_primary_sensor_mac) + "\"><br>";
-  html += "ota_hostname: <input name=\"ota_hostname\" value=\"" + ctrl_html_escape(g_cfg_ctrl_ota_hostname) + "\"><br>";
-  html += "ota_password: <input name=\"ota_password\" value=\"\"><br>";
-  html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
+  static const TabDef tabs[] = {
+    {"status", "Status"},
+    {"wifi", "WiFi"},
+    {"mqtt", "MQTT"},
+    {"espnow", "ESP-NOW"},
+    {"weather", "Weather"},
+    {"hw", "Hardware"},
+    {"general", "General"},
+    {"display", "Display (Remote)"},
+    {"system", "System"},
+  };
+  page_begin(html, "Furnace Controller", g_cfg_ctrl_ota_hostname.c_str(),
+             tabs, sizeof(tabs) / sizeof(tabs[0]));
 
-  html += "<fieldset><legend>Display Settings</legend>";
-  html += "<p>Controller has no local display settings.</p>";
-  html += "</fieldset>";
+  // ── Status tab ──
+  tab_begin(html, "status", true);
+  card_begin(html, "Controller Status");
+  status_grid_begin(html);
+  status_item(html, "Uptime", "uptime_ms");
+  status_item(html, "WiFi", "wifi_connected");
+  status_item(html, "IP Address", "wifi_ip");
+  status_item(html, "RSSI", "wifi_rssi");
+  status_item(html, "MQTT", "mqtt_connected");
+  status_item(html, "Indoor Temp", "indoor_temp_c");
+  status_item(html, "Has Temp", "has_indoor_temp");
+  status_item(html, "Humidity", "indoor_humidity_pct");
+  status_item(html, "Furnace State", "furnace_state");
+  status_item(html, "Mode", "mode");
+  status_item(html, "Fan", "fan_mode");
+  status_item(html, "Target Temp", "target_temp_c");
+  status_item(html, "HVAC Lockout", "hvac_lockout");
+  status_item(html, "Failsafe", "failsafe_active");
+  status_item(html, "Heartbeat", "heartbeat_last_seen_ms");
+  status_item(html, "ESP-NOW Only", "espnow_only");
+  status_item(html, "Display", "display_availability");
+  status_item(html, "Filter Hours", "filter_runtime_hours");
+  status_item(html, "Free Heap", "free_heap");
+  status_grid_end(html);
+  card_end(html);
+  if (g_ctrl_cfg_reboot_required) {
+    html += F("<div class=\"card\" style=\"border:1px solid var(--wn)\">"
+              "<p style=\"color:var(--wn)\">Reboot required for pending changes.</p></div>");
+  }
+  tab_end(html);
 
-  html += "<fieldset><legend>Weather</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "pirateweather_api_key: <input name=\"pirateweather_api_key\" value=\"\"><br>";
-  html += "pirateweather_zip: <input name=\"pirateweather_zip\" pattern=\"^[0-9]{5}(-[0-9]{4})?$\" title=\"US ZIP format: 12345 or 12345-6789\" value=\"" +
-          ctrl_html_escape(g_cfg_ctrl_pirateweather_zip) + "\"><br>";
-  html += "<button type=\"submit\">Save Weather</button></form></fieldset>";
+  // ── WiFi tab ──
+  tab_begin(html, "wifi");
+  card_begin(html, "WiFi Settings");
+  form_begin(html);
+  text_field(html, "WiFi SSID", "wifi_ssid", g_cfg_ctrl_wifi_ssid, nullptr, nullptr, nullptr, 64);
+  password_field(html, "WiFi Password", "wifi_password", g_cfg_ctrl_wifi_password.length() > 0);
+  form_end(html, "Save WiFi");
+  card_end(html);
+  tab_end(html);
 
-  html += "<fieldset><legend>Miscellaneous</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "shared_device_id: <input name=\"shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" + ctrl_html_escape(g_cfg_shared_device_id) +
-          "\"><br>";
-  html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
+  // ── MQTT tab ──
+  tab_begin(html, "mqtt");
+  card_begin(html, "MQTT Broker");
+  form_begin(html);
+  text_field(html, "Broker Host", "mqtt_host", g_cfg_ctrl_mqtt_host);
+  number_field(html, "Broker Port", "mqtt_port", String(g_cfg_ctrl_mqtt_port), "1", "65535", "1");
+  text_field(html, "Username", "mqtt_user", g_cfg_ctrl_mqtt_user);
+  password_field(html, "Password", "mqtt_password", g_cfg_ctrl_mqtt_password.length() > 0);
+  text_field(html, "Client ID", "mqtt_client_id", g_cfg_ctrl_mqtt_client_id);
+  text_field(html, "Base Topic", "mqtt_base_topic", g_cfg_ctrl_mqtt_base_topic,
+             "e.g. thermostat/furnace-controller");
+  text_field(html, "Display Base Topic", "display_mqtt_base_topic",
+             g_cfg_display_mqtt_base_topic,
+             "MQTT base topic of the thermostat display");
+  form_end(html, "Save MQTT");
+  card_end(html);
+  tab_end(html);
 
-  html += "<p>reboot_required=" + String(g_ctrl_cfg_reboot_required ? "true" : "false") + "</p>";
+  // ── ESP-NOW tab ──
+  tab_begin(html, "espnow");
+  card_begin(html, "ESP-NOW Settings");
+  form_begin(html);
+  number_field(html, "Channel", "espnow_channel", String(g_cfg_ctrl_espnow_channel), "1", "14", "1");
+  mac_field(html, "Peer MAC", "espnow_peer_mac", g_cfg_ctrl_espnow_peer_mac);
+  text_field(html, "Additional Peer MACs", "espnow_peer_macs", g_cfg_ctrl_espnow_peer_macs,
+             "Comma-separated: AA:BB:CC:DD:EE:FF,11:22:33:44:55:66");
+  password_field(html, "Encryption Key (LMK)", "espnow_lmk",
+                 g_cfg_ctrl_espnow_lmk.length() > 0,
+                 "^[0-9A-Fa-f]{32}$", "32 hex characters");
+  form_end(html, "Save ESP-NOW");
+  card_end(html);
+  tab_end(html);
 
-  html += "<h2>Display (via MQTT)</h2>";
-  html += "<p>availability=" + ctrl_html_escape(g_disp_availability) + "</p>";
-  html += "<fieldset><legend>Networking Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "wifi_ssid: <input name=\"disp_wifi_ssid\" maxlength=\"64\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("wifi_ssid")) + "\"><br>";
-  html += "wifi_password: <input name=\"disp_wifi_password\" value=\"\"><br>";
-  html += "mqtt_host: <input name=\"disp_mqtt_host\" value=\"" + ctrl_html_escape(ctrl_get_display_cfg_cache("mqtt_host")) + "\"><br>";
-  html += "mqtt_port: <input name=\"disp_mqtt_port\" type=\"number\" min=\"1\" max=\"65535\" step=\"1\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("mqtt_port")) + "\"><br>";
-  html += "mqtt_user: <input name=\"disp_mqtt_user\" value=\"" + ctrl_html_escape(ctrl_get_display_cfg_cache("mqtt_user")) + "\"><br>";
-  html += "mqtt_password: <input name=\"disp_mqtt_password\" value=\"\"><br>";
-  html += "mqtt_client_id: <input name=\"disp_mqtt_client_id\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("mqtt_client_id")) + "\"><br>";
-  html += "mqtt_base_topic: <input name=\"disp_mqtt_base_topic\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("mqtt_base_topic")) + "\"><br>";
-  html += "espnow_channel: <input name=\"disp_espnow_channel\" type=\"number\" min=\"1\" max=\"14\" step=\"1\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("espnow_channel")) + "\"><br>";
-  html += "espnow_peer_mac: <input name=\"disp_espnow_peer_mac\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\" title=\"Format: AA:BB:CC:DD:EE:FF\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("espnow_peer_mac")) + "\"><br>";
-  html += "espnow_lmk: <input name=\"disp_espnow_lmk\" pattern=\"^[0-9A-Fa-f]{32}$\" title=\"32 hex characters\" value=\"\"><br>";
-  html += "controller_base_topic: <input name=\"disp_controller_base_topic\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("controller_base_topic")) + "\"><br>";
-  html += "<button type=\"submit\">Save Networking</button></form></fieldset>";
+  // ── Weather tab ──
+  tab_begin(html, "weather");
+  card_begin(html, "PirateWeather");
+  form_begin(html);
+  password_field(html, "API Key", "pirateweather_api_key",
+                 g_cfg_ctrl_pirateweather_api_key.length() > 0);
+  text_field(html, "ZIP Code", "pirateweather_zip", g_cfg_ctrl_pirateweather_zip,
+             "US ZIP: 12345 or 12345-6789",
+             "^[0-9]{5}(-[0-9]{4})?$", "US ZIP format");
+  form_end(html, "Save Weather");
+  card_end(html);
+  tab_end(html);
 
-  html += "<fieldset><legend>Hardware Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "temp_comp_c: <input name=\"disp_temp_comp_c\" type=\"number\" min=\"-10\" max=\"10\" step=\"0.01\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("temp_comp_c")) + "\"><br>";
-  html += "controller_timeout_ms: <input name=\"disp_controller_timeout_ms\" type=\"number\" min=\"1000\" max=\"600000\" step=\"1\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("controller_timeout_ms")) + "\"><br>";
-  html += "ota_hostname: <input name=\"disp_ota_hostname\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("ota_hostname")) + "\"><br>";
-  html += "ota_password: <input name=\"disp_ota_password\" value=\"\"><br>";
-  html += "<button type=\"submit\">Save Hardware</button></form></fieldset>";
+  // ── Hardware tab ──
+  tab_begin(html, "hw");
+  card_begin(html, "Sensor & OTA");
+  form_begin(html);
+  mac_field(html, "Primary Sensor MAC", "primary_sensor_mac", g_cfg_ctrl_primary_sensor_mac,
+            "FF:FF:FF:FF:FF:FF = accept all");
+  text_field(html, "OTA Hostname", "ota_hostname", g_cfg_ctrl_ota_hostname);
+  password_field(html, "OTA Password", "ota_password", g_cfg_ctrl_ota_password.length() > 0);
+  form_end(html, "Save Hardware");
+  card_end(html);
+  tab_end(html);
 
-  html += "<fieldset><legend>Display Settings</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "display_timeout_s: <input name=\"disp_display_timeout_s\" type=\"number\" min=\"30\" max=\"600\" step=\"1\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("display_timeout_s")) + "\"><br>";
-  html += "temperature_unit: <input name=\"disp_temperature_unit\" pattern=\"^(c|f|celsius|fahrenheit)$\" title=\"Use c, f, celsius, or fahrenheit\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("temperature_unit")) + "\"><br>";
-  html += "<button type=\"submit\">Save Display</button></form></fieldset>";
+  // ── General tab ──
+  tab_begin(html, "general");
+  card_begin(html, "Identity");
+  form_begin(html);
+  text_field(html, "Shared Device ID", "shared_device_id", g_cfg_shared_device_id,
+             "1-64 chars: letters, numbers, underscore, hyphen",
+             "^[A-Za-z0-9_-]{1,64}$", "1-64 chars: letters, numbers, underscore, hyphen");
+  form_end(html, "Save General");
+  card_end(html);
+  tab_end(html);
 
-  html += "<fieldset><legend>Weather</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "pirateweather_api_key: <input name=\"disp_pirateweather_api_key\" value=\"\"><br>";
-  html += "pirateweather_zip: <input name=\"disp_pirateweather_zip\" pattern=\"^[0-9]{5}(-[0-9]{4})?$\" title=\"US ZIP format: 12345 or 12345-6789\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("pirateweather_zip")) + "\"><br>";
-  html += "<button type=\"submit\">Save Weather</button></form></fieldset>";
+  // ── Display (Remote) tab ──
+  tab_begin(html, "display");
+  html += F("<div class=\"card\" style=\"border:1px solid var(--ac)\">"
+            "<p style=\"font-size:0.8rem;color:var(--tx2)\">"
+            "These settings are sent to the thermostat display via MQTT. "
+            "Display availability: <strong id=\"st-display_availability\">");
+  html += web_ui::html_escape(g_disp_availability);
+  html += F("</strong></p></div>");
 
-  html += "<fieldset><legend>Miscellaneous</legend>";
-  html += "<form method=\"post\" action=\"/config\">";
-  html += "discovery_prefix: <input name=\"disp_discovery_prefix\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("discovery_prefix")) + "\"><br>";
-  html += "shared_device_id: <input name=\"disp_shared_device_id\" pattern=\"^[A-Za-z0-9_-]{1,64}$\" title=\"1-64 chars: letters, numbers, underscore, hyphen\" value=\"" +
-          ctrl_html_escape(ctrl_get_display_cfg_cache("shared_device_id")) + "\"><br>";
-  html += "<button type=\"submit\">Save Misc</button></form></fieldset>";
+  // Display WiFi
+  card_begin(html, "Display WiFi");
+  form_begin(html);
+  text_field(html, "WiFi SSID", "disp_wifi_ssid",
+             ctrl_get_display_cfg_cache("wifi_ssid"), nullptr, nullptr, nullptr, 64);
+  password_field(html, "WiFi Password", "disp_wifi_password",
+                 ctrl_get_display_cfg_cache("wifi_password") != "unknown");
+  form_end(html, "Save Display WiFi");
+  card_end(html);
 
-  html += "<p>display_reboot_required=" + ctrl_html_escape(ctrl_get_display_cfg_cache("reboot_required")) + "</p>";
-  html += "<form method=\"post\" action=\"/reboot\"><button type=\"submit\">Reboot Controller</button></form>";
-  html += "<form method=\"post\" action=\"/config\"><input type=\"hidden\" name=\"disp_reboot\" value=\"1\"><button type=\"submit\">Reboot Display (via MQTT)</button></form>";
-  html += "<p>Use the display device IP + /screenshot for remote screen capture.</p>";
-  html += "</body></html>";
+  // Display MQTT
+  card_begin(html, "Display MQTT");
+  form_begin(html);
+  text_field(html, "Broker Host", "disp_mqtt_host", ctrl_get_display_cfg_cache("mqtt_host"));
+  number_field(html, "Broker Port", "disp_mqtt_port",
+               ctrl_get_display_cfg_cache("mqtt_port"), "1", "65535", "1");
+  text_field(html, "Username", "disp_mqtt_user", ctrl_get_display_cfg_cache("mqtt_user"));
+  password_field(html, "Password", "disp_mqtt_password",
+                 ctrl_get_display_cfg_cache("mqtt_password") != "unknown");
+  text_field(html, "Client ID", "disp_mqtt_client_id", ctrl_get_display_cfg_cache("mqtt_client_id"));
+  text_field(html, "Base Topic", "disp_mqtt_base_topic", ctrl_get_display_cfg_cache("mqtt_base_topic"));
+  text_field(html, "Controller Base Topic", "disp_controller_base_topic",
+             ctrl_get_display_cfg_cache("controller_base_topic"));
+  form_end(html, "Save Display MQTT");
+  card_end(html);
+
+  // Display ESP-NOW
+  card_begin(html, "Display ESP-NOW");
+  form_begin(html);
+  number_field(html, "Channel", "disp_espnow_channel",
+               ctrl_get_display_cfg_cache("espnow_channel"), "1", "14", "1");
+  mac_field(html, "Peer MAC", "disp_espnow_peer_mac",
+            ctrl_get_display_cfg_cache("espnow_peer_mac"));
+  password_field(html, "Encryption Key (LMK)", "disp_espnow_lmk",
+                 ctrl_get_display_cfg_cache("espnow_lmk") != "unknown",
+                 "^[0-9A-Fa-f]{32}$", "32 hex characters");
+  form_end(html, "Save Display ESP-NOW");
+  card_end(html);
+
+  // Display Settings
+  card_begin(html, "Display Screen");
+  form_begin(html);
+  number_field(html, "Screen Timeout (seconds)", "disp_display_timeout_s",
+               ctrl_get_display_cfg_cache("display_timeout_s"), "30", "600", "1");
+  {
+    static const SelectOption temp_opts[] = {{"c", "Celsius"}, {"f", "Fahrenheit"}};
+    select_field(html, "Temperature Unit", "disp_temperature_unit",
+                 temp_opts, 2, ctrl_get_display_cfg_cache("temperature_unit"));
+  }
+  form_end(html, "Save Display Settings");
+  card_end(html);
+
+  // Display Hardware
+  card_begin(html, "Display Hardware");
+  form_begin(html);
+  number_field(html, "Temp Compensation (\u00b0C)", "disp_temp_comp_c",
+               ctrl_get_display_cfg_cache("temp_comp_c"), "-10", "10", "0.01");
+  number_field(html, "Controller Timeout (ms)", "disp_controller_timeout_ms",
+               ctrl_get_display_cfg_cache("controller_timeout_ms"), "1000", "600000", "1");
+  text_field(html, "OTA Hostname", "disp_ota_hostname", ctrl_get_display_cfg_cache("ota_hostname"));
+  password_field(html, "OTA Password", "disp_ota_password",
+                 ctrl_get_display_cfg_cache("ota_password") != "unknown");
+  form_end(html, "Save Display Hardware");
+  card_end(html);
+
+  // Display Weather
+  card_begin(html, "Display Weather");
+  form_begin(html);
+  password_field(html, "PirateWeather API Key", "disp_pirateweather_api_key",
+                 ctrl_get_display_cfg_cache("pirateweather_api_key") != "unknown");
+  text_field(html, "ZIP Code", "disp_pirateweather_zip",
+             ctrl_get_display_cfg_cache("pirateweather_zip"),
+             "US ZIP: 12345 or 12345-6789",
+             "^[0-9]{5}(-[0-9]{4})?$", "US ZIP format");
+  form_end(html, "Save Display Weather");
+  card_end(html);
+
+  // Display General
+  card_begin(html, "Display Identity");
+  form_begin(html);
+  text_field(html, "Discovery Prefix", "disp_discovery_prefix",
+             ctrl_get_display_cfg_cache("discovery_prefix"));
+  text_field(html, "Shared Device ID", "disp_shared_device_id",
+             ctrl_get_display_cfg_cache("shared_device_id"),
+             "1-64 chars: letters, numbers, underscore, hyphen",
+             "^[A-Za-z0-9_-]{1,64}$");
+  form_end(html, "Save Display Identity");
+  card_end(html);
+
+  if (ctrl_get_display_cfg_cache("reboot_required") == "true") {
+    html += F("<div class=\"card\" style=\"border:1px solid var(--wn)\">"
+              "<p style=\"color:var(--wn)\">Display reboot required.</p></div>");
+  }
+
+  // Reboot display via MQTT
+  html += F("<div class=\"card\"><form method=\"post\" action=\"/config\">");
+  hidden_field(html, "disp_reboot", "1");
+  html += F("<button type=\"submit\" class=\"btn btn-d\" "
+            "onclick=\"return confirm('Reboot the display via MQTT?')\">"
+            "Reboot Display (via MQTT)</button></form></div>");
+  tab_end(html);
+
+  // ── System tab ──
+  tab_begin(html, "system");
+  card_begin(html, "Firmware Update");
+  html += F("<form method=\"post\" action=\"/update\" enctype=\"multipart/form-data\">");
+  file_upload(html);
+  html += F("<div class=\"mt\"><button type=\"submit\" class=\"btn btn-p\">Upload Firmware</button></div>");
+  html += F("</form>");
+  card_end(html);
+
+  card_begin(html, "Device Control");
+  reboot_button(html, "Reboot Controller");
+  card_end(html);
+
+  card_begin(html, "Links");
+  html += F("<p style=\"font-size:0.85rem\"><a href=\"/config\" style=\"color:var(--ac)\">JSON Config</a>"
+            " &middot; <a href=\"/status\" style=\"color:var(--ac)\">JSON Status</a></p>");
+  card_end(html);
+  tab_end(html);
+
+  page_end(html);
   g_ctrl_web.send(200, "text/html", html);
 }
 

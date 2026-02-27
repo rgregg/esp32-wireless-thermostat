@@ -12,13 +12,30 @@
 // ---------------------------------------------------------------------------
 
 static const char kUploadFormHtml[] PROGMEM = R"rawliteral(
-<html><body>
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firmware Update</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,system-ui,sans-serif;background:#111827;color:#F9FAFB;
+min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1rem}
+.card{background:#1F2937;border-radius:0.5rem;padding:1.5rem;max-width:400px;width:100%}
+h1{font-size:1.25rem;margin-bottom:1rem;text-align:center}
+input[type=file]{width:100%;padding:0.5rem;margin-bottom:1rem;border:1px solid #374151;
+border-radius:0.375rem;background:#374151;color:#F9FAFB;font-size:0.85rem}
+button{width:100%;padding:0.5rem;border:none;border-radius:0.375rem;background:#4F46E5;
+color:#fff;font-size:0.85rem;font-weight:500;cursor:pointer}
+button:hover{background:#4338CA}
+a{color:#4F46E5;text-decoration:none;display:block;text-align:center;margin-top:1rem;font-size:0.85rem}
+</style></head><body>
+<div class="card">
 <h1>Firmware Update</h1>
 <form method="POST" action="/update" enctype="multipart/form-data">
   <input type="file" name="firmware" accept=".bin">
   <button type="submit">Upload</button>
 </form>
-<p><a href="/">Back</a></p>
+<a href="/">Back to Config</a>
+</div>
 </body></html>
 )rawliteral";
 
@@ -58,11 +75,19 @@ static void handle_update_upload(WebServer &server) {
 
 static void handle_update_post(WebServer &server) {
   if (Update.hasError()) {
-    server.send(500, "text/plain", "Update failed. Check serial log.");
+    server.send(500, "text/html",
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                "<style>body{background:#111827;color:#EF4444;font-family:system-ui;display:flex;"
+                "align-items:center;justify-content:center;min-height:100vh}"
+                "a{color:#4F46E5}</style></head><body>"
+                "<div><h1>Update Failed</h1><p>Check serial log.</p>"
+                "<p><a href=\"/\">Back</a></p></div></body></html>");
   } else {
     server.send(200, "text/html",
-                "<html><body><h1>Update OK</h1>"
-                "<p>Rebooting...</p></body></html>");
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                "<style>body{background:#111827;color:#10B981;font-family:system-ui;display:flex;"
+                "align-items:center;justify-content:center;min-height:100vh}</style></head><body>"
+                "<div><h1>Update OK</h1><p>Rebooting...</p></div></body></html>");
     delay(500);
     ESP.restart();
   }
