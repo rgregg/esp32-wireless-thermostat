@@ -944,6 +944,80 @@ void web_handle_reboot_post() {
   g_web.send(200, "text/plain", "rebooting\n");
 }
 
+void web_handle_status_get() {
+  const uint32_t now = millis();
+  char buf[2048];
+  const uint32_t mqtt_ctrl_ms = g_mqtt_ctrl_last_update_ms;
+  const uint32_t mqtt_cmd_ms = g_last_mqtt_command_ms;
+  const uint32_t espnow_hb_ms = g_runtime ? g_runtime->last_controller_heartbeat_ms() : 0;
+  char remote_temp_str[16], remote_hum_str[16];
+  if (std::isnan(g_remote_indoor_temp_c)) {
+    strcpy(remote_temp_str, "null");
+  } else {
+    snprintf(remote_temp_str, sizeof(remote_temp_str), "%.2f", static_cast<double>(g_remote_indoor_temp_c));
+  }
+  if (std::isnan(g_remote_indoor_humidity)) {
+    strcpy(remote_hum_str, "null");
+  } else {
+    snprintf(remote_hum_str, sizeof(remote_hum_str), "%.2f", static_cast<double>(g_remote_indoor_humidity));
+  }
+  snprintf(buf, sizeof(buf),
+    "{"
+    "\"uptime_ms\":%lu,"
+    "\"wifi_connected\":%s,"
+    "\"wifi_ip\":\"%s\","
+    "\"wifi_rssi\":%d,"
+    "\"mqtt_connected\":%s,"
+    "\"aht_sensor_ready\":%s,"
+    "\"remote_indoor_temp_c\":%s,"
+    "\"remote_indoor_humidity\":%s,"
+    "\"indoor_temp_text\":\"%s\","
+    "\"indoor_humidity_text\":\"%s\","
+    "\"setpoint_text\":\"%s\","
+    "\"status_text\":\"%s\","
+    "\"weather_text\":\"%s\","
+    "\"have_weather_data\":%s,"
+    "\"outdoor_temp_c\":%.1f,"
+    "\"mqtt_ctrl_last_update_ms\":%lu,"
+    "\"mqtt_ctrl_last_applied_ms\":%lu,"
+    "\"last_mqtt_command_ms\":%lu,"
+    "\"espnow_heartbeat_ms\":%lu,"
+    "\"controller_timeout_ms\":%lu,"
+    "\"controller_base_topic\":\"%s\","
+    "\"mqtt_ctrl_mode\":\"%s\","
+    "\"mqtt_ctrl_state\":%u,"
+    "\"mqtt_ctrl_available\":%s,"
+    "\"free_heap\":%lu"
+    "}",
+    static_cast<unsigned long>(now),
+    WiFi.status() == WL_CONNECTED ? "true" : "false",
+    WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "",
+    WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+    g_mqtt.connected() ? "true" : "false",
+    g_aht_ready ? "true" : "false",
+    remote_temp_str,
+    remote_hum_str,
+    g_runtime ? g_runtime->indoor_temp_text().c_str() : "",
+    g_runtime ? g_runtime->indoor_humidity_text().c_str() : "",
+    g_runtime ? g_runtime->setpoint_text().c_str() : "",
+    g_runtime ? g_runtime->status_text(now).c_str() : "",
+    g_runtime ? g_runtime->weather_text().c_str() : "",
+    g_have_weather_data ? "true" : "false",
+    static_cast<double>(g_outdoor_temp_c),
+    static_cast<unsigned long>(mqtt_ctrl_ms),
+    static_cast<unsigned long>(g_mqtt_ctrl_last_applied_ms),
+    static_cast<unsigned long>(mqtt_cmd_ms),
+    static_cast<unsigned long>(espnow_hb_ms),
+    static_cast<unsigned long>(g_cfg_controller_timeout_ms),
+    g_cfg_controller_base_topic.c_str(),
+    mqtt_payload::mode_to_str(g_mqtt_ctrl_mode),
+    static_cast<unsigned>(g_mqtt_ctrl_state),
+    g_mqtt_ctrl_available ? "true" : "false",
+    static_cast<unsigned long>(ESP.getFreeHeap())
+  );
+  g_web.send(200, "application/json", buf);
+}
+
 void write_u16_le(uint8_t *out, uint16_t value) {
   out[0] = static_cast<uint8_t>(value & 0xFFu);
   out[1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
@@ -1088,6 +1162,7 @@ void ensure_web_ready() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (!g_web_started) {
     g_web.on("/", HTTP_GET, web_handle_root);
+    g_web.on("/status", HTTP_GET, web_handle_status_get);
     g_web.on("/config", HTTP_GET, web_handle_config_get);
     g_web.on("/config", HTTP_POST, web_handle_config_post);
     g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
@@ -1181,7 +1256,7 @@ void mqtt_publish_state() {
 
   {
     const uint32_t now_ms = millis();
-    const uint32_t mqtt_ms = g_last_mqtt_command_ms;
+    const uint32_t mqtt_ms = std::max(g_last_mqtt_command_ms, g_mqtt_ctrl_last_update_ms);
     const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
     const bool mqtt_active = mqtt_ms > 0 && (now_ms - mqtt_ms) < g_cfg_controller_timeout_ms;
     const bool espnow_active = espnow_ms > 0 && (now_ms - espnow_ms) < g_cfg_controller_timeout_ms;
@@ -2068,9 +2143,11 @@ void refresh_ui() {
 
   // Controller connectivity check
   const uint32_t mqtt_cmd_ms = g_last_mqtt_command_ms;
+  const uint32_t mqtt_ctrl_ms = g_mqtt_ctrl_last_update_ms;
   const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
   const bool controller_connected =
       (mqtt_cmd_ms > 0 && (now - mqtt_cmd_ms) < g_cfg_controller_timeout_ms) ||
+      (mqtt_ctrl_ms > 0 && (now - mqtt_ctrl_ms) < g_cfg_controller_timeout_ms) ||
       (espnow_ms > 0 && (now - espnow_ms) < g_cfg_controller_timeout_ms);
 
   thermostat::ui::set_mode_button_state(g_runtime->local_mode());
@@ -2364,6 +2441,14 @@ void init_sensors() {
   g_touch_i2c.begin(kTouchI2cSda, kTouchI2cScl, 400000U);
   g_sensor_i2c.begin(kSensorI2cSda, kSensorI2cScl, 100000U);
   g_aht_ready = g_aht.begin(&g_sensor_i2c);
+  if (g_aht_ready) {
+    // Validate with a test read — ghost devices return 0.0/0.0
+    sensors_event_t h, t;
+    if (!g_aht.getEvent(&h, &t) ||
+        (t.temperature == 0.0f && h.relative_humidity == 0.0f)) {
+      g_aht_ready = false;
+    }
+  }
 
   // Read GT911 configured resolution for coordinate scaling
   uint8_t res[4] = {0};

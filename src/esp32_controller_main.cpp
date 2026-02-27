@@ -874,6 +874,75 @@ void ctrl_web_handle_reboot_post() {
   g_ctrl_web.send(200, "text/plain", "rebooting\n");
 }
 
+void ctrl_web_handle_status_get() {
+  if (g_controller == nullptr) {
+    g_ctrl_web.send(503, "application/json", "{\"error\":\"controller not initialized\"}");
+    return;
+  }
+  const uint32_t now = millis();
+  const auto &app = g_controller->app();
+  const auto &rt = app.runtime();
+  char temp_str[16], hum_str[16];
+  if (app.has_indoor_temperature()) {
+    snprintf(temp_str, sizeof(temp_str), "%.2f", static_cast<double>(app.indoor_temperature_c()));
+  } else {
+    strcpy(temp_str, "null");
+  }
+  if (app.has_indoor_humidity()) {
+    snprintf(hum_str, sizeof(hum_str), "%.2f", static_cast<double>(app.indoor_humidity_pct()));
+  } else {
+    strcpy(hum_str, "null");
+  }
+  char buf[1024];
+  snprintf(buf, sizeof(buf),
+    "{"
+    "\"uptime_ms\":%lu,"
+    "\"wifi_connected\":%s,"
+    "\"wifi_ip\":\"%s\","
+    "\"wifi_rssi\":%d,"
+    "\"mqtt_connected\":%s,"
+    "\"has_indoor_temp\":%s,"
+    "\"indoor_temp_c\":%s,"
+    "\"has_indoor_humidity\":%s,"
+    "\"indoor_humidity_pct\":%s,"
+    "\"furnace_state\":%u,"
+    "\"mode\":\"%s\","
+    "\"fan_mode\":\"%s\","
+    "\"target_temp_c\":%.1f,"
+    "\"hvac_lockout\":%s,"
+    "\"failsafe_active\":%s,"
+    "\"heartbeat_last_seen_ms\":%lu,"
+    "\"last_mqtt_command_ms\":%lu,"
+    "\"espnow_only\":%s,"
+    "\"display_availability\":\"%s\","
+    "\"filter_runtime_hours\":%.2f,"
+    "\"free_heap\":%lu"
+    "}",
+    static_cast<unsigned long>(now),
+    WiFi.isConnected() ? "true" : "false",
+    WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "",
+    WiFi.isConnected() ? WiFi.RSSI() : 0,
+    g_ctrl_mqtt.connected() ? "true" : "false",
+    app.has_indoor_temperature() ? "true" : "false",
+    temp_str,
+    app.has_indoor_humidity() ? "true" : "false",
+    hum_str,
+    static_cast<unsigned>(rt.furnace_state()),
+    mqtt_payload::mode_to_str(rt.mode()),
+    mqtt_payload::fan_to_str(rt.fan_mode()),
+    static_cast<double>(rt.target_temperature_c()),
+    rt.hvac_lockout() ? "true" : "false",
+    rt.failsafe_active() ? "true" : "false",
+    static_cast<unsigned long>(rt.heartbeat_last_seen_ms()),
+    static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms),
+    g_ctrl_espnow_only ? "true" : "false",
+    g_disp_availability.c_str(),
+    static_cast<double>(rt.filter_runtime_hours()),
+    static_cast<unsigned long>(ESP.getFreeHeap())
+  );
+  g_ctrl_web.send(200, "application/json", buf);
+}
+
 void ctrl_web_handle_root() {
   String html;
   html.reserve(12288);
@@ -1001,6 +1070,7 @@ void ctrl_ensure_web_ready() {
   }
   if (!g_ctrl_web_started) {
     g_ctrl_web.on("/", HTTP_GET, ctrl_web_handle_root);
+    g_ctrl_web.on("/status", HTTP_GET, ctrl_web_handle_status_get);
     g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
@@ -1033,8 +1103,10 @@ void ctrl_publish_runtime_state() {
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_temperature_c()));
     g_ctrl_mqtt.publish(ctrl_topic_for("state/current_temp_c").c_str(), buf, true);
   }
-  snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_humidity_pct()));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/current_humidity").c_str(), buf, true);
+  if (app.has_indoor_humidity()) {
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_humidity_pct()));
+    g_ctrl_mqtt.publish(ctrl_topic_for("state/current_humidity").c_str(), buf, true);
+  }
   snprintf(buf, sizeof(buf), "%.2f", rt.filter_runtime_hours());
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_runtime_hours").c_str(), buf, true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_change_required").c_str(),
@@ -1156,6 +1228,10 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
   if (topic_str == display_topic_for("state/availability")) {
     g_disp_availability = value;
+    // Display being online serves as heartbeat — it can relay commands
+    if (g_controller != nullptr && strcmp(value, "online") == 0) {
+      g_controller->app().on_heartbeat(millis());
+    }
     return;
   }
 
@@ -1170,6 +1246,8 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       if (strcmp(sensor_suffix, "temp_c") == 0) {
         if (isfinite(fval) && fval >= -40.0f && fval <= 85.0f) {
           g_controller->app().on_indoor_temperature_c(fval, parsed_mac);
+          // Valid temperature from primary sensor keeps failsafe from triggering
+          g_controller->app().on_heartbeat(millis());
         }
       } else if (strcmp(sensor_suffix, "humidity") == 0) {
         if (isfinite(fval) && fval >= 0.0f && fval <= 100.0f) {
@@ -1183,6 +1261,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   if (topic_str.startsWith(ctrl_topic_for("cmd/")) && !g_ctrl_espnow_only) {
     g_ctrl_last_mqtt_command_ms = millis();
   }
+
 
   if (g_controller == nullptr) {
     return;
@@ -1271,6 +1350,10 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 
   // Thermostat mirrored packed command path (MQTT-primary path).
   if (topic_str == display_topic_for("state/packed_command")) {
+    // Display sending commands proves it's alive — update failsafe heartbeat
+    if (g_controller != nullptr) {
+      g_controller->app().on_heartbeat(millis());
+    }
     if (g_ctrl_espnow_only) return;
     uint32_t packed = 0;
     if (ctrl_parse_u32_payload(value, &packed)) {

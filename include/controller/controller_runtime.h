@@ -28,6 +28,7 @@ struct ControllerTickInput {
   uint32_t now_ms = 0;
   bool heat_call = false;
   bool cool_call = false;
+  bool has_indoor_temp = false;
 };
 
 struct CommandApplyResult {
@@ -79,7 +80,7 @@ class ControllerRuntime {
   };
 
   void enforce_safety_interlocks(uint32_t now_ms);
-  void update_failsafe(uint32_t now_ms);
+  void update_failsafe(uint32_t now_ms, bool has_indoor_temp);
   void apply_hvac_calls(uint32_t now_ms, bool heat_call, bool cool_call);
   bool elapsed_at_least(uint32_t now_ms, uint32_t start_ms, uint32_t duration_ms) const;
   void enter_idle(uint32_t now_ms);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <cmath>
 
 #include "controller/controller_runtime.h"
 #include "weather_icon.h"
@@ -68,7 +69,6 @@ class ControllerApp {
 
  private:
   void load_persisted_state();
-  void persist_indoor_state() const;
   void maybe_persist_filter_runtime(bool force = false);
   bool telemetry_payload_changed(const ControllerTelemetry &next) const;
   static bool is_newer_u16(uint16_t previous, uint16_t incoming);
@@ -82,10 +82,10 @@ class ControllerApp {
   ControllerConfig config_{};
   ControllerRuntime runtime_;
 
-  bool has_indoor_temp_ = true;
-  bool has_indoor_humidity_ = true;
-  float indoor_temp_c_ = 20.0f;
-  float indoor_humidity_pct_ = 50.0f;
+  bool has_indoor_temp_ = false;
+  bool has_indoor_humidity_ = false;
+  float indoor_temp_c_ = NAN;
+  float indoor_humidity_pct_ = NAN;
 
   uint16_t telemetry_seq_ = 0;
   uint16_t last_acked_seq_ = 0;

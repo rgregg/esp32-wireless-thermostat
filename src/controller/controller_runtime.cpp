@@ -105,7 +105,7 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
 }
 
 void ControllerRuntime::tick(const ControllerTickInput &in) {
-  update_failsafe(in.now_ms);
+  update_failsafe(in.now_ms, in.has_indoor_temp);
   apply_hvac_calls(in.now_ms, in.heat_call, in.cool_call);
   run_minute_tasks(in.now_ms);
   enforce_safety_interlocks(in.now_ms);
@@ -145,8 +145,9 @@ void ControllerRuntime::enforce_safety_interlocks(uint32_t now_ms) {
   }
 }
 
-void ControllerRuntime::update_failsafe(uint32_t now_ms) {
-  failsafe_active_ = is_failsafe_timed_out(now_ms, heartbeat_last_seen_ms_,
+void ControllerRuntime::update_failsafe(uint32_t now_ms, bool has_indoor_temp) {
+  failsafe_active_ = !has_indoor_temp ||
+                     is_failsafe_timed_out(now_ms, heartbeat_last_seen_ms_,
                                            config_.failsafe_timeout_ms);
 }
 
