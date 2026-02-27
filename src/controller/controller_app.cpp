@@ -1,5 +1,6 @@
 #include "controller/controller_app.h"
 
+#include <cmath>
 #include <string.h>
 
 #include "espnow_cmd_word.h"
@@ -24,6 +25,7 @@ ControllerApp::ControllerApp(IControllerTransport &transport,
     : transport_(transport), config_(config), runtime_(config) {
   indoor_temp_c_ = config_.indoor_temp_fallback_c;
   indoor_humidity_pct_ = config_.indoor_humidity_fallback_pct;
+  has_indoor_temp_ = std::isfinite(indoor_temp_c_);
   load_persisted_state();
 }
 

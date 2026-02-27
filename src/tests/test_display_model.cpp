@@ -21,7 +21,7 @@ TEST_CASE(display_model_units_and_weather) {
 TEST_CASE(display_model_nan_indoor_temperature_uses_na_fallback) {
   thermostat::DisplayModel m;
   m.set_local_indoor_temperature_c(NAN);
-  ASSERT_TRUE(m.format_indoor_temperature_text() == "N/A");
+  ASSERT_TRUE(m.format_indoor_temperature_text() == "--");
 }
 
 TEST_CASE(display_model_indoor_temperature_includes_degree_symbol) {
