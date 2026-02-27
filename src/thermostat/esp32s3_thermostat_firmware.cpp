@@ -963,7 +963,8 @@ void web_handle_status_get() {
     "\"mqtt_ctrl_mode\":\"%s\","
     "\"mqtt_ctrl_state\":%u,"
     "\"mqtt_ctrl_available\":%s,"
-    "\"free_heap\":%lu"
+    "\"free_heap\":%lu,"
+    "\"firmware_version\":\"%s\""
     "}",
     static_cast<unsigned long>(now),
     WiFi.status() == WL_CONNECTED ? "true" : "false",
@@ -989,7 +990,8 @@ void web_handle_status_get() {
     mqtt_payload::mode_to_str(g_mqtt_ctrl_mode),
     static_cast<unsigned>(g_mqtt_ctrl_state),
     g_mqtt_ctrl_available ? "true" : "false",
-    static_cast<unsigned long>(ESP.getFreeHeap())
+    static_cast<unsigned long>(ESP.getFreeHeap()),
+    THERMOSTAT_FIRMWARE_VERSION
   );
   g_web.send(200, "application/json", buf);
 }

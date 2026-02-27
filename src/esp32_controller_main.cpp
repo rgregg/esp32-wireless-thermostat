@@ -833,7 +833,8 @@ void ctrl_web_handle_status_get() {
     "\"espnow_only\":%s,"
     "\"display_availability\":\"%s\","
     "\"filter_runtime_hours\":%.2f,"
-    "\"free_heap\":%lu"
+    "\"free_heap\":%lu,"
+    "\"firmware_version\":\"%s\""
     "}",
     static_cast<unsigned long>(now),
     WiFi.isConnected() ? "true" : "false",
@@ -855,7 +856,8 @@ void ctrl_web_handle_status_get() {
     g_ctrl_espnow_only ? "true" : "false",
     g_disp_availability.c_str(),
     static_cast<double>(rt.filter_runtime_hours()),
-    static_cast<unsigned long>(ESP.getFreeHeap())
+    static_cast<unsigned long>(ESP.getFreeHeap()),
+    THERMOSTAT_FIRMWARE_VERSION
   );
   g_ctrl_web.send(200, "application/json", buf);
 }
