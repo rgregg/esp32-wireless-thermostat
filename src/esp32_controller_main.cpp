@@ -55,6 +55,7 @@ bool g_ctrl_have_shadow = false;
 FurnaceMode g_ctrl_shadow_mode = FurnaceMode::Off;
 FanMode g_ctrl_shadow_fan = FanMode::Automatic;
 float g_ctrl_shadow_setpoint_c = 20.0f;
+uint32_t g_ctrl_last_hvac_persist_ms = 0;
 bool g_ctrl_ota_started = false;
 bool g_ctrl_web_started = false;
 bool g_ctrl_mdns_started = false;
@@ -176,6 +177,8 @@ bool g_ctrl_mqtt_reconfigure_required = false;
 bool g_ctrl_wifi_reconnect_required = false;
 bool g_ctrl_cfg_reboot_required = false;
 bool g_ctrl_temp_unit_f = false;
+uint16_t g_cfg_fan_circ_period_min = 60;
+uint16_t g_cfg_fan_circ_duration_min = 10;
 String g_disp_availability = "unknown";
 
 
@@ -203,6 +206,8 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_pirateweather_api_key = g_ctrl_cfg.getString("pw_key", g_cfg_ctrl_pirateweather_api_key);
   g_cfg_ctrl_pirateweather_zip = g_ctrl_cfg.getString("pw_zip", g_cfg_ctrl_pirateweather_zip);
   g_ctrl_temp_unit_f = g_ctrl_cfg.getBool("temp_u_f", g_ctrl_temp_unit_f);
+  g_cfg_fan_circ_period_min = static_cast<uint16_t>(g_ctrl_cfg.getUInt("fan_circ_per", g_cfg_fan_circ_period_min));
+  g_cfg_fan_circ_duration_min = static_cast<uint16_t>(g_ctrl_cfg.getUInt("fan_circ_dur", g_cfg_fan_circ_duration_min));
 }
 
 String ctrl_topic_for(const char *suffix) {
@@ -261,6 +266,8 @@ void ctrl_publish_all_cfg_state() {
   ctrl_publish_cfg_value("pirateweather_api_key", g_cfg_ctrl_pirateweather_api_key);
   ctrl_publish_cfg_value("pirateweather_zip", g_cfg_ctrl_pirateweather_zip);
   ctrl_publish_cfg_value("temperature_unit", g_ctrl_temp_unit_f ? "f" : "c");
+  ctrl_publish_cfg_value("fan_circulate_period", String(g_cfg_fan_circ_period_min));
+  ctrl_publish_cfg_value("fan_circulate_duration", String(g_cfg_fan_circ_duration_min));
   ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0");
 }
 
@@ -365,6 +372,22 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_ctrl_temp_unit_f = (value == "f" || value == "fahrenheit");
     g_ctrl_cfg.putBool("temp_u_f", g_ctrl_temp_unit_f);
     g_ctrl_mqtt_discovery_sent = false;
+  } else if (key == "fan_circulate_period") {
+    const long parsed = atol(raw_value);
+    if (parsed < 10 || parsed > 120) return false;
+    g_cfg_fan_circ_period_min = static_cast<uint16_t>(parsed);
+    g_ctrl_cfg.putUInt("fan_circ_per", g_cfg_fan_circ_period_min);
+    if (g_controller != nullptr) {
+      g_controller->app().runtime_mut().set_fan_circulate_period_min(g_cfg_fan_circ_period_min);
+    }
+  } else if (key == "fan_circulate_duration") {
+    const long parsed = atol(raw_value);
+    if (parsed < 1 || parsed > 30) return false;
+    g_cfg_fan_circ_duration_min = static_cast<uint16_t>(parsed);
+    g_ctrl_cfg.putUInt("fan_circ_dur", g_cfg_fan_circ_duration_min);
+    if (g_controller != nullptr) {
+      g_controller->app().runtime_mut().set_fan_circulate_duration_min(g_cfg_fan_circ_duration_min);
+    }
   } else {
     known = false;
   }
@@ -728,6 +751,31 @@ void ctrl_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(filter_change_topic.c_str(), payload, true);
+
+  // Fan circulation config number entities
+  {
+    String topic = String("homeassistant/number/") + dev_id + "_fan_circulate_period/config";
+    snprintf(payload, sizeof(payload),
+             "{\"~\":\"%s\",\"name\":\"Fan Circulate Period\","
+             "\"uniq_id\":\"%s_fan_circulate_period\","
+             "\"cmd_t\":\"~/cfg/fan_circulate_period/set\","
+             "\"stat_t\":\"~/cfg/fan_circulate_period/state\","
+             "\"min\":10,\"max\":120,\"step\":5,\"mode\":\"box\",\"unit_of_meas\":\"min\","
+             "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"]}}",
+             base.c_str(), dev_id.c_str(), dev_id.c_str());
+    g_ctrl_mqtt.publish(topic.c_str(), payload, true);
+
+    topic = String("homeassistant/number/") + dev_id + "_fan_circulate_duration/config";
+    snprintf(payload, sizeof(payload),
+             "{\"~\":\"%s\",\"name\":\"Fan Circulate Duration\","
+             "\"uniq_id\":\"%s_fan_circulate_duration\","
+             "\"cmd_t\":\"~/cfg/fan_circulate_duration/set\","
+             "\"stat_t\":\"~/cfg/fan_circulate_duration/state\","
+             "\"min\":1,\"max\":30,\"step\":1,\"mode\":\"box\",\"unit_of_meas\":\"min\","
+             "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"]}}",
+             base.c_str(), dev_id.c_str(), dev_id.c_str());
+    g_ctrl_mqtt.publish(topic.c_str(), payload, true);
+  }
 
   // Relay state binary sensors
   static const char *relay_names[] = {"Heat Relay", "Cool Relay", "Fan Relay"};
@@ -1170,6 +1218,8 @@ void ctrl_publish_runtime_state() {
   g_ctrl_last_lockout = lockout;
 }
 
+void ctrl_persist_hvac_state();
+
 bool ctrl_apply_packed_command(uint32_t packed_word, bool from_mqtt) {
   if (g_controller == nullptr) {
     return false;
@@ -1189,6 +1239,7 @@ bool ctrl_apply_packed_command(uint32_t packed_word, bool from_mqtt) {
   if (from_mqtt) {
     g_ctrl_last_mqtt_command_ms = millis();
   }
+  ctrl_persist_hvac_state();
   ctrl_publish_runtime_state();
   return true;
 }
@@ -1203,6 +1254,18 @@ void ctrl_apply_mqtt_shadow(bool do_sync, bool do_filter_reset) {
       g_ctrl_shadow_mode, g_ctrl_shadow_fan, g_ctrl_shadow_setpoint_c, g_ctrl_mqtt_seq, do_sync,
       do_filter_reset);
   ctrl_apply_packed_command(espnow_cmd::encode(cmd), true);
+}
+
+void ctrl_persist_hvac_state() {
+  if (!g_ctrl_cfg_ready || !g_ctrl_have_shadow) return;
+  // Throttle NVS writes to once per 30 seconds to reduce flash wear
+  const uint32_t now = millis();
+  if (g_ctrl_last_hvac_persist_ms != 0 &&
+      (now - g_ctrl_last_hvac_persist_ms) < 30000UL) return;
+  g_ctrl_cfg.putUChar("hvac_mode", static_cast<uint8_t>(g_ctrl_shadow_mode));
+  g_ctrl_cfg.putUChar("hvac_fan", static_cast<uint8_t>(g_ctrl_shadow_fan));
+  g_ctrl_cfg.putFloat("hvac_sp_c", g_ctrl_shadow_setpoint_c);
+  g_ctrl_last_hvac_persist_ms = now;
 }
 
 void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
@@ -1566,8 +1629,8 @@ void setup() {
 
   thermostat::ControllerConfig controller_cfg;
   controller_cfg.failsafe_timeout_ms = 300000;
-  controller_cfg.fan_circulate_period_min = 60;
-  controller_cfg.fan_circulate_duration_min = 10;
+  controller_cfg.fan_circulate_period_min = g_cfg_fan_circ_period_min;
+  controller_cfg.fan_circulate_duration_min = g_cfg_fan_circ_duration_min;
 
   thermostat::EspNowControllerConfig transport_cfg;
   transport_cfg.channel = g_cfg_ctrl_espnow_channel;
@@ -1642,6 +1705,16 @@ void setup() {
     if (ctrl_parse_mac(g_cfg_ctrl_primary_sensor_mac.c_str(), ps_mac)) {
       g_controller->app().set_primary_sensor_mac(ps_mac);
     }
+  }
+
+  // Restore persisted HVAC state (mode/fan/setpoint) so the furnace
+  // resumes after a power outage without waiting for user interaction.
+  if (g_ctrl_cfg_ready && g_ctrl_cfg.isKey("hvac_mode")) {
+    g_ctrl_shadow_mode = static_cast<FurnaceMode>(g_ctrl_cfg.getUChar("hvac_mode", 0));
+    g_ctrl_shadow_fan = static_cast<FanMode>(g_ctrl_cfg.getUChar("hvac_fan", 0));
+    g_ctrl_shadow_setpoint_c = g_ctrl_cfg.getFloat("hvac_sp_c", 20.0f);
+    g_ctrl_have_shadow = true;
+    ctrl_apply_mqtt_shadow(false, false);
   }
 
   // Wire audit log

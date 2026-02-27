@@ -73,6 +73,9 @@ class ControllerRuntime {
     return static_cast<float>(filter_runtime_seconds_) / 3600.0f;
   }
 
+  void set_fan_circulate_period_min(uint16_t v) { config_.fan_circulate_period_min = v; }
+  void set_fan_circulate_duration_min(uint16_t v) { config_.fan_circulate_duration_min = v; }
+
   FurnaceStateCode furnace_state() const;
   ThermostatSnapshot snapshot() const;
 
