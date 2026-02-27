@@ -134,6 +134,29 @@ TEST_CASE(controller_runtime_enforces_min_run_min_off_and_min_idle) {
   ASSERT_TRUE(rt.heat_demand());
 }
 
+TEST_CASE(controller_runtime_failsafe_activates_without_indoor_temp) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 5000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1000);
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 2000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = false;  // No sensor data
+  rt.tick(t1);
+
+  // Failsafe should activate immediately when there's no indoor temp,
+  // regardless of heartbeat freshness
+  ASSERT_TRUE(rt.failsafe_active());
+  ASSERT_TRUE(!rt.heat_demand());
+}
+
 TEST_CASE(controller_runtime_reset_remote_command_sequence_allows_reseed) {
   thermostat::ControllerRuntime rt;
 
