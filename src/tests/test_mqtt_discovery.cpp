@@ -9,11 +9,11 @@
 static constexpr size_t kMqttBufferSize = 1024;
 
 // Use a generous topic base and device ID to simulate realistic worst-case.
-// Config fields allow up to 64 chars for shared_device_id and long base topics.
+// IDs include a MAC suffix (e.g. "_abcdef") as devices now append one by default.
 static const char *kBase = "thermostat/my-long-furnace-controller-name";
-static const char *kDevId = "my_long_wireless_thermostat_system_id";
-static const char *kCtrlDevId = "my_long_wireless_thermostat_system_id_controller";
-static const char *kDispDevId = "my_long_wireless_thermostat_system_id_display";
+static const char *kDevId = "my_long_wireless_thermostat_system_id_abcdef";
+static const char *kCtrlDevId = "my_long_wireless_thermostat_system_id_abcdef_controller";
+static const char *kDispDevId = "my_long_wireless_thermostat_system_id_abcdef_display";
 
 // The climate discovery payload is the largest single MQTT message published.
 // It must fit within the PubSubClient buffer to actually reach the broker.

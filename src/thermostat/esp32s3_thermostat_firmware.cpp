@@ -370,8 +370,38 @@ const char *fan_to_mqtt(FanMode mode) {
   }
 }
 
+// Returns lowercase last 6 hex chars of WiFi MAC, e.g. "ddeeff"
+static String mac_suffix() {
+  String mac = WiFi.macAddress(); // "AA:BB:CC:DD:EE:FF"
+  String raw;
+  raw += mac[9];  raw += mac[10]; // DD
+  raw += mac[12]; raw += mac[13]; // EE
+  raw += mac[15]; raw += mac[16]; // FF
+  raw.toLowerCase();
+  return raw;
+}
+
 void load_runtime_config() {
   if (!g_cfg_ready) return;
+
+  // Compute MAC-based suffix and apply to defaults for uniqueness.
+  // If a user has saved a custom value, getString() returns it instead.
+  String suffix = mac_suffix();
+  g_cfg_shared_device_id = String(THERMOSTAT_MQTT_SHARED_DEVICE_ID) + "_" + suffix;
+  g_cfg_mqtt_client_id = String(THERMOSTAT_MQTT_CLIENT_ID) + "-" + suffix;
+  g_cfg_ota_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + suffix;
+
+  // One-time migration: clear old non-suffixed defaults so new defaults take effect
+  if (g_cfg.getString("shared_id", "") == THERMOSTAT_MQTT_SHARED_DEVICE_ID) {
+    g_cfg.remove("shared_id");
+  }
+  if (g_cfg.getString("mqtt_cid", "") == THERMOSTAT_MQTT_CLIENT_ID) {
+    g_cfg.remove("mqtt_cid");
+  }
+  if (g_cfg.getString("ota_host", "") == THERMOSTAT_OTA_HOSTNAME) {
+    g_cfg.remove("ota_host");
+  }
+
   g_cfg_wifi_ssid = g_cfg.getString("wifi_ssid", g_cfg_wifi_ssid);
   g_cfg_wifi_password = g_cfg.getString("wifi_pwd", g_cfg_wifi_password);
   g_cfg_mqtt_host = g_cfg.getString("mqtt_host", g_cfg_mqtt_host);
