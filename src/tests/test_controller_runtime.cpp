@@ -355,6 +355,100 @@ TEST_CASE(controller_runtime_max_runtime_allows_restart_after_off_time) {
   ASSERT_TRUE(!rt.max_runtime_exceeded());
 }
 
+TEST_CASE(controller_runtime_normal_stop_does_not_set_max_runtime_flag) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.max_heating_run_time_ms = 60000;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  // Start heating
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.heat_demand());
+
+  // Heat call drops before max runtime — normal stop
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 30000;
+  t2.heat_call = false;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(!rt.heat_demand());
+  ASSERT_TRUE(!rt.max_runtime_exceeded());
+}
+
+TEST_CASE(controller_runtime_max_runtime_flag_persists_in_idle) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 60000;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.max_heating_run_time_ms = 60000;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  // Start heating, then exceed max runtime
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 62000;
+  t2.heat_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.max_runtime_exceeded());
+
+  // Subsequent idle ticks — flag should persist
+  thermostat::ControllerTickInput t3;
+  t3.now_ms = 70000;
+  t3.heat_call = true;
+  t3.has_indoor_temp = true;
+  rt.tick(t3);
+  ASSERT_TRUE(!rt.heat_demand());
+  ASSERT_TRUE(rt.max_runtime_exceeded());
+}
+
+TEST_CASE(controller_runtime_failsafe_during_heating_does_not_set_max_runtime_flag) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 5000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.max_heating_run_time_ms = 60000;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1000);
+
+  // Start heating
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 2000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.heat_demand());
+
+  // Failsafe triggers (heartbeat timeout) before max runtime
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 8000;
+  t2.heat_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.failsafe_active());
+  ASSERT_TRUE(!rt.heat_demand());
+  ASSERT_TRUE(!rt.max_runtime_exceeded());
+}
+
 TEST_CASE(controller_runtime_null_source_uses_default_sequence) {
   thermostat::ControllerRuntime rt;
 
