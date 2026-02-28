@@ -211,6 +211,150 @@ TEST_CASE(controller_runtime_per_source_sequence_tracking) {
   ASSERT_TRUE(rt.apply_remote_command(cmd, mac_b).accepted);
 }
 
+TEST_CASE(controller_runtime_max_heating_runtime_forces_idle) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.max_heating_run_time_ms = 60000;  // 60 seconds
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  // Start heating
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.heat_demand());
+  ASSERT_TRUE(!rt.max_runtime_exceeded());
+
+  // Still heating before max runtime
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 50000;
+  t2.heat_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.heat_demand());
+
+  // Max runtime exceeded — forced idle even with heat_call
+  thermostat::ControllerTickInput t3;
+  t3.now_ms = 62000;
+  t3.heat_call = true;
+  t3.has_indoor_temp = true;
+  rt.tick(t3);
+  ASSERT_TRUE(!rt.heat_demand());
+  ASSERT_TRUE(rt.max_runtime_exceeded());
+}
+
+TEST_CASE(controller_runtime_max_cooling_runtime_forces_idle) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  cfg.max_cooling_run_time_ms = 60000;  // 60 seconds
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  // Start cooling
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.cool_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.cool_demand());
+  ASSERT_TRUE(!rt.max_runtime_exceeded());
+
+  // Max runtime exceeded — forced idle even with cool_call
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 62000;
+  t2.cool_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(!rt.cool_demand());
+  ASSERT_TRUE(rt.max_runtime_exceeded());
+}
+
+TEST_CASE(controller_runtime_max_runtime_zero_disables_limit) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 100000000;  // large to avoid failsafe
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.max_heating_run_time_ms = 0;  // disabled
+  cfg.max_cooling_run_time_ms = 0;  // disabled
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  // Start heating
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.heat_demand());
+
+  // Way past any reasonable runtime — should still be heating
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 50000000;  // ~14 hours
+  t2.heat_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.heat_demand());
+  ASSERT_TRUE(!rt.max_runtime_exceeded());
+}
+
+TEST_CASE(controller_runtime_max_runtime_allows_restart_after_off_time) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 30000;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.max_heating_run_time_ms = 60000;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  // Start heating
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.heat_demand());
+
+  // Max runtime exceeded
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 62000;
+  t2.heat_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(!rt.heat_demand());
+  ASSERT_TRUE(rt.max_runtime_exceeded());
+
+  // Try to restart immediately — blocked by min off time
+  thermostat::ControllerTickInput t3;
+  t3.now_ms = 63000;
+  t3.heat_call = true;
+  t3.has_indoor_temp = true;
+  rt.tick(t3);
+  ASSERT_TRUE(!rt.heat_demand());
+
+  // After min off time elapses — restart allowed, flag cleared
+  thermostat::ControllerTickInput t4;
+  t4.now_ms = 93000;
+  t4.heat_call = true;
+  t4.has_indoor_temp = true;
+  rt.tick(t4);
+  ASSERT_TRUE(rt.heat_demand());
+  ASSERT_TRUE(!rt.max_runtime_exceeded());
+}
+
 TEST_CASE(controller_runtime_null_source_uses_default_sequence) {
   thermostat::ControllerRuntime rt;
 

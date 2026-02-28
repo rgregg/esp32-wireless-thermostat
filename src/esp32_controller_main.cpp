@@ -1155,6 +1155,8 @@ void ctrl_publish_runtime_state() {
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_runtime_hours").c_str(), buf, true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_change_required").c_str(),
                       rt.filter_runtime_hours() >= kFilterChangeThresholdHours ? "1" : "0", true);
+  g_ctrl_mqtt.publish(ctrl_topic_for("state/max_runtime_exceeded").c_str(),
+                      rt.max_runtime_exceeded() ? "1" : "0", true);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(rt.furnace_state()));
   g_ctrl_mqtt.publish(ctrl_topic_for("state/furnace_state").c_str(), buf, true);
   g_ctrl_mqtt.publish(ctrl_topic_for("state/firmware_version").c_str(),

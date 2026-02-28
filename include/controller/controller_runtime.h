@@ -16,6 +16,8 @@ struct ControllerConfig {
   uint32_t min_heating_off_time_ms = 180000;
   uint32_t min_heating_run_time_ms = 180000;
   uint32_t min_idle_time_ms = 30000;
+  uint32_t max_heating_run_time_ms = 14400000;  // 4 hours
+  uint32_t max_cooling_run_time_ms = 10800000;  // 3 hours
   float heat_deadband_c = 0.5f;
   float heat_overrun_c = 0.5f;
   float cool_deadband_c = 0.5f;
@@ -61,6 +63,7 @@ class ControllerRuntime {
 
   bool failsafe_active() const { return failsafe_active_; }
   bool hvac_lockout() const { return hvac_lockout_; }
+  bool max_runtime_exceeded() const { return max_runtime_exceeded_; }
 
   bool heat_demand() const { return relay_.heat; }
   bool cool_demand() const { return relay_.cool; }
@@ -103,6 +106,7 @@ class ControllerRuntime {
 
   bool hvac_lockout_ = false;
   bool failsafe_active_ = false;
+  bool max_runtime_exceeded_ = false;
   bool spare_relay_4_ = false;
 
   RelayDemand relay_{};
