@@ -12,6 +12,8 @@ static constexpr size_t kMqttBufferSize = 1024;
 // Config fields allow up to 64 chars for shared_device_id and long base topics.
 static const char *kBase = "thermostat/my-long-furnace-controller-name";
 static const char *kDevId = "my_long_wireless_thermostat_system_id";
+static const char *kCtrlDevId = "my_long_wireless_thermostat_system_id_controller";
+static const char *kDispDevId = "my_long_wireless_thermostat_system_id_display";
 
 // The climate discovery payload is the largest single MQTT message published.
 // It must fit within the PubSubClient buffer to actually reach the broker.
@@ -32,8 +34,8 @@ TEST_CASE(mqtt_discovery_climate_payload_fits_buffer) {
       "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\","
       "\"min_temp\":5,\"max_temp\":35,\"temp_step\":0.5,\"temp_unit\":\"C\","
       "\"dev\":{\"ids\":[\"%s\"],"
-      "\"name\":\"Wireless Thermostat System\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      kBase, kDevId, kDevId);
+      "\"name\":\"Furnace Controller\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
+      kBase, kCtrlDevId, kCtrlDevId);
 
   ASSERT_TRUE(len > 0);
   ASSERT_TRUE(static_cast<size_t>(len) < kMqttBufferSize);
@@ -48,9 +50,9 @@ TEST_CASE(mqtt_discovery_sensor_payload_fits_buffer) {
       "{\"name\":\"Indoor Temperature\",\"uniq_id\":\"%s_indoor_temperature\","
       "\"stat_t\":\"%s/state/current_temp_c\",\"unit_of_meas\":\"\xC2\xB0""C\","
       "\"dev_cla\":\"temperature\",\"stat_cla\":\"measurement\","
-      "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+      "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Thermostat Display\","
       "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      kDevId, kBase, kDevId);
+      kDispDevId, kBase, kDispDevId);
   ASSERT_TRUE(len > 0);
   ASSERT_TRUE(static_cast<size_t>(len) < kMqttBufferSize);
 
@@ -61,7 +63,7 @@ TEST_CASE(mqtt_discovery_sensor_payload_fits_buffer) {
       "\"stat_t\":\"%s/state/current_humidity\",\"unit_of_meas\":\"%%\","
       "\"dev_cla\":\"humidity\",\"stat_cla\":\"measurement\","
       "\"dev\":{\"ids\":[\"%s\"]}}",
-      kDevId, kBase, kDevId);
+      kDispDevId, kBase, kDispDevId);
   ASSERT_TRUE(len > 0);
   ASSERT_TRUE(static_cast<size_t>(len) < kMqttBufferSize);
 }
@@ -73,7 +75,7 @@ TEST_CASE(mqtt_discovery_switch_payload_fits_buffer) {
       "{\"name\":\"HVAC Lockout\",\"uniq_id\":\"%s_lockout\",\"cmd_t\":\"%s/cmd/lockout\","
       "\"stat_t\":\"%s/state/lockout\",\"pl_on\":\"1\",\"pl_off\":\"0\","
       "\"dev\":{\"ids\":[\"%s\"]}}",
-      kDevId, kBase, kBase, kDevId);
+      kCtrlDevId, kBase, kBase, kCtrlDevId);
   ASSERT_TRUE(len > 0);
   ASSERT_TRUE(static_cast<size_t>(len) < kMqttBufferSize);
 }
@@ -86,9 +88,9 @@ TEST_CASE(mqtt_discovery_number_payload_fits_buffer) {
       "{\"name\":\"Display Timeout\",\"uniq_id\":\"%s_display_timeout\","
       "\"cmd_t\":\"%s/cmd/display_timeout_s\",\"stat_t\":\"%s/state/display_timeout_s\","
       "\"min\":30,\"max\":600,\"step\":5,\"mode\":\"box\",\"unit_of_meas\":\"s\","
-      "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+      "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"Thermostat Display\","
       "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      kDevId, kBase, kBase, kDevId);
+      kDispDevId, kBase, kBase, kDispDevId);
   ASSERT_TRUE(len > 0);
   ASSERT_TRUE(static_cast<size_t>(len) < kMqttBufferSize);
 }
