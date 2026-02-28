@@ -74,12 +74,59 @@ function startStatus(){
 function stopStatus(){
   if(_si){clearInterval(_si);_si=null}
 }
+function fmtTime(ms){
+  var s=Math.floor(ms/1000);
+  if(s<60)return s+'s';
+  var m=Math.floor(s/60);s=s%60;
+  if(m<60)return m+'m '+s+'s';
+  var h=Math.floor(m/60);m=m%60;
+  if(h<24)return h+'h '+m+'m '+s+'s';
+  var d=Math.floor(h/24);h=h%24;
+  return d+'d '+h+'h '+m+'m';
+}
+function pickMac(fieldName){
+  var inp=document.querySelector('[name="'+fieldName+'"]');
+  var dl=document.getElementById('dl-'+fieldName);
+  if(!inp||!dl)return;
+  fetch('/devices').then(function(r){return r.json()}).then(function(arr){
+    dl.innerHTML='';
+    arr.forEach(function(dev){
+      var o=document.createElement('option');
+      o.value=dev.mac;
+      o.label=dev.name+' ('+dev.type+')';
+      dl.appendChild(o);
+    });
+    inp.focus();
+  }).catch(function(){});
+}
+function appendMac(fieldName){
+  var inp=document.querySelector('[name="'+fieldName+'"]');
+  if(!inp)return;
+  fetch('/devices').then(function(r){return r.json()}).then(function(arr){
+    if(!arr.length){toast('No devices found','err');return;}
+    var sel=prompt(arr.map(function(d,i){return(i+1)+'. '+d.name+' ('+d.type+') - '+d.mac}).join('\n')+'\n\nEnter number:');
+    if(!sel)return;
+    var idx=parseInt(sel,10)-1;
+    if(idx<0||idx>=arr.length)return;
+    var mac=arr[idx].mac;
+    var cur=inp.value.trim();
+    inp.value=cur?(cur+','+mac):mac;
+  }).catch(function(){});
+}
 function refreshStatus(){
   fetch('/status').then(function(r){return r.json()}).then(function(d){
     for(var k in d){
       var el=document.getElementById('st-'+k);
       if(!el)continue;
       var v=d[k];
+      if(k==='uptime_ms'){el.textContent=fmtTime(v);continue;}
+      if(k==='heartbeat_last_seen_ms'){
+        if(v>0&&d.uptime_ms){var ago=d.uptime_ms-v;el.textContent=fmtTime(ago)+' ago';}
+        else el.textContent='-';
+        continue;
+      }
+      if(k==='furnace_state'&&d.furnace_state_text){el.textContent=d.furnace_state_text;continue;}
+      if(k==='free_heap'){el.textContent=Number(v).toLocaleString()+' B';continue;}
       if(v===null||v===undefined)el.textContent='-';
       else if(typeof v==='boolean')el.textContent=v?'Yes':'No';
       else el.textContent=String(v);

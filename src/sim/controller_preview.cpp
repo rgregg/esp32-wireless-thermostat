@@ -168,16 +168,7 @@ const char *fan_mode_name(FanMode mode) {
 }
 
 const char *hvac_state_name(FurnaceStateCode state) {
-  switch (state) {
-    case FurnaceStateCode::Idle: return "Idle";
-    case FurnaceStateCode::HeatMode: return "Heat Standby";
-    case FurnaceStateCode::HeatOn: return "HEATING";
-    case FurnaceStateCode::CoolMode: return "Cool Standby";
-    case FurnaceStateCode::CoolOn: return "COOLING";
-    case FurnaceStateCode::FanOn: return "Fan Running";
-    case FurnaceStateCode::Error: return "ERROR";
-    default: return "Unknown";
-  }
+  return mqtt_payload::furnace_state_to_str(state);
 }
 
 void load_dotenv() {
