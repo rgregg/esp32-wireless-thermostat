@@ -419,6 +419,49 @@ TEST_CASE(controller_runtime_max_runtime_flag_persists_in_idle) {
   ASSERT_TRUE(rt.max_runtime_exceeded());
 }
 
+TEST_CASE(controller_runtime_max_runtime_flag_clears_on_mode_change) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  cfg.max_heating_run_time_ms = 60000;
+  thermostat::ControllerRuntime rt(cfg);
+
+  rt.note_heartbeat(1);
+
+  // Start heating
+  CommandWord cmd;
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.fan = FanMode::Automatic;
+  cmd.setpoint_decic = 220;
+  rt.apply_remote_command(cmd, nullptr);
+
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+
+  // Exceed max runtime
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 62000;
+  t2.heat_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.max_runtime_exceeded());
+
+  // User changes mode to Off — flag should clear
+  CommandWord cmd2;
+  cmd2.seq = 2;
+  cmd2.mode = FurnaceMode::Off;
+  cmd2.fan = FanMode::Automatic;
+  cmd2.setpoint_decic = 220;
+  rt.apply_remote_command(cmd2, nullptr);
+  ASSERT_TRUE(!rt.max_runtime_exceeded());
+}
+
 TEST_CASE(controller_runtime_failsafe_during_heating_does_not_set_max_runtime_flag) {
   thermostat::ControllerConfig cfg;
   cfg.failsafe_timeout_ms = 5000;

@@ -86,7 +86,17 @@ inline bool json_extract_string(const char *json, const char *key,
   pattern[key_len + 2] = ':';
   pattern[key_len + 3] = '\0';
 
-  const char *found = strstr(json, pattern);
+  // Search for the pattern, ensuring it is a complete key (not a suffix of
+  // a longer key like "source_ip" matching a search for "ip").  A valid match
+  // must be preceded by '{', ',' or whitespace — i.e. a JSON field delimiter.
+  const char *found = json;
+  while ((found = strstr(found, pattern)) != nullptr) {
+    if (found == json || found[-1] == '{' || found[-1] == ',' ||
+        found[-1] == ' ' || found[-1] == '\t' || found[-1] == '\n') {
+      break;  // valid match — key is not a suffix of a longer key
+    }
+    found += 1;  // skip this false match and keep searching
+  }
   if (found == nullptr) return false;
 
   // Advance past the pattern

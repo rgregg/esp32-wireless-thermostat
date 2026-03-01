@@ -139,6 +139,11 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
     audit("mode: %s->%s [%s]",
           mqtt_payload::mode_to_str(old_mode),
           mqtt_payload::mode_to_str(mode_), src_str);
+    // Clear sticky max-runtime flag when user changes mode (acknowledgment)
+    if (max_runtime_exceeded_) {
+      max_runtime_exceeded_ = false;
+      audit("max_runtime: cleared by mode change [internal]");
+    }
   }
   if (fan_mode_ != old_fan) {
     audit("fan: %s->%s [%s]",
