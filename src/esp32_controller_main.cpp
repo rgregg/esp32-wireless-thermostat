@@ -15,6 +15,7 @@
 #include "management_paths.h"
 #include "mqtt_payload.h"
 #include "device_registry.h"
+#include "wifi_watchdog.h"
 
 #if defined(ARDUINO)
 #include <Arduino.h>
@@ -1853,6 +1854,7 @@ void loop() {
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
     ctrl_ensure_wifi_connected(now);
+    wifi_watchdog_tick(now);
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
     ctrl_ensure_ota_ready();

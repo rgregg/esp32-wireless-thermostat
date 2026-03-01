@@ -28,6 +28,7 @@
 
 #include "thermostat/thermostat_device_runtime.h"
 #include "mqtt_payload.h"
+#include "wifi_watchdog.h"
 #include "weather_icon.h"
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
@@ -2811,6 +2812,7 @@ void thermostat_firmware_loop() {
   }
 
   ensure_wifi_connected(now);
+  wifi_watchdog_tick(now);
   ensure_mdns_ready();
   ensure_web_ready();
   ensure_ota_ready();
