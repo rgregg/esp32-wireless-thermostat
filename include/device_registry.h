@@ -73,6 +73,9 @@ inline bool json_extract_string(const char *json, const char *key,
                                  char *out, size_t out_size) {
   if (json == nullptr || key == nullptr || out == nullptr || out_size == 0) return false;
 
+  // Ensure out is always initialized to an empty string on valid input.
+  out[0] = '\0';
+
   // Build search pattern: "key":"
   char pattern[64];
   size_t key_len = strlen(key);

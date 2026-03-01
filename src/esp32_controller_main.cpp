@@ -187,10 +187,14 @@ String g_disp_availability = "unknown";
 // Returns lowercase last 6 hex chars of WiFi MAC, e.g. "ddeeff"
 static String mac_suffix() {
   String mac = WiFi.macAddress(); // "AA:BB:CC:DD:EE:FF"
-  String raw;
-  raw += mac[9];  raw += mac[10]; // DD
-  raw += mac[12]; raw += mac[13]; // EE
-  raw += mac[15]; raw += mac[16]; // FF
+  // Strip colons to get continuous hex string
+  String hex_only;
+  for (size_t i = 0; i < static_cast<size_t>(mac.length()); ++i) {
+    char c = mac[i];
+    if (c != ':') hex_only += c;
+  }
+  if (hex_only.length() < 6) return String("000000");
+  String raw = hex_only.substring(hex_only.length() - 6);
   raw.toLowerCase();
   return raw;
 }
@@ -992,13 +996,13 @@ void ctrl_web_handle_devices_get() {
     if (!first) json += ',';
     first = false;
     json += "{\"mac\":\"";
-    json += e.mac;
+    json += web_ui::json_escape(e.mac);
     json += "\",\"name\":\"";
-    json += e.name;
+    json += web_ui::json_escape(e.name);
     json += "\",\"type\":\"";
-    json += e.type;
+    json += web_ui::json_escape(e.type);
     json += "\",\"ip\":\"";
-    json += e.ip;
+    json += web_ui::json_escape(e.ip);
     json += "\"}";
   }
   json += "]";
@@ -1366,11 +1370,13 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
         size_t buf_len = (length < sizeof(buf) - 1) ? length : sizeof(buf) - 1;
         memcpy(buf, payload, buf_len);
         buf[buf_len] = '\0';
-        char name[48], type[16], ip[16];
-        json_extract_string(buf, "name", name, sizeof(name));
-        json_extract_string(buf, "type", type, sizeof(type));
-        json_extract_string(buf, "ip", ip, sizeof(ip));
-        g_device_registry.upsert(peer_mac.c_str(), name, type, ip);
+        char name[48] = "", type[16] = "", ip[16] = "";
+        bool ok = json_extract_string(buf, "name", name, sizeof(name))
+                && json_extract_string(buf, "type", type, sizeof(type))
+                && json_extract_string(buf, "ip", ip, sizeof(ip));
+        if (ok) {
+          g_device_registry.upsert(peer_mac.c_str(), name, type, ip);
+        }
       }
       return;
     }

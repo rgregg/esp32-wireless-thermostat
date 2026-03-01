@@ -11,7 +11,6 @@ static constexpr size_t kMqttBufferSize = 1024;
 // Use a generous topic base and device ID to simulate realistic worst-case.
 // IDs include a MAC suffix (e.g. "_abcdef") as devices now append one by default.
 static const char *kBase = "thermostat/my-long-furnace-controller-name";
-static const char *kDevId = "my_long_wireless_thermostat_system_id_abcdef";
 static const char *kCtrlDevId = "my_long_wireless_thermostat_system_id_abcdef_controller";
 static const char *kDispDevId = "my_long_wireless_thermostat_system_id_abcdef_display";
 
