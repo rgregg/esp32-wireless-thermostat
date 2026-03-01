@@ -120,13 +120,11 @@ inline void mac_field(String &html, const char *label, const char *name,
                        const String &value, const char *hint = nullptr) {
   html += F("<div class=\"fg\"><label>");
   html += label;
-  html += F("</label><div style=\"display:flex;gap:0.4rem\">"
+  html += F("</label><div style=\"display:flex;gap:0.4rem;position:relative\">"
             "<input name=\"");
   html += name;
   html += F("\" value=\"");
   html += html_escape(value);
-  html += F("\" list=\"dl-");
-  html += name;
   html += F("\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\""
             " title=\"Format: AA:BB:CC:DD:EE:FF\""
             " style=\"flex:1\">"
@@ -134,9 +132,6 @@ inline void mac_field(String &html, const char *label, const char *name,
             " onclick=\"pickMac('");
   html += name;
   html += F("')\">&#9660;</button></div>"
-            "<datalist id=\"dl-");
-  html += name;
-  html += F("\"></datalist>"
             "<div class=\"ht\">");
   html += hint ? hint : "Format: AA:BB:CC:DD:EE:FF";
   html += F("</div></div>");

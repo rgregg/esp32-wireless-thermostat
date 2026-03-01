@@ -114,9 +114,13 @@ constexpr uint32_t kRebootPanelOffDelayMs = 200;
 #define THERMOSTAT_MQTT_DISCOVERY_PREFIX "homeassistant"
 #endif
 
-#ifndef THERMOSTAT_MQTT_SHARED_DEVICE_ID
-#define THERMOSTAT_MQTT_SHARED_DEVICE_ID "wireless_thermostat_system"
+#ifndef THERMOSTAT_MQTT_UNIQUE_DEVICE_ID
+#define THERMOSTAT_MQTT_UNIQUE_DEVICE_ID "wireless_thermostat_system"
 #endif
+
+// Device discovery topic uses the compile-time base (not MAC-suffixed runtime
+// value) so all devices in the system share the same discovery namespace.
+#define THERMOSTAT_DEVICE_DISCOVERY_PREFIX THERMOSTAT_MQTT_UNIQUE_DEVICE_ID "/devices"
 
 #ifndef THERMOSTAT_PIRATEWEATHER_API_KEY
 #define THERMOSTAT_PIRATEWEATHER_API_KEY ""
@@ -296,7 +300,7 @@ String g_cfg_mqtt_password = THERMOSTAT_MQTT_PASSWORD;
 String g_cfg_mqtt_client_id = THERMOSTAT_MQTT_CLIENT_ID;
 String g_cfg_mqtt_base_topic = THERMOSTAT_MQTT_BASE_TOPIC;
 String g_cfg_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
-String g_cfg_shared_device_id = THERMOSTAT_MQTT_SHARED_DEVICE_ID;
+String g_cfg_unique_device_id = THERMOSTAT_MQTT_UNIQUE_DEVICE_ID;
 String g_cfg_pirateweather_api_key = THERMOSTAT_PIRATEWEATHER_API_KEY;
 String g_cfg_pirateweather_zip = THERMOSTAT_PIRATEWEATHER_ZIP;
 String g_cfg_ota_hostname = THERMOSTAT_OTA_HOSTNAME;
@@ -387,7 +391,7 @@ void load_runtime_config() {
   // Compute MAC-based suffix and apply to defaults for uniqueness.
   // If a user has saved a custom value, getString() returns it instead.
   String suffix = mac_suffix();
-  g_cfg_shared_device_id = String(THERMOSTAT_MQTT_SHARED_DEVICE_ID) + "_" + suffix;
+  g_cfg_unique_device_id = String(THERMOSTAT_MQTT_UNIQUE_DEVICE_ID) + "_" + suffix;
   g_cfg_mqtt_client_id = String(THERMOSTAT_MQTT_CLIENT_ID) + "-" + suffix;
   g_cfg_ota_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + suffix;
 
@@ -397,7 +401,7 @@ void load_runtime_config() {
     return stored == base ||
            stored == (String(base) + sep + "000000");
   };
-  if (is_stale_default(g_cfg.getString("shared_id", ""), THERMOSTAT_MQTT_SHARED_DEVICE_ID, "_")) {
+  if (is_stale_default(g_cfg.getString("shared_id", ""), THERMOSTAT_MQTT_UNIQUE_DEVICE_ID, "_")) {
     g_cfg.remove("shared_id");
   }
   if (is_stale_default(g_cfg.getString("mqtt_cid", ""), THERMOSTAT_MQTT_CLIENT_ID, "-")) {
@@ -416,7 +420,7 @@ void load_runtime_config() {
   g_cfg_mqtt_client_id = g_cfg.getString("mqtt_cid", g_cfg_mqtt_client_id);
   g_cfg_mqtt_base_topic = g_cfg.getString("mqtt_base", g_cfg_mqtt_base_topic);
   g_cfg_discovery_prefix = g_cfg.getString("disc_pref", g_cfg_discovery_prefix);
-  g_cfg_shared_device_id = g_cfg.getString("shared_id", g_cfg_shared_device_id);
+  g_cfg_unique_device_id = g_cfg.getString("shared_id", g_cfg_unique_device_id);
   g_cfg_pirateweather_api_key = g_cfg.getString("pw_key", g_cfg_pirateweather_api_key);
   g_cfg_pirateweather_zip = g_cfg.getString("pw_zip", g_cfg_pirateweather_zip);
   g_cfg_ota_hostname = g_cfg.getString("ota_host", g_cfg_ota_hostname);
@@ -473,7 +477,7 @@ void publish_all_cfg_state() {
   publish_cfg_value("mqtt_client_id", g_cfg_mqtt_client_id);
   publish_cfg_value("mqtt_base_topic", g_cfg_mqtt_base_topic);
   publish_cfg_value("discovery_prefix", g_cfg_discovery_prefix);
-  publish_cfg_value("shared_device_id", g_cfg_shared_device_id);
+  publish_cfg_value("unique_device_id", g_cfg_unique_device_id);
   publish_cfg_value("pirateweather_api_key", g_cfg_pirateweather_api_key);
   publish_cfg_value("pirateweather_zip", g_cfg_pirateweather_zip);
   publish_cfg_value("display_timeout_s", String(g_display_timeout_ms / 1000UL));
@@ -534,8 +538,8 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_discovery_prefix = value;
     g_cfg.putString("disc_pref", value);
     g_mqtt_discovery_sent = false;
-  } else if (key == "shared_device_id") {
-    g_cfg_shared_device_id = value;
+  } else if (key == "unique_device_id") {
+    g_cfg_unique_device_id = value;
     g_cfg.putString("shared_id", value);
     g_mqtt_discovery_sent = false;
   } else if (key == "pirateweather_api_key") {
@@ -929,7 +933,7 @@ void web_handle_config_get() {
   body += "\"mqtt_client_id\":\"" + web_ui::json_escape(g_cfg_mqtt_client_id) + "\",";
   body += "\"mqtt_base_topic\":\"" + web_ui::json_escape(g_cfg_mqtt_base_topic) + "\",";
   body += "\"discovery_prefix\":\"" + web_ui::json_escape(g_cfg_discovery_prefix) + "\",";
-  body += "\"shared_device_id\":\"" + web_ui::json_escape(g_cfg_shared_device_id) + "\",";
+  body += "\"unique_device_id\":\"" + web_ui::json_escape(g_cfg_unique_device_id) + "\",";
   body += "\"pirateweather_api_key\":\"" +
           String(g_cfg_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
   body += "\"pirateweather_zip\":\"" + web_ui::json_escape(g_cfg_pirateweather_zip) + "\",";
@@ -1149,7 +1153,6 @@ void web_handle_root() {
     {"display", "Display"},
     {"weather", "Weather"},
     {"hw", "Hardware"},
-    {"general", "General"},
     {"system", "System"},
   };
   page_begin(html, "Thermostat Display", g_cfg_ota_hostname.c_str(),
@@ -1159,23 +1162,28 @@ void web_handle_root() {
   tab_begin(html, "status", true);
   card_begin(html, "Display Status");
   status_grid_begin(html);
-  status_item(html, "Uptime", "uptime_ms");
+  status_section(html, "Connectivity");
   status_item(html, "WiFi", "wifi_connected");
   status_item(html, "IP Address", "wifi_ip");
   status_item(html, "RSSI", "wifi_rssi");
   status_item(html, "MQTT", "mqtt_connected");
+  status_section(html, "Environment");
   status_item(html, "Sensor", "sensor_type");
   status_item(html, "Remote Temp", "remote_indoor_temp_c");
   status_item(html, "Remote Humidity", "remote_indoor_humidity");
   status_item(html, "Indoor Temp", "indoor_temp_text");
   status_item(html, "Indoor Humidity", "indoor_humidity_text");
   status_item(html, "Setpoint", "setpoint_text");
-  status_item(html, "Status", "status_text");
   status_item(html, "Weather", "weather_text");
-  status_item(html, "Controller Mode", "mqtt_ctrl_mode");
-  status_item(html, "Controller State", "mqtt_ctrl_state");
-  status_item(html, "Controller Available", "mqtt_ctrl_available");
+  status_section(html, "Controller");
+  status_item(html, "Status", "status_text");
+  status_item(html, "Mode", "mqtt_ctrl_mode");
+  status_item(html, "State", "mqtt_ctrl_state");
+  status_item(html, "Available", "mqtt_ctrl_available");
+  status_section(html, "System");
   status_item(html, "Free Heap", "free_heap");
+  status_item(html, "Uptime", "uptime_ms");
+  status_item(html, "Firmware", "firmware_version");
   status_grid_end(html);
   card_end(html);
   if (g_cfg_reboot_required) {
@@ -1208,6 +1216,8 @@ void web_handle_root() {
   text_field(html, "Controller Base Topic", "controller_base_topic",
              g_cfg_controller_base_topic,
              "MQTT base topic of the furnace controller");
+  text_field(html, "Discovery Prefix", "discovery_prefix", g_cfg_discovery_prefix,
+             "HA MQTT discovery prefix, e.g. homeassistant");
   form_end(html, "Save MQTT");
   card_end(html);
   tab_end(html);
@@ -1270,19 +1280,6 @@ void web_handle_root() {
   text_field(html, "OTA Hostname", "ota_hostname", g_cfg_ota_hostname);
   password_field(html, "OTA Password", "ota_password", g_cfg_ota_password.length() > 0);
   form_end(html, "Save Hardware");
-  card_end(html);
-  tab_end(html);
-
-  // ── General tab ──
-  tab_begin(html, "general");
-  card_begin(html, "Identity");
-  form_begin(html);
-  text_field(html, "Discovery Prefix", "discovery_prefix", g_cfg_discovery_prefix,
-             "MQTT discovery prefix for Home Assistant");
-  text_field(html, "Shared Device ID", "shared_device_id", g_cfg_shared_device_id,
-             "1-64 chars: letters, numbers, underscore, hyphen",
-             "^[A-Za-z0-9_-]{1,64}$", "1-64 chars: letters, numbers, underscore, hyphen");
-  form_end(html, "Save General");
   card_end(html);
   tab_end(html);
 
@@ -1471,7 +1468,7 @@ void mqtt_publish_discovery() {
   if (!g_mqtt.connected() || g_mqtt_discovery_sent) return;
 
   const String base = g_cfg_mqtt_base_topic;
-  const String node = g_cfg_shared_device_id + "_display";
+  const String node = g_cfg_unique_device_id + "_display";
 
   // Climate entity is now published by the controller. Display publishes only
   // display-specific entities (timeout, brightness, diagnostics).
@@ -1687,9 +1684,9 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
 
-  // Device registry: {shared_device_id}/devices/{mac}
-  if (g_cfg_shared_device_id.length() > 0) {
-    String dev_prefix = g_cfg_shared_device_id + "/devices/";
+  // Device registry: uses compile-time discovery prefix so all devices share it
+  {
+    static const String dev_prefix(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/");
     if (topic_str.startsWith(dev_prefix)) {
       String peer_mac = topic_str.substring(dev_prefix.length());
       if (peer_mac != WiFi.macAddress()) {
@@ -1996,18 +1993,15 @@ void ensure_mqtt_connected(uint32_t now_ms) {
     g_mqtt.subscribe(controller_topic_for("state/current_humidity").c_str());
   }
 
-  if (g_cfg_shared_device_id.length() > 0) {
-    String dev_topic = g_cfg_shared_device_id + "/devices/+";
-    g_mqtt.subscribe(dev_topic.c_str());
-  }
+  g_mqtt.subscribe(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/+");
   mqtt_publish_discovery();
   publish_all_cfg_state();
   mqtt_publish_state();
 
   // Device registry: publish our identity so other devices/tools can discover us
-  if (g_cfg_shared_device_id.length() > 0) {
+  {
     String mac = WiFi.macAddress();
-    String reg_topic = g_cfg_shared_device_id + "/devices/" + mac;
+    String reg_topic = String(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/") + mac;
     char reg_buf[256];
     snprintf(reg_buf, sizeof(reg_buf),
              "{\"mac\":\"%s\",\"ip\":\"%s\",\"type\":\"thermostat\","

@@ -86,18 +86,30 @@ function fmtTime(ms){
 }
 function pickMac(fieldName){
   var inp=document.querySelector('[name="'+fieldName+'"]');
-  var dl=document.getElementById('dl-'+fieldName);
-  if(!inp||!dl)return;
+  if(!inp)return;
+  var wrap=inp.parentElement;
+  var old=wrap.querySelector('.mac-dd');
+  if(old){old.remove();return;}
+  var dd=document.createElement('div');
+  dd.className='mac-dd';
+  dd.style.cssText='position:absolute;top:100%;left:0;right:0;z-index:99;background:var(--bg);border:1px solid var(--bd);border-radius:0.3rem;max-height:12rem;overflow-y:auto;margin-top:0.2rem;box-shadow:0 2px 8px rgba(0,0,0,0.2)';
+  dd.innerHTML='<div style="padding:0.5rem;color:var(--st)">Loading\u2026</div>';
+  wrap.appendChild(dd);
+  var dismiss=function(e){if(!wrap.contains(e.target)){dd.remove();document.removeEventListener('click',dismiss,true);}};
+  setTimeout(function(){document.addEventListener('click',dismiss,true);},0);
   fetch('/devices').then(function(r){return r.json()}).then(function(arr){
-    dl.innerHTML='';
+    dd.innerHTML='';
+    if(!arr.length){dd.innerHTML='<div style="padding:0.5rem;color:var(--st)">No devices found</div>';return;}
     arr.forEach(function(dev){
-      var o=document.createElement('option');
-      o.value=dev.mac;
-      o.label=dev.name+' ('+dev.type+')';
-      dl.appendChild(o);
+      var row=document.createElement('div');
+      row.style.cssText='padding:0.45rem 0.6rem;cursor:pointer';
+      row.onmouseover=function(){row.style.background='var(--ac)';row.style.color='#fff'};
+      row.onmouseout=function(){row.style.background='';row.style.color=''};
+      row.textContent=dev.name+' ('+dev.type+') - '+dev.mac;
+      row.onclick=function(){inp.value=dev.mac;dd.remove();document.removeEventListener('click',dismiss,true);};
+      dd.appendChild(row);
     });
-    inp.focus();
-  }).catch(function(){});
+  }).catch(function(){dd.innerHTML='<div style="padding:0.5rem;color:var(--er)">Failed to load devices</div>';});
 }
 function appendMac(fieldName){
   var inp=document.querySelector('[name="'+fieldName+'"]');

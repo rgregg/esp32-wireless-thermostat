@@ -114,9 +114,17 @@ constexpr uint32_t kCtrlProvisionStartDelayMs = 15000;
 #define THERMOSTAT_THERMOSTAT_MQTT_BASE_TOPIC "thermostat/furnace-display"
 #endif
 
-#ifndef THERMOSTAT_MQTT_SHARED_DEVICE_ID
-#define THERMOSTAT_MQTT_SHARED_DEVICE_ID "wireless_thermostat_system"
+#ifndef THERMOSTAT_MQTT_UNIQUE_DEVICE_ID
+#define THERMOSTAT_MQTT_UNIQUE_DEVICE_ID "wireless_thermostat_system"
 #endif
+
+#ifndef THERMOSTAT_MQTT_DISCOVERY_PREFIX
+#define THERMOSTAT_MQTT_DISCOVERY_PREFIX "homeassistant"
+#endif
+
+// Device discovery topic uses the compile-time base (not MAC-suffixed runtime
+// value) so all devices in the system share the same discovery namespace.
+#define THERMOSTAT_DEVICE_DISCOVERY_PREFIX THERMOSTAT_MQTT_UNIQUE_DEVICE_ID "/devices"
 
 #ifndef THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC
 #define THERMOSTAT_CONTROLLER_ESPNOW_PEER_MAC "FF:FF:FF:FF:FF:FF"
@@ -166,7 +174,8 @@ String g_cfg_ctrl_mqtt_password = THERMOSTAT_CONTROLLER_MQTT_PASSWORD;
 String g_cfg_ctrl_mqtt_client_id = THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID;
 String g_cfg_ctrl_mqtt_base_topic = THERMOSTAT_CONTROLLER_MQTT_BASE_TOPIC;
 String g_cfg_display_mqtt_base_topic = THERMOSTAT_THERMOSTAT_MQTT_BASE_TOPIC;
-String g_cfg_shared_device_id = THERMOSTAT_MQTT_SHARED_DEVICE_ID;
+String g_cfg_unique_device_id = THERMOSTAT_MQTT_UNIQUE_DEVICE_ID;
+String g_cfg_ctrl_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
 String g_cfg_ctrl_ota_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
 String g_cfg_ctrl_ota_password = THERMOSTAT_CONTROLLER_OTA_PASSWORD;
 uint8_t g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
@@ -203,7 +212,7 @@ void ctrl_load_runtime_config() {
   // Compute MAC-based suffix and apply to defaults for uniqueness.
   // If a user has saved a custom value, getString() returns it instead.
   String suffix = mac_suffix();
-  g_cfg_shared_device_id = String(THERMOSTAT_MQTT_SHARED_DEVICE_ID) + "_" + suffix;
+  g_cfg_unique_device_id = String(THERMOSTAT_MQTT_UNIQUE_DEVICE_ID) + "_" + suffix;
   g_cfg_ctrl_mqtt_client_id = String(THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID) + "-" + suffix;
   g_cfg_ctrl_ota_hostname = String(THERMOSTAT_CONTROLLER_OTA_HOSTNAME) + "-" + suffix;
 
@@ -213,7 +222,7 @@ void ctrl_load_runtime_config() {
     return stored == base ||
            stored == (String(base) + sep + "000000");
   };
-  if (is_stale_default(g_ctrl_cfg.getString("shared_id", ""), THERMOSTAT_MQTT_SHARED_DEVICE_ID, "_")) {
+  if (is_stale_default(g_ctrl_cfg.getString("shared_id", ""), THERMOSTAT_MQTT_UNIQUE_DEVICE_ID, "_")) {
     g_ctrl_cfg.remove("shared_id");
   }
   if (is_stale_default(g_ctrl_cfg.getString("mqtt_cid", ""), THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID, "-")) {
@@ -232,7 +241,8 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_mqtt_client_id = g_ctrl_cfg.getString("mqtt_cid", g_cfg_ctrl_mqtt_client_id);
   g_cfg_ctrl_mqtt_base_topic = g_ctrl_cfg.getString("mqtt_base", g_cfg_ctrl_mqtt_base_topic);
   g_cfg_display_mqtt_base_topic = g_ctrl_cfg.getString("disp_base", g_cfg_display_mqtt_base_topic);
-  g_cfg_shared_device_id = g_ctrl_cfg.getString("shared_id", g_cfg_shared_device_id);
+  g_cfg_ctrl_discovery_prefix = g_ctrl_cfg.getString("disc_pref", g_cfg_ctrl_discovery_prefix);
+  g_cfg_unique_device_id = g_ctrl_cfg.getString("shared_id", g_cfg_unique_device_id);
   g_cfg_ctrl_ota_hostname = g_ctrl_cfg.getString("ota_host", g_cfg_ctrl_ota_hostname);
   g_cfg_ctrl_ota_password = g_ctrl_cfg.getString("ota_pwd", g_cfg_ctrl_ota_password);
   g_cfg_ctrl_espnow_channel = static_cast<uint8_t>(g_ctrl_cfg.getUChar("esp_ch", g_cfg_ctrl_espnow_channel));
@@ -292,7 +302,8 @@ void ctrl_publish_all_cfg_state() {
   ctrl_publish_cfg_value("mqtt_client_id", g_cfg_ctrl_mqtt_client_id);
   ctrl_publish_cfg_value("mqtt_base_topic", g_cfg_ctrl_mqtt_base_topic);
   ctrl_publish_cfg_value("display_mqtt_base_topic", g_cfg_display_mqtt_base_topic);
-  ctrl_publish_cfg_value("shared_device_id", g_cfg_shared_device_id);
+  ctrl_publish_cfg_value("discovery_prefix", g_cfg_ctrl_discovery_prefix);
+  ctrl_publish_cfg_value("unique_device_id", g_cfg_unique_device_id);
   ctrl_publish_cfg_value("ota_hostname", g_cfg_ctrl_ota_hostname);
   ctrl_publish_cfg_value("ota_password", g_cfg_ctrl_ota_password);
   ctrl_publish_cfg_value("espnow_channel", String(g_cfg_ctrl_espnow_channel));
@@ -357,8 +368,12 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_display_mqtt_base_topic = value;
     g_ctrl_cfg.putString("disp_base", value);
     g_ctrl_mqtt_reconfigure_required = true;
-  } else if (key == "shared_device_id") {
-    g_cfg_shared_device_id = value;
+  } else if (key == "discovery_prefix") {
+    g_cfg_ctrl_discovery_prefix = value;
+    g_ctrl_cfg.putString("disc_pref", value);
+    g_ctrl_mqtt_discovery_sent = false;
+  } else if (key == "unique_device_id") {
+    g_cfg_unique_device_id = value;
     g_ctrl_cfg.putString("shared_id", value);
     g_ctrl_mqtt_discovery_sent = false;
   } else if (key == "ota_hostname") {
@@ -611,38 +626,36 @@ void ctrl_publish_discovery() {
   }
 
   const String base = g_cfg_ctrl_mqtt_base_topic;
-  const String dev_id = g_cfg_shared_device_id + "_controller";
-  const String switch_topic = String("homeassistant/switch/") + dev_id + "_lockout/config";
-  const String filter_topic = String("homeassistant/sensor/") + dev_id + "_filter_runtime/config";
-  const String state_topic = String("homeassistant/sensor/") + dev_id + "_furnace_state/config";
-  const String fw_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_firmware/config";
-  const String rssi_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_wifi_rssi/config";
-  const String heap_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_free_heap/config";
+  const String dev_id = g_cfg_unique_device_id + "_controller";
+  const String dp = g_cfg_ctrl_discovery_prefix + "/";
+  const String switch_topic = dp + "switch/" + dev_id + "_lockout/config";
+  const String filter_topic = dp + "sensor/" + dev_id + "_filter_runtime/config";
+  const String state_topic = dp + "sensor/" + dev_id + "_furnace_state/config";
+  const String fw_topic = dp + "sensor/" + dev_id + "_controller_firmware/config";
+  const String rssi_topic = dp + "sensor/" + dev_id + "_controller_wifi_rssi/config";
+  const String heap_topic = dp + "sensor/" + dev_id + "_controller_free_heap/config";
   const String last_mqtt_cmd_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_last_mqtt_command/config";
+      dp + "sensor/" + dev_id + "_controller_last_mqtt_command/config";
   const String last_espnow_rx_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_last_espnow_rx/config";
+      dp + "sensor/" + dev_id + "_controller_last_espnow_rx/config";
   const String espnow_ok_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_espnow_send_ok/config";
+      dp + "sensor/" + dev_id + "_controller_espnow_send_ok/config";
   const String espnow_fail_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_espnow_send_fail/config";
+      dp + "sensor/" + dev_id + "_controller_espnow_send_fail/config";
   const String err_mqtt_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_error_mqtt/config";
+      dp + "sensor/" + dev_id + "_controller_error_mqtt/config";
   const String err_ota_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_error_ota/config";
+      dp + "sensor/" + dev_id + "_controller_error_ota/config";
   const String err_espnow_topic =
-      String("homeassistant/sensor/") + dev_id + "_controller_error_espnow/config";
+      dp + "sensor/" + dev_id + "_controller_error_espnow/config";
   const String reset_seq_topic =
-      String("homeassistant/button/") + dev_id + "_controller_reset_sequence/config";
+      dp + "button/" + dev_id + "_controller_reset_sequence/config";
   const String reboot_topic =
-      String("homeassistant/button/") + dev_id + "_controller_reboot/config";
+      dp + "button/" + dev_id + "_controller_reboot/config";
   const String filter_change_topic =
-      String("homeassistant/binary_sensor/") + dev_id + "_filter_change_required/config";
+      dp + "binary_sensor/" + dev_id + "_filter_change_required/config";
 
-  const String climate_topic = String("homeassistant/climate/") + dev_id + "/config";
+  const String climate_topic = dp + "climate/" + dev_id + "/config";
 
   char payload[1500];
   // Use HA's ~ (tilde) abbreviation to keep the climate payload compact.
@@ -791,7 +804,7 @@ void ctrl_publish_discovery() {
 
   // Fan circulation config number entities
   {
-    String topic = String("homeassistant/number/") + dev_id + "_fan_circulate_period/config";
+    String topic = dp + "number/" + dev_id + "_fan_circulate_period/config";
     snprintf(payload, sizeof(payload),
              "{\"~\":\"%s\",\"name\":\"Fan Circulate Period\","
              "\"uniq_id\":\"%s_fan_circulate_period\","
@@ -802,7 +815,7 @@ void ctrl_publish_discovery() {
              base.c_str(), dev_id.c_str(), dev_id.c_str());
     g_ctrl_mqtt.publish(topic.c_str(), payload, true);
 
-    topic = String("homeassistant/number/") + dev_id + "_fan_circulate_duration/config";
+    topic = dp + "number/" + dev_id + "_fan_circulate_duration/config";
     snprintf(payload, sizeof(payload),
              "{\"~\":\"%s\",\"name\":\"Fan Circulate Duration\","
              "\"uniq_id\":\"%s_fan_circulate_duration\","
@@ -818,7 +831,7 @@ void ctrl_publish_discovery() {
   static const char *relay_names[] = {"Heat Relay", "Cool Relay", "Fan Relay"};
   static const char *relay_ids[] = {"relay_heat", "relay_cool", "relay_fan"};
   for (int i = 0; i < 3; ++i) {
-    String topic = String("homeassistant/binary_sensor/") + dev_id + "_" + relay_ids[i] + "/config";
+    String topic = dp + "binary_sensor/" + dev_id + "_" + relay_ids[i] + "/config";
     snprintf(payload, sizeof(payload),
              "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\","
              "\"stat_t\":\"%s/state/%s\",\"icon\":\"mdi:electric-switch\","
@@ -875,7 +888,8 @@ void ctrl_web_handle_config_get() {
   body += "\"mqtt_client_id\":\"" + web_ui::json_escape(g_cfg_ctrl_mqtt_client_id) + "\",";
   body += "\"mqtt_base_topic\":\"" + web_ui::json_escape(g_cfg_ctrl_mqtt_base_topic) + "\",";
   body += "\"display_mqtt_base_topic\":\"" + web_ui::json_escape(g_cfg_display_mqtt_base_topic) + "\",";
-  body += "\"shared_device_id\":\"" + web_ui::json_escape(g_cfg_shared_device_id) + "\",";
+  body += "\"discovery_prefix\":\"" + web_ui::json_escape(g_cfg_ctrl_discovery_prefix) + "\",";
+  body += "\"unique_device_id\":\"" + web_ui::json_escape(g_cfg_unique_device_id) + "\",";
   body += "\"ota_hostname\":\"" + web_ui::json_escape(g_cfg_ctrl_ota_hostname) + "\",";
   body += "\"ota_password\":\"" + String(g_cfg_ctrl_ota_password.length() > 0 ? "set" : "unset") + "\",";
   body += "\"espnow_channel\":" + String(g_cfg_ctrl_espnow_channel) + ",";
@@ -1022,7 +1036,6 @@ void ctrl_web_handle_root() {
     {"espnow", "ESP-NOW"},
     {"weather", "Weather"},
     {"hw", "Hardware"},
-    {"general", "General"},
     {"system", "System"},
   };
   page_begin(html, "Furnace Controller", g_cfg_ctrl_ota_hostname.c_str(),
@@ -1091,6 +1104,8 @@ void ctrl_web_handle_root() {
   text_field(html, "Display Base Topic", "display_mqtt_base_topic",
              g_cfg_display_mqtt_base_topic,
              "MQTT base topic of the thermostat display");
+  text_field(html, "Discovery Prefix", "discovery_prefix", g_cfg_ctrl_discovery_prefix,
+             "HA MQTT discovery prefix, e.g. homeassistant");
   form_end(html, "Save MQTT");
   card_end(html);
   tab_end(html);
@@ -1134,17 +1149,6 @@ void ctrl_web_handle_root() {
   text_field(html, "OTA Hostname", "ota_hostname", g_cfg_ctrl_ota_hostname);
   password_field(html, "OTA Password", "ota_password", g_cfg_ctrl_ota_password.length() > 0);
   form_end(html, "Save Hardware");
-  card_end(html);
-  tab_end(html);
-
-  // ── General tab ──
-  tab_begin(html, "general");
-  card_begin(html, "Identity");
-  form_begin(html);
-  text_field(html, "Shared Device ID", "shared_device_id", g_cfg_shared_device_id,
-             "1-64 chars: letters, numbers, underscore, hyphen",
-             "^[A-Za-z0-9_-]{1,64}$", "1-64 chars: letters, numbers, underscore, hyphen");
-  form_end(html, "Save General");
   card_end(html);
   tab_end(html);
 
@@ -1359,9 +1363,9 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_try_update_runtime_config(cfg_key.c_str(), value);
     return;
   }
-  // Device registry: {shared_device_id}/devices/{mac}
-  if (g_cfg_shared_device_id.length() > 0) {
-    String dev_prefix = g_cfg_shared_device_id + "/devices/";
+  // Device registry: uses compile-time discovery prefix so all devices share it
+  {
+    static const String dev_prefix(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/");
     if (topic_str.startsWith(dev_prefix)) {
       String peer_mac = topic_str.substring(dev_prefix.length());
       // Skip our own MAC
@@ -1657,18 +1661,15 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str());
   g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str());
-  if (g_cfg_shared_device_id.length() > 0) {
-    String dev_topic = g_cfg_shared_device_id + "/devices/+";
-    g_ctrl_mqtt.subscribe(dev_topic.c_str());
-  }
+  g_ctrl_mqtt.subscribe(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/+");
   ctrl_publish_discovery();
   ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
 
   // Device registry: publish our identity so other devices/tools can discover us
-  if (g_cfg_shared_device_id.length() > 0) {
+  {
     String mac = WiFi.macAddress();
-    String reg_topic = g_cfg_shared_device_id + "/devices/" + mac;
+    String reg_topic = String(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/") + mac;
     char reg_buf[256];
     snprintf(reg_buf, sizeof(reg_buf),
              "{\"mac\":\"%s\",\"ip\":\"%s\",\"type\":\"controller\","
