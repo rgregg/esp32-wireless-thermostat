@@ -27,6 +27,7 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <WebServer.h>
+#include <esp_mac.h>
 #include <esp_system.h>
 #include "ota_web_updater.h"
 #include "controller/audit_log.h"
@@ -184,19 +185,14 @@ uint16_t g_cfg_fan_circ_duration_min = 10;
 String g_disp_availability = "unknown";
 
 
-// Returns lowercase last 6 hex chars of WiFi MAC, e.g. "ddeeff"
+// Returns lowercase last 3 bytes of base MAC as hex, e.g. "ddeeff".
+// Uses esp_efuse_mac_get_default() which works without WiFi init.
 static String mac_suffix() {
-  String mac = WiFi.macAddress(); // "AA:BB:CC:DD:EE:FF"
-  // Strip colons to get continuous hex string
-  String hex_only;
-  for (size_t i = 0; i < static_cast<size_t>(mac.length()); ++i) {
-    char c = mac[i];
-    if (c != ':') hex_only += c;
-  }
-  if (hex_only.length() < 6) return String("000000");
-  String raw = hex_only.substring(hex_only.length() - 6);
-  raw.toLowerCase();
-  return raw;
+  uint8_t mac[6];
+  if (esp_efuse_mac_get_default(mac) != ESP_OK) return String("000000");
+  char buf[7];
+  snprintf(buf, sizeof(buf), "%02x%02x%02x", mac[3], mac[4], mac[5]);
+  return String(buf);
 }
 
 void ctrl_load_runtime_config() {
@@ -211,14 +207,19 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_mqtt_client_id = String(THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID) + "-" + suffix;
   g_cfg_ctrl_ota_hostname = String(THERMOSTAT_CONTROLLER_OTA_HOSTNAME) + "-" + suffix;
 
-  // One-time migration: clear old non-suffixed defaults so new defaults take effect
-  if (g_ctrl_cfg.getString("shared_id", "") == THERMOSTAT_MQTT_SHARED_DEVICE_ID) {
+  // One-time migration: clear old defaults so new MAC-suffixed defaults take effect.
+  // Matches both the original non-suffixed default and the broken _000000 fallback.
+  auto is_stale_default = [](const String &stored, const char *base, const char *sep) {
+    return stored == base ||
+           stored == (String(base) + sep + "000000");
+  };
+  if (is_stale_default(g_ctrl_cfg.getString("shared_id", ""), THERMOSTAT_MQTT_SHARED_DEVICE_ID, "_")) {
     g_ctrl_cfg.remove("shared_id");
   }
-  if (g_ctrl_cfg.getString("mqtt_cid", "") == THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID) {
+  if (is_stale_default(g_ctrl_cfg.getString("mqtt_cid", ""), THERMOSTAT_CONTROLLER_MQTT_CLIENT_ID, "-")) {
     g_ctrl_cfg.remove("mqtt_cid");
   }
-  if (g_ctrl_cfg.getString("ota_host", "") == THERMOSTAT_CONTROLLER_OTA_HOSTNAME) {
+  if (is_stale_default(g_ctrl_cfg.getString("ota_host", ""), THERMOSTAT_CONTROLLER_OTA_HOSTNAME, "-")) {
     g_ctrl_cfg.remove("ota_host");
   }
 
