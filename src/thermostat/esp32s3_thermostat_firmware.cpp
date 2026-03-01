@@ -571,6 +571,7 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     if (g_runtime != nullptr) {
       g_runtime->set_local_temperature_compensation_c(g_cfg_temp_comp_c);
     }
+    g_last_sensor_poll_ms = 0;  // re-read sensor with new compensation
   } else if (key == "temperature_unit") {
     g_cfg_temp_unit_f = (value == "f" || value == "fahrenheit");
     g_cfg.putBool("temp_u_f", g_cfg_temp_unit_f);
@@ -1764,6 +1765,7 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     if (comp > 10.0f) comp = 10.0f;
     g_cfg_temp_comp_c = comp;
     g_runtime->set_local_temperature_compensation_c(g_cfg_temp_comp_c);
+    g_last_sensor_poll_ms = 0;  // re-read sensor with new compensation
     if (g_cfg_ready) {
       g_cfg.putFloat("temp_comp", g_cfg_temp_comp_c);
     }
