@@ -35,6 +35,23 @@ inline FanMode str_to_fan(const char *s) {
   return FanMode::Automatic;
 }
 
+// --- Furnace state code to human-readable string ---
+
+inline const char *furnace_state_to_str(FurnaceStateCode state) {
+  switch (state) {
+    case FurnaceStateCode::Idle: return "Idle";
+    case FurnaceStateCode::HeatMode: return "Heat Standby";
+    case FurnaceStateCode::HeatOn: return "Heating";
+    case FurnaceStateCode::CoolMode: return "Cool Standby";
+    case FurnaceStateCode::CoolOn: return "Cooling";
+    case FurnaceStateCode::FanOn: return "Fan Running";
+    case FurnaceStateCode::Error: return "Error";
+    case FurnaceStateCode::HeatWait: return "Heat Wait";
+    case FurnaceStateCode::CoolWait: return "Cool Wait";
+    default: return "Unknown";
+  }
+}
+
 // --- Bool payload parsing ---
 
 inline bool parse_bool(const char *s) {

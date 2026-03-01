@@ -31,6 +31,7 @@
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
 #include "management_paths.h"
+#include "device_registry.h"
 
 #include <Adafruit_AHTX0.h>
 #include <Adafruit_Si7021.h>
@@ -219,6 +220,7 @@ PubSubClient g_mqtt(g_wifi_client);
 WebServer g_web(80);
 bool g_mqtt_discovery_sent = false;
 bool g_web_started = false;
+DeviceRegistry g_device_registry;
 bool g_mdns_started = false;
 
 ThermostatDeviceRuntime *g_runtime = nullptr;
@@ -368,8 +370,42 @@ const char *fan_to_mqtt(FanMode mode) {
   }
 }
 
+// Returns lowercase last 6 hex chars of WiFi MAC, e.g. "ddeeff"
+static String mac_suffix() {
+  String mac = WiFi.macAddress(); // "AA:BB:CC:DD:EE:FF"
+  // Strip colons to get continuous hex string
+  String hex_only;
+  for (size_t i = 0; i < static_cast<size_t>(mac.length()); ++i) {
+    char c = mac[i];
+    if (c != ':') hex_only += c;
+  }
+  if (hex_only.length() < 6) return String("000000");
+  String raw = hex_only.substring(hex_only.length() - 6);
+  raw.toLowerCase();
+  return raw;
+}
+
 void load_runtime_config() {
   if (!g_cfg_ready) return;
+
+  // Compute MAC-based suffix and apply to defaults for uniqueness.
+  // If a user has saved a custom value, getString() returns it instead.
+  String suffix = mac_suffix();
+  g_cfg_shared_device_id = String(THERMOSTAT_MQTT_SHARED_DEVICE_ID) + "_" + suffix;
+  g_cfg_mqtt_client_id = String(THERMOSTAT_MQTT_CLIENT_ID) + "-" + suffix;
+  g_cfg_ota_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + suffix;
+
+  // One-time migration: clear old non-suffixed defaults so new defaults take effect
+  if (g_cfg.getString("shared_id", "") == THERMOSTAT_MQTT_SHARED_DEVICE_ID) {
+    g_cfg.remove("shared_id");
+  }
+  if (g_cfg.getString("mqtt_cid", "") == THERMOSTAT_MQTT_CLIENT_ID) {
+    g_cfg.remove("mqtt_cid");
+  }
+  if (g_cfg.getString("ota_host", "") == THERMOSTAT_OTA_HOSTNAME) {
+    g_cfg.remove("ota_host");
+  }
+
   g_cfg_wifi_ssid = g_cfg.getString("wifi_ssid", g_cfg_wifi_ssid);
   g_cfg_wifi_password = g_cfg.getString("wifi_pwd", g_cfg_wifi_password);
   g_cfg_mqtt_host = g_cfg.getString("mqtt_host", g_cfg_mqtt_host);
@@ -1077,6 +1113,28 @@ void web_handle_screenshot() {
   }
 }
 
+void web_handle_devices_get() {
+  String json = "[";
+  bool first = true;
+  for (size_t i = 0; i < kMaxRegistryEntries; ++i) {
+    const auto &e = g_device_registry.entries[i];
+    if (!e.occupied) continue;
+    if (!first) json += ',';
+    first = false;
+    json += "{\"mac\":\"";
+    json += web_ui::json_escape(e.mac);
+    json += "\",\"name\":\"";
+    json += web_ui::json_escape(e.name);
+    json += "\",\"type\":\"";
+    json += web_ui::json_escape(e.type);
+    json += "\",\"ip\":\"";
+    json += web_ui::json_escape(e.ip);
+    json += "\"}";
+  }
+  json += "]";
+  g_web.send(200, "application/json", json);
+}
+
 void web_handle_root() {
   using namespace web_ui;
   String html;
@@ -1260,6 +1318,7 @@ void ensure_web_ready() {
   if (!g_web_started) {
     g_web.on("/", HTTP_GET, web_handle_root);
     g_web.on("/status", HTTP_GET, web_handle_status_get);
+    g_web.on("/devices", HTTP_GET, web_handle_devices_get);
     g_web.on("/config", HTTP_GET, web_handle_config_get);
     g_web.on("/config", HTTP_POST, web_handle_config_post);
     g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
@@ -1411,7 +1470,7 @@ void mqtt_publish_discovery() {
   if (!g_mqtt.connected() || g_mqtt_discovery_sent) return;
 
   const String base = g_cfg_mqtt_base_topic;
-  const String node = g_cfg_shared_device_id;
+  const String node = g_cfg_shared_device_id + "_display";
 
   // Climate entity is now published by the controller. Display publishes only
   // display-specific entities (timeout, brightness, diagnostics).
@@ -1423,7 +1482,7 @@ void mqtt_publish_discovery() {
            "{\"name\":\"Display Timeout\",\"uniq_id\":\"%s_display_timeout\","
            "\"cmd_t\":\"%s/cmd/display_timeout_s\",\"stat_t\":\"%s/state/display_timeout_s\","
            "\"min\":30,\"max\":600,\"step\":5,\"mode\":\"box\",\"unit_of_meas\":\"s\","
-           "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+           "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"Thermostat Display\","
            "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
            node.c_str(), base.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(timeout_config.c_str(), payload, true);
@@ -1584,7 +1643,7 @@ void mqtt_publish_discovery() {
            "{\"name\":\"Indoor Temperature\",\"uniq_id\":\"%s_indoor_temperature\","
            "\"stat_t\":\"%s/state/current_temp_c\",\"unit_of_meas\":\"\xC2\xB0""C\","
            "\"dev_cla\":\"temperature\",\"stat_cla\":\"measurement\","
-           "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Wireless Thermostat System\","
+           "\"dev\":{\"ids\":[\"%s\"],\"name\":\"Thermostat Display\","
            "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(temp_config.c_str(), payload, true);
@@ -1625,6 +1684,28 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       try_update_runtime_config(key, value);
     }
     return;
+  }
+
+  // Device registry: {shared_device_id}/devices/{mac}
+  if (g_cfg_shared_device_id.length() > 0) {
+    String dev_prefix = g_cfg_shared_device_id + "/devices/";
+    if (topic_str.startsWith(dev_prefix)) {
+      String peer_mac = topic_str.substring(dev_prefix.length());
+      if (peer_mac != WiFi.macAddress()) {
+        char buf[256];
+        size_t buf_len = (length < sizeof(buf) - 1) ? length : sizeof(buf) - 1;
+        memcpy(buf, payload, buf_len);
+        buf[buf_len] = '\0';
+        char name[48] = "", type[16] = "", ip[16] = "";
+        bool ok = ::json_extract_string(buf, "name", name, sizeof(name))
+                && ::json_extract_string(buf, "type", type, sizeof(type))
+                && ::json_extract_string(buf, "ip", ip, sizeof(ip));
+        if (ok) {
+          g_device_registry.upsert(peer_mac.c_str(), name, type, ip);
+        }
+      }
+      return;
+    }
   }
 
   if (g_runtime == nullptr) return;
@@ -1870,11 +1951,14 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.setServer(g_cfg_mqtt_host.c_str(), g_cfg_mqtt_port);
 
   bool ok = false;
+  String will_topic = topic_for("state/availability");
   if (g_cfg_mqtt_user.length() == 0) {
-    ok = g_mqtt.connect(g_cfg_mqtt_client_id.c_str());
+    ok = g_mqtt.connect(g_cfg_mqtt_client_id.c_str(),
+                        will_topic.c_str(), 1, true, "offline");
   } else {
-    ok = g_mqtt.connect(g_cfg_mqtt_client_id.c_str(), g_cfg_mqtt_user.c_str(),
-                        g_cfg_mqtt_password.c_str());
+    ok = g_mqtt.connect(g_cfg_mqtt_client_id.c_str(),
+                        g_cfg_mqtt_user.c_str(), g_cfg_mqtt_password.c_str(),
+                        will_topic.c_str(), 1, true, "offline");
   }
 
   if (!ok) {
@@ -1911,6 +1995,10 @@ void ensure_mqtt_connected(uint32_t now_ms) {
     g_mqtt.subscribe(controller_topic_for("state/current_humidity").c_str());
   }
 
+  if (g_cfg_shared_device_id.length() > 0) {
+    String dev_topic = g_cfg_shared_device_id + "/devices/+";
+    g_mqtt.subscribe(dev_topic.c_str());
+  }
   mqtt_publish_discovery();
   publish_all_cfg_state();
   mqtt_publish_state();

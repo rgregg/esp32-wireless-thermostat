@@ -139,6 +139,11 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
     audit("mode: %s->%s [%s]",
           mqtt_payload::mode_to_str(old_mode),
           mqtt_payload::mode_to_str(mode_), src_str);
+    // Clear sticky max-runtime flag when user changes mode (acknowledgment)
+    if (max_runtime_exceeded_) {
+      max_runtime_exceeded_ = false;
+      audit("max_runtime: cleared by mode change [internal]");
+    }
   }
   if (fan_mode_ != old_fan) {
     audit("fan: %s->%s [%s]",
@@ -228,7 +233,14 @@ void ControllerRuntime::apply_hvac_calls(uint32_t now_ms, bool heat_call, bool c
     case HvacState::Heating: {
       const bool min_run_done =
           elapsed_at_least(now_ms, hvac_state_since_ms_, config_.min_heating_run_time_ms);
-      if (!heat_call && min_run_done) {
+      const bool max_run_exceeded =
+          config_.max_heating_run_time_ms > 0 &&
+          elapsed_at_least(now_ms, hvac_state_since_ms_, config_.max_heating_run_time_ms);
+      if (max_run_exceeded) {
+        audit("heating: max runtime exceeded, forcing idle [internal]");
+        max_runtime_exceeded_ = true;
+        enter_idle(now_ms);
+      } else if (!heat_call && min_run_done) {
         enter_idle(now_ms);
       } else {
         relay_.heat = true;
@@ -239,7 +251,14 @@ void ControllerRuntime::apply_hvac_calls(uint32_t now_ms, bool heat_call, bool c
     case HvacState::Cooling: {
       const bool min_run_done =
           elapsed_at_least(now_ms, hvac_state_since_ms_, config_.min_cooling_run_time_ms);
-      if (!cool_call && min_run_done) {
+      const bool max_run_exceeded =
+          config_.max_cooling_run_time_ms > 0 &&
+          elapsed_at_least(now_ms, hvac_state_since_ms_, config_.max_cooling_run_time_ms);
+      if (max_run_exceeded) {
+        audit("cooling: max runtime exceeded, forcing idle [internal]");
+        max_runtime_exceeded_ = true;
+        enter_idle(now_ms);
+      } else if (!cool_call && min_run_done) {
         enter_idle(now_ms);
       } else {
         relay_.heat = false;
@@ -344,6 +363,7 @@ void ControllerRuntime::enter_heating(uint32_t now_ms) {
   relay_.cool = false;
   relay_.fan = false;
   equipment_delay_ = false;
+  max_runtime_exceeded_ = false;
 }
 
 void ControllerRuntime::enter_cooling(uint32_t now_ms) {
@@ -354,6 +374,7 @@ void ControllerRuntime::enter_cooling(uint32_t now_ms) {
   relay_.cool = true;
   relay_.fan = false;
   equipment_delay_ = false;
+  max_runtime_exceeded_ = false;
 }
 
 }  // namespace thermostat

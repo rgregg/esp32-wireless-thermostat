@@ -115,13 +115,31 @@ inline void number_field(String &html, const char *label, const char *name,
   html += F("</div>");
 }
 
-// MAC address field with pattern validation
+// MAC address field with pattern validation and device picker
 inline void mac_field(String &html, const char *label, const char *name,
                        const String &value, const char *hint = nullptr) {
-  text_field(html, label, name, value,
-             hint ? hint : "Format: AA:BB:CC:DD:EE:FF",
-             "^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$",
-             "Format: AA:BB:CC:DD:EE:FF");
+  html += F("<div class=\"fg\"><label>");
+  html += label;
+  html += F("</label><div style=\"display:flex;gap:0.4rem\">"
+            "<input name=\"");
+  html += name;
+  html += F("\" value=\"");
+  html += html_escape(value);
+  html += F("\" list=\"dl-");
+  html += name;
+  html += F("\" pattern=\"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$\""
+            " title=\"Format: AA:BB:CC:DD:EE:FF\""
+            " style=\"flex:1\">"
+            "<button type=\"button\" class=\"btn btn-p\" style=\"padding:0.45rem 0.6rem\""
+            " onclick=\"pickMac('");
+  html += name;
+  html += F("')\">&#9660;</button></div>"
+            "<datalist id=\"dl-");
+  html += name;
+  html += F("\"></datalist>"
+            "<div class=\"ht\">");
+  html += hint ? hint : "Format: AA:BB:CC:DD:EE:FF";
+  html += F("</div></div>");
 }
 
 // Select dropdown
@@ -167,6 +185,14 @@ inline void status_item(String &html, const char *label, const char *id,
   html += id;
   html += F("\">");
   html += initial_value;
+  html += F("</div></div>");
+}
+
+// Section heading inside a status grid (spans full width)
+inline void status_section(String &html, const char *heading) {
+  html += F("<div style=\"grid-column:1/-1;margin-top:0.4rem\">"
+            "<div class=\"sl\" style=\"border-bottom:1px solid var(--bd);padding-bottom:0.2rem\">");
+  html += heading;
   html += F("</div></div>");
 }
 
