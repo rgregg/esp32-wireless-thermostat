@@ -2,10 +2,8 @@
 
 ## Hardware Design Specification (patterned after ESP32-8048S043C_I class boards)
 
-**Version:** 1.3\
-**Date:** 2026-03-02  
-
-_Last updated:_ 2026-03-02  
+**Version:** 1.4\
+**Date:** 2026-03-02
 
 _Last updated:_ 2026-03-02
 
@@ -103,17 +101,41 @@ Under maximum backlight brightness and active Wi-Fi:
 
 -   4.3" IPS TFT
 -   800×480 resolution
--   Capacitive touch controller via I²C
--   PWM-controlled backlight (\>20kHz)
+-   Capacitive touch controller via I²C (see Section 9 for pin map)
+
+### 5.1 Backlight Control
+
+-   PWM on **GPIO 2** (LIGHT pin)
+-   **Frequency:** 800 Hz (firmware uses LEDC peripheral)
+-   **Resolution:** 8-bit (0–255 duty cycle)
+-   **Startup behavior:** backlight is held off for 400 ms after display
+    initialization to avoid showing garbage frames, then ramped to active brightness
+-   **Default active brightness:** 100%
+-   **Default screensaver brightness:** 16% (dimmed after display timeout)
+-   **Display timeout:** 300 seconds (5 minutes) — configurable at runtime via
+    MQTT or web UI
+
+> **Design note:** The firmware uses 800 Hz, not the >20 kHz originally specified.
+> If audible coil whine is observed from the backlight driver at 800 Hz, the PCB
+> designer may add filtering or the firmware frequency can be increased. Verify
+> the chosen backlight driver IC is compatible with the selected frequency.
 
 ------------------------------------------------------------------------
 
-## 6. AHT20 Sensor Subsystem
+## 6. Temperature/Humidity Sensor Subsystem
 
--   I²C address: 0x38
+Primary sensor: **AHT20** (I²C address 0x38)\
+Fallback sensor: **Si7021** (I²C address 0x40)
+
 -   Powered at 3.3V
--   Humidity accuracy: ±2% RH typical
--   Temperature accuracy: ±0.3°C typical
+-   Connected via dedicated sensor I²C bus (see Section 9.4)
+-   Humidity accuracy: ±2% RH typical (AHT20), ±3% RH (Si7021)
+-   Temperature accuracy: ±0.3°C typical (AHT20), ±0.4°C (Si7021)
+
+The firmware auto-detects sensors at startup: it probes for AHT20 first (with a
+ghost-device validation read), then falls back to Si7021 if AHT20 is not found.
+The PCB should provide footprint and I²C pull-ups compatible with either sensor.
+Both use the same I²C bus (Bus 1, GPIO 17/18).
 
 ------------------------------------------------------------------------
 
@@ -138,9 +160,6 @@ Board zones:
 
 ------------------------------------------------------------------------
 
-
----
-
 ## 9. Pinout Compatibility With Reference Dev Board (Required)
 
 ### 9.0 Display & Touch Hardware Compatibility (Required)
@@ -163,7 +182,7 @@ In addition to matching GPIO assignments, the custom PCB **MUST use the same dis
   - I²C bus pins: SDA=GPIO19, SCL=GPIO20 (already required by pin map) citeturn2view0
   - Reset pin: **GPIO38** (already required by pin map) citeturn2view0
 - Interrupt behavior:
-  - Reference behavior uses polling (interrupt pin not connected by default). Preserve this by default, but keep the optional strap to connect INT to GPIO18 as specified earlier.
+  - Reference behavior uses polling (interrupt pin not connected by default). Preserve this by default. Note: GPIO 18 (reference INT strap target) is now used for sensor I²C SDA — if touch INT is desired, assign a different GPIO.
 
 #### 9.0.3 Procurement / BOM Control (Required)
 Hardware engineering must treat the following as **locked compatibility items**:
@@ -203,6 +222,7 @@ Reference: https://macsbug.wordpress.com/wp-content/uploads/2022/10/4280s043_lay
 | HSYNC | GPIO39 |
 | DCLK | GPIO42 |
 | DISP (Display Enable) | **R16 / board-defined** (see note below) |
+| LIGHT (Backlight PWM) | GPIO2 |
 | B7 | GPIO1 |
 | B6 | GPIO9 |
 | B5 | GPIO46 |
@@ -226,9 +246,9 @@ Reference: https://macsbug.wordpress.com/wp-content/uploads/2022/10/4280s043_lay
 
 **Important notes:**
 - Several RGB bits on the reference board are tied to GND (B2/B1/B0, G1/G0, R2/R1/R0). This implies the panel is being driven in a reduced-bit mode (commonly 16-bit 565 uses a subset of the RGB lines). **Match the reference wiring**, even if your panel could support more bits, to keep software compatibility.
-- The **DISP** line on the reference layout is not clearly annotated as a direct GPIO in the PDF (it is marked via “R16”). For compatibility:
-  - Implement a **DISP control net** that matches the existing board’s behavior (always enabled OR controlled exactly as reference if you confirm the GPIO in your current firmware).
-  - Add a test pad and allow rework (0Ω link footprint) so DISP can be strapped to a GPIO later if needed.
+- The **DISP** line on the reference layout is not clearly annotated as a direct GPIO in the PDF (it is marked via “R16”). The firmware sets `disp_gpio_num = -1` (unused), meaning it does **not** toggle DISP via GPIO. For the custom PCB:
+  - **Recommended:** Strap DISP permanently HIGH (always enabled) via pull-up or direct tie to 3.3V.
+  - Add a test pad and 0Ω link footprint so DISP can optionally be routed to a GPIO if future firmware needs control.
 
 ### 9.3 Touch Controller (GT911) → ESP32-S3 GPIO Map
 
@@ -247,9 +267,21 @@ The reference board uses a capacitive touch controller (commonly GT911) on an FP
 - Wire touch I²C and RST exactly as above.
 - For INT behavior:
   - Provide the same default as reference (INT not populated/connected), **AND**
-  - Provide an optional population path (0Ω resistor / solder jumper) to connect INT to **GPIO18** for interrupt-driven touch (many users mod the board to reduce CPU usage).
+  - The reference board documents an optional strap to connect INT to GPIO18. However, **GPIO 18 is now used for the sensor I²C SDA bus** (see Section 9.4). If interrupt-driven touch is desired, route INT to a different available GPIO instead.
 
-### 9.4 TF / microSD (Optional) → ESP32-S3 GPIO Map
+### 9.4 I²C Bus Summary
+
+The display PCB uses **two separate I²C buses** to avoid address conflicts and
+allow independent clock speeds:
+
+| Bus | Instance     | SDA    | SCL    | Frequency | Devices              |
+|-----|--------------|:------:|:------:|:---------:|----------------------|
+| 0   | `g_touch_i2c` | GPIO 19 | GPIO 20 | 400 kHz   | GT911 touch (0x5D)   |
+| 1   | `g_sensor_i2c` | GPIO 18 | GPIO 17 | 100 kHz   | AHT20 (0x38) / Si7021 (0x40) |
+
+Each bus requires its own set of pull-up resistors (4.7 kΩ typical to 3.3V).
+
+### 9.5 TF / microSD (Optional) → ESP32-S3 GPIO Map
 
 If TF/microSD is included, match the reference wiring:
 
@@ -261,7 +293,7 @@ If TF/microSD is included, match the reference wiring:
 | MISO / DAT0 | GPIO13 |
 | (Card Detect / other) | Follow reference if implemented; otherwise expose footprint/test pads. |
 
-### 9.5 Boot / Reset & Programming
+### 9.6 Boot / Reset & Programming
 
 - BOOT button: GPIO0 (IO0) to GND (standard ESP32 boot strap)
 - RESET button: EN (chip enable / reset)
@@ -269,12 +301,62 @@ If TF/microSD is included, match the reference wiring:
   - DTR/RTS should drive IO0/EN in the standard ESP32 auto-reset topology.
 - Preserve the “works like the dev board” experience: **USB-C + flashing via ESP tools**.
 
-### 9.6 Implementation Guidance
+### 9.7 Implementation Guidance
 
 To ensure the team matches the pin map correctly:
 - Include the above table directly in the schematic notes.
 - Label nets with both roles, e.g., `LCD_DE_GPIO40`, `TP_SCL_GPIO20`, etc.
 - Add test pads for every critical interface line (DCLK/HSYNC/VSYNC/DE, touch SDA/SCL/RST/INT, SD CS/CLK/MOSI/MISO).
 
+
+------------------------------------------------------------------------
+
+## 10. WiFi, Wireless & Software Features
+
+The following firmware features run entirely on the ESP32-S3's built-in radio and
+require no additional hardware beyond the module's integrated antenna (or external
+antenna on U.FL variants).
+
+### 10.1 WiFi
+
+-   Station (STA) mode — connects to an existing access point
+-   Used for MQTT, OTA updates, web UI, and mDNS
+
+### 10.2 ESP-NOW
+
+-   Point-to-point communication with the furnace controller
+-   Sends temperature/humidity readings, receives HVAC state updates
+-   Default channel: 6 (configurable at runtime)
+-   Encrypted with a configurable link master key
+
+### 10.3 BLE Provisioning
+
+-   Improv-WiFi via NimBLE for initial WiFi credential setup
+-   BLE active only during provisioning (mutually exclusive with WiFi)
+
+### 10.4 MQTT
+
+-   Publishes sensor telemetry (temperature, humidity)
+-   Publishes Home Assistant discovery payloads
+-   Subscribes to HVAC state updates from the controller
+
+### 10.5 OTA & Web Server
+
+-   ArduinoOTA (UDP port 3232)
+-   Web OTA via HTTP POST to `/update` on port 80
+-   Web configuration UI on port 80
+-   mDNS: registers `_http._tcp` service
+
+### 10.6 NVS Storage
+
+-   Persistent configuration for WiFi, MQTT, ESP-NOW, display settings
+-   Uses Arduino `Preferences` API (ESP32 NVS)
+
+### 10.7 Partition Scheme
+
+-   Dual OTA partitions (`partitions_no_spiffs.csv`), no filesystem partition
+-   Minimum 4 MB flash required
+
+------------------------------------------------------------------------
 
 # End of Document
