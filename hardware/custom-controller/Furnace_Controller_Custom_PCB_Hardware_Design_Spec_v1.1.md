@@ -347,13 +347,107 @@ Board divided into zones:
 
 ------------------------------------------------------------------------
 
-# 16. Open Engineering Decisions
+# 16. Component Recommendations
 
--   Final relay part selection
--   Exact buck regulator components
--   Ideal diode OR controller selection
--   USB-UART bridge selection
--   RS-485 transceiver selection
+The following components are recommended for the major open selections. Alternatives
+are listed for sourcing flexibility — any substitute must meet the electrical
+requirements in the referenced sections.
+
+## 16.1 Relays (Section 2.2)
+
+| Component | Key Specs | Notes |
+|-----------|-----------|-------|
+| **Omron G5LE-1-DC12** (recommended) | 12V coil, 10A/250VAC contacts, 44mA coil | Widely available, proven HVAC relay |
+| _Alt:_ Hongfa HF46F-G/12-HS1T | 12V coil, 10A/250VAC, 36mA coil | Lower coil current, smaller footprint |
+
+## 16.2 Wide-Input Buck: Rectified 24VAC → 12V_SYS (Section 3.2)
+
+| Component | Key Specs | Notes |
+|-----------|-----------|-------|
+| **TI LMR16030** (recommended) | 4.3–60V input, 3A output, adjustable | 60V max covers worst-case 32VAC × √2 ≈ 45V peak with margin |
+| _Alt:_ TI LM5164 | 6–100V input, 1A, integrated FET | Higher input ceiling, lower current; sufficient if relay coils have dedicated supply |
+
+## 16.3 3.3V Buck: 12V → 3.3V (Section 3.3)
+
+| Component | Key Specs | Notes |
+|-----------|-----------|-------|
+| **Diodes Inc AP63203** (recommended) | 4.2–32V input, 2A, SOT-23-6 | Minimal external BOM, excellent for ESP32 loads |
+| _Alt:_ TI TLV62569 | 2.5–17V input, 2A, SOT-23-5 | Slightly narrower input range but very compact |
+
+## 16.4 Ideal Diode OR Controller (Section 3.2)
+
+| Component | Key Specs | Notes |
+|-----------|-----------|-------|
+| **LTC4412** (recommended) | Low-loss PFET OR controller | One per source rail (24VAC-derived + USB-derived); prevents backfeed |
+| _Alt:_ TI TPS2113A | Auto-switching power mux, 3A | Integrated FET, handles switchover logic internally |
+
+## 16.5 USB-UART Bridge (Section 4.1)
+
+| Component | Key Specs | Notes |
+|-----------|-----------|-------|
+| **CP2102N** (recommended) | USB 2.0 full-speed, QFN-24 | Already referenced in Section 4.1; native OS drivers, auto-program via DTR/RTS |
+| _Alt:_ CH340C | USB 2.0, SOP-16 | Lower cost, requires driver install on some OS versions |
+
+## 16.6 RS-485 Transceiver (Section 5)
+
+| Component | Key Specs | Notes |
+|-----------|-----------|-------|
+| **TI SN65HVD3082E** (recommended) | 3.3V, half-duplex, fail-safe, SOIC-8 | Proven, low cost, ±15kV ESD on bus pins |
+| _Alt:_ TI THVD1500 | 3.3V, half-duplex, ±30kV ESD, fail-safe | Higher ESD rating for harsh environments |
+
+------------------------------------------------------------------------
+
+# 17. Firmware Migration Notes (ESP32 → ESP32-S3)
+
+> **Context:** The current development firmware targets the original ESP32 DevKit
+> (`board = esp32dev`). When the custom S3 PCB is ready, the following firmware
+> changes are required.
+
+## 17.1 PlatformIO Environment
+
+In `platformio.ini`, change the controller environment board:
+
+```
+board = esp32dev          →  board = esp32-s3-devkitc-1
+```
+
+Add `framework = arduino` and `platform = espressif32` if not already present.
+**Do not** add `board_build.psram` or `board_build.flash_mode` settings — the
+controller does not need PSRAM and should use the default flash mode.
+
+## 17.2 Relay GPIO Pin Defaults
+
+In `include/controller/controller_relay_io.h`, update the default pin constants
+to match the PCB routing:
+
+| Channel | Current Default (ESP32) | New Default (S3 PCB) |
+|---------|:-----------------------:|:--------------------:|
+| Heat    | GPIO 32                 | GPIO 4               |
+| Cool    | GPIO 33                 | GPIO 5               |
+| Fan     | GPIO 25                 | GPIO 6               |
+| Spare   | GPIO 26                 | GPIO 7               |
+
+> These match the suggested assignments in Section 2.2. Finalize during PCB
+> routing and update both this table and the header file.
+
+## 17.3 Hardware Variant String
+
+In `src/esp32_controller_main.cpp`, update the hardware variant reported in
+telemetry and discovery payloads:
+
+```cpp
+cfg.hardware_variant = "ESP32";    →  cfg.hardware_variant = "ESP32-S3";
+```
+
+## 17.4 ESP32-S3 Module Selection
+
+| Module | Flash | PSRAM | Notes |
+|--------|:-----:|:-----:|-------|
+| **ESP32-S3-WROOM-1-N8** (recommended) | 8 MB | None | Preferred — extra flash gives OTA headroom with dual partitions |
+| ESP32-S3-WROOM-1-N4 (minimum) | 4 MB | None | Meets current partition table requirements but tight for future growth |
+
+Do not select a PSRAM variant (N4R2, N8R8, etc.) — the controller firmware does
+not use PSRAM and the additional pins/routing are unnecessary.
 
 ------------------------------------------------------------------------
 

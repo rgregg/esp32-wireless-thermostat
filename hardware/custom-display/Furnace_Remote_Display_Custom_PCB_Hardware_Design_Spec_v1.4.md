@@ -182,7 +182,7 @@ In addition to matching GPIO assignments, the custom PCB **MUST use the same dis
   - I²C bus pins: SDA=GPIO19, SCL=GPIO20 (already required by pin map) citeturn2view0
   - Reset pin: **GPIO38** (already required by pin map) citeturn2view0
 - Interrupt behavior:
-  - Reference behavior uses polling (interrupt pin not connected by default). Preserve this by default. Note: GPIO 18 (reference INT strap target) is now used for sensor I²C SDA — if touch INT is desired, assign a different GPIO.
+  - Reference behavior uses polling (interrupt pin not connected by default). Preserve this by default. Note: GPIO 18 (reference INT strap target) is now used for sensor I²C SDA — if touch INT is desired, route to **GPIO 22** (unallocated, no strapping concern on S3).
 
 #### 9.0.3 Procurement / BOM Control (Required)
 Hardware engineering must treat the following as **locked compatibility items**:
@@ -259,7 +259,7 @@ The reference board uses a capacitive touch controller (commonly GT911) on an FP
 | SDA | GPIO19 |
 | SCL | GPIO20 |
 | RST | GPIO38 |
-| INT | **Not connected by default** (“TP-INT” test point, marked open). Optional strap to GPIO18. |
+| INT | **Not connected by default** (“TP-INT” test point, marked open). Optional strap to **GPIO 22**. |
 | VDD | 3.3V (or panel-specified) |
 | GND | GND |
 
@@ -267,7 +267,7 @@ The reference board uses a capacitive touch controller (commonly GT911) on an FP
 - Wire touch I²C and RST exactly as above.
 - For INT behavior:
   - Provide the same default as reference (INT not populated/connected), **AND**
-  - The reference board documents an optional strap to connect INT to GPIO18. However, **GPIO 18 is now used for the sensor I²C SDA bus** (see Section 9.4). If interrupt-driven touch is desired, route INT to a different available GPIO instead.
+  - The reference board documents an optional strap to connect INT to GPIO18. However, **GPIO 18 is now used for the sensor I²C SDA bus** (see Section 9.4). If interrupt-driven touch is desired, route INT to **GPIO 22** (unallocated, no S3 strapping function).
 
 ### 9.4 I²C Bus Summary
 
