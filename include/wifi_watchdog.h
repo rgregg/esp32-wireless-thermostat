@@ -168,7 +168,10 @@ static void handle_ping_result(uint32_t now_ms) {
 
 } // namespace wifi_watchdog
 
-inline void wifi_watchdog_tick(uint32_t now_ms) {
+// connectivity_proven: pass true when the application layer (e.g. MQTT) is
+// confirmed working — this proves WiFi is healthy, so skip the gateway ping
+// and reset any failure state.  Only resort to ICMP when the app layer is down.
+inline void wifi_watchdog_tick(uint32_t now_ms, bool connectivity_proven = false) {
     using namespace wifi_watchdog;
 
     if (WiFi.status() != WL_CONNECTED) {
@@ -183,6 +186,23 @@ inline void wifi_watchdog_tick(uint32_t now_ms) {
         // Keep first_failure_ms intact when we initiated the disconnect,
         // so the reboot threshold can still be reached.
         g_state.last_ping_ms = now_ms;
+        return;
+    }
+
+    // If the application layer confirms connectivity (e.g. MQTT is connected),
+    // WiFi is provably healthy — no need to ping the gateway.
+    // Clear any accumulated failure state so a brief MQTT drop doesn't
+    // immediately count against the reboot threshold when it reconnects.
+    if (connectivity_proven) {
+        if (g_state.ping_in_flight || g_state.ping_handle) {
+            cleanup_session();
+        }
+        g_state.failing = false;
+        g_state.reconnect_attempted = false;
+        g_state.reconnect_count = 0;
+        g_state.watchdog_disconnected = false;
+        g_state.last_success_ms = now_ms;
+        g_state.last_ping_ms = now_ms;  // Don't ping immediately after MQTT drops
         return;
     }
 
