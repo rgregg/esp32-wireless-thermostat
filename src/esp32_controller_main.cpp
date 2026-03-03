@@ -88,6 +88,13 @@ static bool g_ctrl_weather_coords_valid = false;  // guarded by g_ctrl_weather_m
 static SemaphoreHandle_t g_ctrl_weather_mutex = nullptr;
 static TaskHandle_t g_ctrl_weather_task_handle = nullptr;
 static uint32_t g_ctrl_weather_last_applied_ms = 0;
+// Updated by the weather task at the start of each iteration. Monitored by
+// the main loop to detect a wedged TLS/SSL connection that ignores the timeout.
+static volatile uint32_t g_ctrl_weather_task_heartbeat_ms = 0;
+// Max time allowed between task heartbeats: two full poll periods + both HTTP
+// timeouts. If this elapses the task is considered wedged and is restarted.
+constexpr uint32_t kCtrlWeatherTaskWatchdogMs =
+    2 * kCtrlWeatherPollMs + 2 * kCtrlHttpTimeoutMs;
 bool g_ctrl_wifi_provisioning_started = false;
 bool g_ctrl_wifi_has_attempted_stored_connect = false;
 uint32_t g_ctrl_first_wifi_attempt_ms = 0;
@@ -608,8 +615,13 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, const char *api_key,
                                                 icon_out);
 }
 
+static void ctrl_weather_task_start();        // forward declaration
+void ctrl_audit(const char *fmt, ...);        // forward declaration
+
 static void ctrl_weather_task(void *) {
   for (;;) {
+    g_ctrl_weather_task_heartbeat_ms = millis();
+
     // Snapshot config strings under mutex; retry every 5s until ready.
     std::string api_key, zip_raw;
     for (;;) {
@@ -663,7 +675,32 @@ static void ctrl_weather_task(void *) {
   }
 }
 
-void ctrl_poll_weather(uint32_t /*now_ms*/) {
+static void ctrl_weather_task_start() {
+  g_ctrl_weather_task_heartbeat_ms = millis();
+  const BaseType_t ok =
+      xTaskCreatePinnedToCore(ctrl_weather_task, "ctrl_weather", 8192,
+                              nullptr, 1, &g_ctrl_weather_task_handle, 0);
+  if (ok != pdPASS) {
+    ctrl_audit("ctrl_weather: task create failed, weather disabled");
+    g_ctrl_weather_task_handle = nullptr;
+  }
+}
+
+void ctrl_poll_weather(uint32_t now_ms) {
+  // Watchdog: if the task heartbeat has been stale for too long, the task is
+  // likely wedged on a hung TLS/SSL call that ignored the HTTP timeout. Kill
+  // and restart it.
+  if (g_ctrl_weather_task_handle != nullptr &&
+      g_ctrl_weather_task_heartbeat_ms != 0 &&
+      static_cast<uint32_t>(now_ms - g_ctrl_weather_task_heartbeat_ms) >
+          kCtrlWeatherTaskWatchdogMs) {
+    ctrl_audit("ctrl_weather: task wedged, restarting");
+    vTaskDelete(g_ctrl_weather_task_handle);
+    g_ctrl_weather_task_handle = nullptr;
+    // Release the mutex if the task died holding it
+    if (g_ctrl_weather_mutex) xSemaphoreGive(g_ctrl_weather_mutex);
+    ctrl_weather_task_start();
+  }
   if (!g_ctrl_weather_pending.ready.load(std::memory_order_acquire) ||
       g_controller == nullptr) return;
   const float temp_c = g_ctrl_weather_pending.temp_c;
@@ -1959,12 +1996,7 @@ void setup() {
   if (!g_ctrl_weather_mutex) {
     ctrl_audit("ctrl_weather: mutex alloc failed, weather disabled");
   } else {
-    const BaseType_t task_ok =
-        xTaskCreatePinnedToCore(ctrl_weather_task, "ctrl_weather", 8192,
-                                nullptr, 1, &g_ctrl_weather_task_handle, 0);
-    if (task_ok != pdPASS) {
-      ctrl_audit("ctrl_weather: task create failed, weather disabled");
-    }
+    ctrl_weather_task_start();
   }
 }
 
