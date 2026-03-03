@@ -623,8 +623,11 @@ static void ctrl_weather_task(void *) {
     g_ctrl_weather_task_heartbeat_ms = millis();
 
     // Snapshot config strings under mutex; retry every 5s until ready.
+    // Update heartbeat inside this loop so the watchdog doesn't fire while
+    // we're legitimately waiting for WiFi or config to become available.
     std::string api_key, zip_raw;
     for (;;) {
+      g_ctrl_weather_task_heartbeat_ms = millis();
       if (g_ctrl_weather_mutex &&
           xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         api_key  = g_cfg_ctrl_pirateweather_api_key.c_str();
@@ -694,12 +697,11 @@ void ctrl_poll_weather(uint32_t now_ms) {
       g_ctrl_weather_task_heartbeat_ms != 0 &&
       static_cast<uint32_t>(now_ms - g_ctrl_weather_task_heartbeat_ms) >
           kCtrlWeatherTaskWatchdogMs) {
-    ctrl_audit("ctrl_weather: task wedged, restarting");
-    vTaskDelete(g_ctrl_weather_task_handle);
-    g_ctrl_weather_task_handle = nullptr;
-    // Release the mutex if the task died holding it
-    if (g_ctrl_weather_mutex) xSemaphoreGive(g_ctrl_weather_mutex);
-    ctrl_weather_task_start();
+    // Forcibly killing the task via vTaskDelete leaks C++ stack objects
+    // (HTTPClient, WiFiClientSecure) since their destructors won't run.
+    // Rebooting is the only safe recovery from a hung TLS call.
+    ctrl_audit("ctrl_weather: task wedged, rebooting to recover");
+    esp_restart();
   }
   if (!g_ctrl_weather_pending.ready.load(std::memory_order_acquire) ||
       g_controller == nullptr) return;
@@ -1819,7 +1821,8 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   if (!subs_ok) {
     ctrl_audit("mqtt_subscribe_failed: disconnecting to retry");
     g_ctrl_mqtt.disconnect();
-    g_ctrl_last_mqtt_attempt_ms = 0;
+    // Leave g_ctrl_last_mqtt_attempt_ms as-is so kCtrlNetworkRetryMs
+    // backoff is enforced; resetting to 0 would cause rapid reconnect storms.
     return;
   }
   ctrl_publish_discovery();
