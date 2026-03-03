@@ -72,7 +72,17 @@ constexpr uint32_t kCtrlMqttPublishMs = 10000;
 constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kCtrlHttpTimeoutMs = 8000;
-uint32_t g_ctrl_last_weather_poll_ms = 0;
+struct CtrlWeatherResult {
+  float temp_c;
+  thermostat::WeatherIcon icon;
+  volatile bool ready;
+};
+static CtrlWeatherResult g_ctrl_weather_pending = {};
+static float g_ctrl_weather_lat = 0.0f;
+static float g_ctrl_weather_lon = 0.0f;
+static volatile bool g_ctrl_weather_coords_valid = false;
+static TaskHandle_t g_ctrl_weather_task_handle = nullptr;
+static uint32_t g_ctrl_weather_last_applied_ms = 0;
 bool g_ctrl_wifi_provisioning_started = false;
 bool g_ctrl_wifi_has_attempted_stored_connect = false;
 uint32_t g_ctrl_first_wifi_attempt_ms = 0;
@@ -415,11 +425,13 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "pirateweather_api_key") {
     g_cfg_ctrl_pirateweather_api_key = value;
     g_ctrl_cfg.putString("pw_key", value);
-    g_ctrl_last_weather_poll_ms = 0;
+    g_ctrl_weather_coords_valid = false;
+    if (g_ctrl_weather_task_handle) xTaskNotifyGive(g_ctrl_weather_task_handle);
   } else if (key == "pirateweather_zip") {
     g_cfg_ctrl_pirateweather_zip = value;
     g_ctrl_cfg.putString("pw_zip", value);
-    g_ctrl_last_weather_poll_ms = 0;
+    g_ctrl_weather_coords_valid = false;
+    if (g_ctrl_weather_task_handle) xTaskNotifyGive(g_ctrl_weather_task_handle);
   } else if (key == "temperature_unit") {
     g_ctrl_temp_unit_f = (value == "f" || value == "fahrenheit");
     g_ctrl_cfg.putBool("temp_u_f", g_ctrl_temp_unit_f);
@@ -581,39 +593,50 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
                                                 icon_out);
 }
 
-void ctrl_poll_weather(uint32_t now_ms) {
-  if (WiFi.status() != WL_CONNECTED || g_controller == nullptr) return;
-  if (g_cfg_ctrl_pirateweather_api_key.length() == 0 ||
-      g_cfg_ctrl_pirateweather_zip.length() == 0) {
-    return;
+static void ctrl_weather_task(void *) {
+  for (;;) {
+    while (WiFi.status() != WL_CONNECTED ||
+           g_cfg_ctrl_pirateweather_api_key.length() == 0 ||
+           g_cfg_ctrl_pirateweather_zip.length() == 0) {
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+    }
+    if (!g_ctrl_weather_coords_valid) {
+      const std::string zip = pirateweather::normalize_zip(
+          g_cfg_ctrl_pirateweather_zip.c_str());
+      float lat = 0.0f, lon = 0.0f;
+      if (!zip.empty() && ctrl_fetch_zip_coordinates(zip.c_str(), &lat, &lon)) {
+        g_ctrl_weather_lat = lat;
+        g_ctrl_weather_lon = lon;
+        g_ctrl_weather_coords_valid = true;
+      }
+    }
+    if (g_ctrl_weather_coords_valid) {
+      float temp_c = 0.0f;
+      thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
+      if (ctrl_fetch_pirateweather_current(g_ctrl_weather_lat, g_ctrl_weather_lon,
+                                           &temp_c, &icon)) {
+        g_ctrl_weather_pending.temp_c = temp_c;
+        g_ctrl_weather_pending.icon   = icon;
+        g_ctrl_weather_pending.ready  = true;
+      }
+    }
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kCtrlWeatherPollMs));
   }
-  if (g_ctrl_last_weather_poll_ms != 0 &&
-      (now_ms - g_ctrl_last_weather_poll_ms) < kCtrlWeatherPollMs) {
-    return;
-  }
-  g_ctrl_last_weather_poll_ms = now_ms;
+}
 
-  const std::string zip = pirateweather::normalize_zip(
-      g_cfg_ctrl_pirateweather_zip.c_str());
-  if (zip.empty()) return;
+void ctrl_poll_weather(uint32_t /*now_ms*/) {
+  if (!g_ctrl_weather_pending.ready || g_controller == nullptr) return;
+  const float temp_c = g_ctrl_weather_pending.temp_c;
+  const thermostat::WeatherIcon icon = g_ctrl_weather_pending.icon;
+  g_ctrl_weather_pending.ready = false;
+  g_ctrl_weather_last_applied_ms = millis();
 
-  float lat = 0.0f, lon = 0.0f;
-  if (!ctrl_fetch_zip_coordinates(zip.c_str(), &lat, &lon)) return;
+  g_controller->app().set_outdoor_weather(temp_c, icon);
+  g_controller->transport().publish_weather(temp_c, icon);
 
-  float outdoor_temp_c = 0.0f;
-  thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
-  if (!ctrl_fetch_pirateweather_current(lat, lon, &outdoor_temp_c, &icon)) return;
-
-  // Store in app for MQTT publishing
-  g_controller->app().set_outdoor_weather(outdoor_temp_c, icon);
-
-  // Send to all connected displays via ESP-NOW
-  g_controller->transport().publish_weather(outdoor_temp_c, icon);
-
-  // Publish to MQTT
   if (g_ctrl_mqtt.connected()) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "%.1f", outdoor_temp_c);
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(temp_c));
     g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
     g_ctrl_mqtt.publish(ctrl_topic_for("state/weather_condition").c_str(),
                         thermostat::weather_icon_display_text(icon), true);
@@ -1129,6 +1152,49 @@ void ctrl_web_handle_root() {
 
   // ── Weather tab ──
   tab_begin(html, "weather");
+
+  // Current conditions card (static, rendered on page load)
+  {
+    const uint32_t now_ms = millis();
+    card_begin(html, "Current Conditions");
+    status_grid_begin(html);
+    status_section(html, "Fetched Data");
+    if (g_controller != nullptr && g_controller->app().has_outdoor_weather()) {
+      char temp_buf[16];
+      snprintf(temp_buf, sizeof(temp_buf), "%.1f \xc2\xb0""C",
+               static_cast<double>(g_controller->app().outdoor_temp_c()));
+      status_item(html, "Temperature", "weather_temp_c", temp_buf);
+      status_item(html, "Condition", "weather_condition",
+                  thermostat::weather_icon_display_text(g_controller->app().outdoor_icon()));
+    } else {
+      status_item(html, "Temperature", "weather_temp_c", "No data yet");
+      status_item(html, "Condition", "weather_condition", "No data yet");
+    }
+    if (g_ctrl_weather_last_applied_ms > 0) {
+      const uint32_t ago_s = (now_ms - g_ctrl_weather_last_applied_ms) / 1000UL;
+      char age_buf[24];
+      if (ago_s < 60) snprintf(age_buf, sizeof(age_buf), "%lus ago", static_cast<unsigned long>(ago_s));
+      else snprintf(age_buf, sizeof(age_buf), "%lum %lus ago",
+                    static_cast<unsigned long>(ago_s / 60),
+                    static_cast<unsigned long>(ago_s % 60));
+      status_item(html, "Last Fetched", "weather_last_fetch", age_buf);
+    } else {
+      status_item(html, "Last Fetched", "weather_last_fetch", "Never");
+    }
+    status_section(html, "Geocode Cache");
+    status_item(html, "Coords Valid", "weather_coords_valid",
+                g_ctrl_weather_coords_valid ? "Yes" : "No");
+    if (g_ctrl_weather_coords_valid) {
+      char lat_buf[16], lon_buf[16];
+      snprintf(lat_buf, sizeof(lat_buf), "%.4f", static_cast<double>(g_ctrl_weather_lat));
+      snprintf(lon_buf, sizeof(lon_buf), "%.4f", static_cast<double>(g_ctrl_weather_lon));
+      status_item(html, "Latitude", "weather_lat", lat_buf);
+      status_item(html, "Longitude", "weather_lon", lon_buf);
+    }
+    status_grid_end(html);
+    card_end(html);
+  }
+
   card_begin(html, "PirateWeather");
   form_begin(html);
   password_field(html, "API Key", "pirateweather_api_key",
@@ -1832,6 +1898,8 @@ void setup() {
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
   ota_rollback_begin();
+  xTaskCreatePinnedToCore(ctrl_weather_task, "ctrl_weather", 8192,
+                          nullptr, 1, &g_ctrl_weather_task_handle, 0);
 }
 
 void loop() {
