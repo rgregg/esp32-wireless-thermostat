@@ -716,7 +716,8 @@ void poll_weather(uint32_t now_ms) {
     g_have_weather_data = false;
     return;
   }
-  g_runtime->set_last_controller_weather_ms(now_ms);
+  if (g_runtime->last_controller_weather_ms() == 0)
+    g_runtime->set_last_controller_weather_ms(now_ms);
   g_have_weather_data = true;
 }
 

@@ -18,6 +18,7 @@
 
 #if defined(ARDUINO)
 #include <Arduino.h>
+#include <atomic>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
@@ -73,14 +74,15 @@ constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kCtrlHttpTimeoutMs = 8000;
 struct CtrlWeatherResult {
-  float temp_c;
-  thermostat::WeatherIcon icon;
-  volatile bool ready;
+  float temp_c = 0.0f;
+  thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
+  std::atomic<bool> ready{false};
 };
-static CtrlWeatherResult g_ctrl_weather_pending = {};
+static CtrlWeatherResult g_ctrl_weather_pending;
 static float g_ctrl_weather_lat = 0.0f;
 static float g_ctrl_weather_lon = 0.0f;
-static volatile bool g_ctrl_weather_coords_valid = false;
+static bool g_ctrl_weather_coords_valid = false;  // guarded by g_ctrl_weather_mutex
+static SemaphoreHandle_t g_ctrl_weather_mutex = nullptr;
 static TaskHandle_t g_ctrl_weather_task_handle = nullptr;
 static uint32_t g_ctrl_weather_last_applied_ms = 0;
 bool g_ctrl_wifi_provisioning_started = false;
@@ -425,12 +427,20 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "pirateweather_api_key") {
     g_cfg_ctrl_pirateweather_api_key = value;
     g_ctrl_cfg.putString("pw_key", value);
-    g_ctrl_weather_coords_valid = false;
+    if (g_ctrl_weather_mutex &&
+        xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      g_ctrl_weather_coords_valid = false;
+      xSemaphoreGive(g_ctrl_weather_mutex);
+    }
     if (g_ctrl_weather_task_handle) xTaskNotifyGive(g_ctrl_weather_task_handle);
   } else if (key == "pirateweather_zip") {
     g_cfg_ctrl_pirateweather_zip = value;
     g_ctrl_cfg.putString("pw_zip", value);
-    g_ctrl_weather_coords_valid = false;
+    if (g_ctrl_weather_mutex &&
+        xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      g_ctrl_weather_coords_valid = false;
+      xSemaphoreGive(g_ctrl_weather_mutex);
+    }
     if (g_ctrl_weather_task_handle) xTaskNotifyGive(g_ctrl_weather_task_handle);
   } else if (key == "temperature_unit") {
     g_ctrl_temp_unit_f = (value == "f" || value == "fahrenheit");
@@ -572,17 +582,17 @@ bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out)
   return pirateweather::parse_geocode_response(body.c_str(), lat_out, lon_out);
 }
 
-bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
+bool ctrl_fetch_pirateweather_current(float lat, float lon, const char *api_key,
+                                       float *temp_c_out,
                                        thermostat::WeatherIcon *icon_out) {
   if (temp_c_out == nullptr || icon_out == nullptr ||
-      g_cfg_ctrl_pirateweather_api_key.length() == 0) {
+      api_key == nullptr || api_key[0] == '\0') {
     return false;
   }
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  const std::string url = pirateweather::forecast_url(
-      g_cfg_ctrl_pirateweather_api_key.c_str(), lat, lon);
+  const std::string url = pirateweather::forecast_url(api_key, lat, lon);
   if (!http.begin(client, url.c_str())) return false;
   http.setTimeout(kCtrlHttpTimeoutMs);
   const int status = http.GET();
@@ -595,29 +605,53 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, float *temp_c_out,
 
 static void ctrl_weather_task(void *) {
   for (;;) {
-    while (WiFi.status() != WL_CONNECTED ||
-           g_cfg_ctrl_pirateweather_api_key.length() == 0 ||
-           g_cfg_ctrl_pirateweather_zip.length() == 0) {
+    // Snapshot config strings under mutex; retry every 5s until ready.
+    std::string api_key, zip_raw;
+    for (;;) {
+      if (g_ctrl_weather_mutex &&
+          xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        api_key  = g_cfg_ctrl_pirateweather_api_key.c_str();
+        zip_raw  = g_cfg_ctrl_pirateweather_zip.c_str();
+        xSemaphoreGive(g_ctrl_weather_mutex);
+      }
+      if (WiFi.status() == WL_CONNECTED && !api_key.empty() && !zip_raw.empty()) break;
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
     }
-    if (!g_ctrl_weather_coords_valid) {
-      const std::string zip = pirateweather::normalize_zip(
-          g_cfg_ctrl_pirateweather_zip.c_str());
-      float lat = 0.0f, lon = 0.0f;
-      if (!zip.empty() && ctrl_fetch_zip_coordinates(zip.c_str(), &lat, &lon)) {
-        g_ctrl_weather_lat = lat;
-        g_ctrl_weather_lon = lon;
-        g_ctrl_weather_coords_valid = true;
+
+    // Snapshot coord cache under mutex.
+    bool coords_valid = false;
+    float lat = 0.0f, lon = 0.0f;
+    if (xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      coords_valid = g_ctrl_weather_coords_valid;
+      lat = g_ctrl_weather_lat;
+      lon = g_ctrl_weather_lon;
+      xSemaphoreGive(g_ctrl_weather_mutex);
+    }
+
+    if (!coords_valid) {
+      const std::string zip = pirateweather::normalize_zip(zip_raw.c_str());
+      float new_lat = 0.0f, new_lon = 0.0f;
+      if (!zip.empty() && ctrl_fetch_zip_coordinates(zip.c_str(), &new_lat, &new_lon)) {
+        if (xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          g_ctrl_weather_lat = new_lat;
+          g_ctrl_weather_lon = new_lon;
+          g_ctrl_weather_coords_valid = true;
+          xSemaphoreGive(g_ctrl_weather_mutex);
+        }
+        lat = new_lat;
+        lon = new_lon;
+        coords_valid = true;
       }
     }
-    if (g_ctrl_weather_coords_valid) {
+
+    if (coords_valid) {
       float temp_c = 0.0f;
       thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
-      if (ctrl_fetch_pirateweather_current(g_ctrl_weather_lat, g_ctrl_weather_lon,
-                                           &temp_c, &icon)) {
+      if (ctrl_fetch_pirateweather_current(lat, lon, api_key.c_str(), &temp_c, &icon)) {
         g_ctrl_weather_pending.temp_c = temp_c;
         g_ctrl_weather_pending.icon   = icon;
-        g_ctrl_weather_pending.ready  = true;
+        // Release ordering: ensures temp_c/icon writes are visible before ready is seen true.
+        g_ctrl_weather_pending.ready.store(true, std::memory_order_release);
       }
     }
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kCtrlWeatherPollMs));
@@ -625,10 +659,11 @@ static void ctrl_weather_task(void *) {
 }
 
 void ctrl_poll_weather(uint32_t /*now_ms*/) {
-  if (!g_ctrl_weather_pending.ready || g_controller == nullptr) return;
+  if (!g_ctrl_weather_pending.ready.load(std::memory_order_acquire) ||
+      g_controller == nullptr) return;
   const float temp_c = g_ctrl_weather_pending.temp_c;
   const thermostat::WeatherIcon icon = g_ctrl_weather_pending.icon;
-  g_ctrl_weather_pending.ready = false;
+  g_ctrl_weather_pending.ready.store(false, std::memory_order_relaxed);
   g_ctrl_weather_last_applied_ms = millis();
 
   g_controller->app().set_outdoor_weather(temp_c, icon);
@@ -1182,12 +1217,21 @@ void ctrl_web_handle_root() {
       status_item(html, "Last Fetched", "weather_last_fetch", "Never");
     }
     status_section(html, "Geocode Cache");
+    bool snap_coords_valid = false;
+    float snap_lat = 0.0f, snap_lon = 0.0f;
+    if (g_ctrl_weather_mutex &&
+        xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      snap_coords_valid = g_ctrl_weather_coords_valid;
+      snap_lat = g_ctrl_weather_lat;
+      snap_lon = g_ctrl_weather_lon;
+      xSemaphoreGive(g_ctrl_weather_mutex);
+    }
     status_item(html, "Coords Valid", "weather_coords_valid",
-                g_ctrl_weather_coords_valid ? "Yes" : "No");
-    if (g_ctrl_weather_coords_valid) {
+                snap_coords_valid ? "Yes" : "No");
+    if (snap_coords_valid) {
       char lat_buf[16], lon_buf[16];
-      snprintf(lat_buf, sizeof(lat_buf), "%.4f", static_cast<double>(g_ctrl_weather_lat));
-      snprintf(lon_buf, sizeof(lon_buf), "%.4f", static_cast<double>(g_ctrl_weather_lon));
+      snprintf(lat_buf, sizeof(lat_buf), "%.4f", static_cast<double>(snap_lat));
+      snprintf(lon_buf, sizeof(lon_buf), "%.4f", static_cast<double>(snap_lon));
       status_item(html, "Latitude", "weather_lat", lat_buf);
       status_item(html, "Longitude", "weather_lon", lon_buf);
     }
@@ -1898,8 +1942,16 @@ void setup() {
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
   ota_rollback_begin();
-  xTaskCreatePinnedToCore(ctrl_weather_task, "ctrl_weather", 8192,
-                          nullptr, 1, &g_ctrl_weather_task_handle, 0);
+  g_ctrl_weather_mutex = xSemaphoreCreateMutex();
+  if (!g_ctrl_weather_mutex) {
+    Serial.println("ctrl_weather: failed to create mutex");
+  }
+  const BaseType_t task_ok =
+      xTaskCreatePinnedToCore(ctrl_weather_task, "ctrl_weather", 8192,
+                              nullptr, 1, &g_ctrl_weather_task_handle, 0);
+  if (task_ok != pdPASS) {
+    Serial.println("ctrl_weather: failed to create task");
+  }
 }
 
 void loop() {
