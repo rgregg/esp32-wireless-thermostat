@@ -73,6 +73,9 @@ constexpr uint32_t kCtrlMqttPublishMs = 10000;
 constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kCtrlHttpTimeoutMs = 8000;
+// Reboot if both MQTT and ESP-NOW have been silent for this long.
+// Covers wedged network-stack states that the WiFi watchdog ping doesn't catch.
+constexpr uint32_t kCtrlIsolationRebootMs = 15UL * 60UL * 1000UL;
 struct CtrlWeatherResult {
   float temp_c = 0.0f;
   thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
@@ -1983,6 +1986,24 @@ void loop() {
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
     ctrl_poll_weather(now);
+
+    // Isolation reboot: if both MQTT and ESP-NOW have been silent for
+    // kCtrlIsolationRebootMs, the network stack is likely wedged. The WiFi
+    // watchdog handles outright WiFi loss; this catches the case where WiFi
+    // appears up (ping passes) but TCP/MQTT is stuck and the display is also
+    // unreachable. Guard with now > kCtrlIsolationRebootMs so we don't fire
+    // during the first 15 minutes of boot (covers the OTA rollback window too).
+    if (now > kCtrlIsolationRebootMs) {
+      const uint32_t hb_ms = g_controller->app().runtime().heartbeat_last_seen_ms();
+      const bool espnow_stale =
+          (hb_ms == 0) ||
+          (static_cast<uint32_t>(now - hb_ms) > kCtrlIsolationRebootMs);
+      if (!g_ctrl_mqtt.connected() && espnow_stale) {
+        ctrl_audit("isolation_reboot: no MQTT and no ESP-NOW heartbeat for >15m");
+        ESP.restart();
+      }
+    }
+
     if (g_ctrl_mqtt.connected()) {
       if (!g_ctrl_have_lockout || g_ctrl_last_lockout != snap.hvac_lockout ||
           (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
