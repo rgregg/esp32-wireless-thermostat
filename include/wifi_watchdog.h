@@ -6,6 +6,7 @@
 // unreachable for an extended period, forces WiFi reconnect or full reboot.
 
 #include <WiFi.h>
+#include <atomic>
 #include <esp_system.h>
 #include "ping/ping_sock.h"
 #include "lwip/inet.h"
@@ -29,8 +30,8 @@ struct State {
     bool     reconnect_attempted   = false;
     bool     watchdog_disconnected = false;  // True when WE initiated disconnect
     esp_ping_handle_t ping_handle  = nullptr;
-    volatile bool ping_in_flight   = false;
-    volatile bool ping_got_reply   = false;
+    std::atomic<bool> ping_in_flight{false};
+    std::atomic<bool> ping_got_reply{false};
 };
 
 static State g_state;
@@ -219,13 +220,13 @@ inline void wifi_watchdog_tick(uint32_t now_ms, bool connectivity_proven = false
         if (now_ms - g_state.ping_start_ms >= PING_STALE_MS) {
             log_state("ping_stale_timeout", now_ms);
             cleanup_session();
-            // Treat as failure — fall through to handle_ping_result path
-        } else {
-            return; // Still waiting for callback
+            handle_ping_result(now_ms);  // treat stale ping as failure
+            return;
         }
+        return; // Still waiting for callback
     }
 
-    // Process completed ping result
+    // Process completed ping result (callback cleared ping_in_flight, handle still set)
     if (g_state.ping_handle) {
         handle_ping_result(now_ms);
         return;

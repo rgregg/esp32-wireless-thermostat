@@ -155,10 +155,11 @@ function submitForm(f){
   return false;
 }
 function submitWithCheckboxes(form){
+  form.querySelectorAll('input[type=hidden][data-cb]').forEach(function(h){h.remove();});
   form.querySelectorAll('input[type=checkbox]').forEach(function(cb){
     if(!cb.checked){
       var h=document.createElement('input');
-      h.type='hidden';h.name=cb.name;h.value='0';
+      h.type='hidden';h.name=cb.name;h.value='0';h.setAttribute('data-cb','1');
       form.appendChild(h);
     }
   });
@@ -167,6 +168,7 @@ function submitWithCheckboxes(form){
 function submitDeviceAdd(form){
   var mac=(form.querySelector('[name="add_mac"]')||{value:''}).value.trim();
   var role=(form.querySelector('[name="add_role"]')||{value:''}).value;
+  form.querySelectorAll('input[name="device_add"]').forEach(function(h){h.remove();});
   var h=document.createElement('input');
   h.type='hidden';h.name='device_add';
   h.value=role?(mac+'='+role):mac;

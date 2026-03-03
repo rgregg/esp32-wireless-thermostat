@@ -542,6 +542,7 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg.putString("mqtt_base", value);
     g_cfg_mqtt_reconfigure_required = true;
     g_mqtt_discovery_sent = false;
+    g_packed_cmd_topic = "";
   } else if (key == "discovery_prefix") {
     g_cfg_discovery_prefix = value;
     g_cfg.putString("disc_pref", value);
@@ -1836,7 +1837,7 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
         g_mqtt_ctrl_last_update_ms = now;
       }
     } else if (topic_str == controller_topic_for("state/furnace_state")) {
-      g_mqtt_ctrl_state = static_cast<FurnaceStateCode>(atoi(value));
+      g_mqtt_ctrl_state = mqtt_payload::str_to_furnace_state(value);
       g_mqtt_ctrl_last_update_ms = now;
     } else if (topic_str == controller_topic_for("state/lockout")) {
       g_mqtt_ctrl_lockout = mqtt_payload::parse_bool(value);
