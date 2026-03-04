@@ -2,6 +2,7 @@
 
 #include "thermostat/esp32s3_thermostat_firmware.h"
 
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -40,6 +41,7 @@
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -71,6 +73,7 @@ constexpr uint32_t kDisplayInitSettleMs = 150;
 constexpr uint32_t kBacklightEnableDelayMs = 400;
 constexpr uint32_t kRebootDelayMs = 1000;
 constexpr uint32_t kRebootPanelOffDelayMs = 200;
+constexpr uint32_t kIsolationRebootMs = 15UL * 60UL * 1000UL;
 
 #ifndef THERMOSTAT_WIFI_SSID
 #define THERMOSTAT_WIFI_SSID ""
@@ -267,7 +270,7 @@ uint32_t g_last_mqtt_attempt_ms = 0;
 uint32_t g_last_mqtt_publish_ms = 0;
 uint32_t g_last_mqtt_command_ms = 0;
 bool g_wifi_has_attempted_stored_connect = false;
-bool g_wifi_provisioning_started = false;
+std::atomic<bool> g_wifi_provisioning_started{false};
 float g_remote_indoor_temp_c = NAN;
 float g_remote_indoor_humidity = NAN;
 float g_outdoor_temp_c = 6.0f;
@@ -308,6 +311,9 @@ bool g_reboot_requested = false;
 uint32_t g_reboot_at_ms = 0;
 bool g_backlight_enabled = false;
 uint32_t g_backlight_enable_at_ms = 0;
+bool g_sensors_initialized = false;  // set true at end of init_sensors()
+bool g_ui_ready = false;             // set true at end of create_ui()
+uint8_t g_sensor_fail_count = 0;     // consecutive sensor read failures
 
 // Shadow state for controller telemetry received via MQTT
 FurnaceStateCode g_mqtt_ctrl_state = FurnaceStateCode::Error;
@@ -481,72 +487,83 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
   if (!g_cfg_ready || raw_value == nullptr) return false;
   const String value(raw_value);
   bool known = true;
+#define NVS_PUT_STR(ns_key, val) \
+  do { if (g_cfg.putString((ns_key), (val)) == 0) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
+#define NVS_PUT_UINT(ns_key, val) \
+  do { if (g_cfg.putUInt((ns_key), (val)) == 0) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
+#define NVS_PUT_UCHAR(ns_key, val) \
+  do { if (g_cfg.putUChar((ns_key), (val)) == 0) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
+#define NVS_PUT_FLOAT(ns_key, val) \
+  do { if (g_cfg.putFloat((ns_key), (val)) == 0) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
+#define NVS_PUT_BOOL(ns_key, val) \
+  do { if (g_cfg.putBool((ns_key), (val)) == 0) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
+
   if (key == "wifi_ssid") {
     g_cfg_wifi_ssid = value;
-    g_cfg.putString("wifi_ssid", value);
+    NVS_PUT_STR("wifi_ssid", value);
     g_cfg_wifi_reconnect_required = true;
   } else if (key == "wifi_password") {
     g_cfg_wifi_password = value;
-    g_cfg.putString("wifi_pwd", value);
+    NVS_PUT_STR("wifi_pwd", value);
     g_cfg_wifi_reconnect_required = true;
   } else if (key == "mqtt_host") {
     g_cfg_mqtt_host = value;
-    g_cfg.putString("mqtt_host", value);
+    NVS_PUT_STR("mqtt_host", value);
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "mqtt_port") {
     const long parsed = atol(raw_value);
     if (parsed < 1 || parsed > 65535) return false;
     g_cfg_mqtt_port = static_cast<uint16_t>(parsed);
-    g_cfg.putUInt("mqtt_port", g_cfg_mqtt_port);
+    NVS_PUT_UINT("mqtt_port", g_cfg_mqtt_port);
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "mqtt_user") {
     g_cfg_mqtt_user = value;
-    g_cfg.putString("mqtt_user", value);
+    NVS_PUT_STR("mqtt_user", value);
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "mqtt_password") {
     g_cfg_mqtt_password = value;
-    g_cfg.putString("mqtt_pwd", value);
+    NVS_PUT_STR("mqtt_pwd", value);
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "mqtt_client_id") {
     g_cfg_mqtt_client_id = value;
-    g_cfg.putString("mqtt_cid", value);
+    NVS_PUT_STR("mqtt_cid", value);
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "mqtt_base_topic") {
     g_cfg_mqtt_base_topic = value;
-    g_cfg.putString("mqtt_base", value);
+    NVS_PUT_STR("mqtt_base", value);
     g_cfg_mqtt_reconfigure_required = true;
     g_mqtt_discovery_sent = false;
   } else if (key == "discovery_prefix") {
     g_cfg_discovery_prefix = value;
-    g_cfg.putString("disc_pref", value);
+    NVS_PUT_STR("disc_pref", value);
     g_mqtt_discovery_sent = false;
   } else if (key == "unique_device_id") {
     g_cfg_unique_device_id = value;
-    g_cfg.putString("shared_id", value);
+    NVS_PUT_STR("shared_id", value);
     g_mqtt_discovery_sent = false;
   } else if (key == "display_timeout_s") {
     long seconds = atol(raw_value);
     if (seconds < 30) seconds = 30;
     if (seconds > 600) seconds = 600;
     g_display_timeout_ms = static_cast<uint32_t>(seconds) * 1000UL;
-    g_cfg.putUInt("disp_to_s", static_cast<uint32_t>(seconds));
+    NVS_PUT_UINT("disp_to_s", static_cast<uint32_t>(seconds));
     g_screen.set_display_timeout_ms(g_display_timeout_ms);
   } else if (key == "backlight_active_pct") {
     g_cfg_backlight_active_pct = clamp_percent(atol(raw_value));
-    g_cfg.putUChar("bl_act", g_cfg_backlight_active_pct);
+    NVS_PUT_UCHAR("bl_act", g_cfg_backlight_active_pct);
   } else if (key == "backlight_screensaver_pct") {
     g_cfg_backlight_screensaver_pct = clamp_percent(atol(raw_value));
-    g_cfg.putUChar("bl_dim", g_cfg_backlight_screensaver_pct);
+    NVS_PUT_UCHAR("bl_dim", g_cfg_backlight_screensaver_pct);
   } else if (key == "temp_comp_c") {
     g_cfg_temp_comp_c = static_cast<float>(atof(raw_value));
-    g_cfg.putFloat("temp_comp", g_cfg_temp_comp_c);
+    NVS_PUT_FLOAT("temp_comp", g_cfg_temp_comp_c);
     if (g_runtime != nullptr) {
       g_runtime->set_local_temperature_compensation_c(g_cfg_temp_comp_c);
     }
     g_last_sensor_poll_ms = 0;  // re-read sensor with new compensation
   } else if (key == "temperature_unit") {
     g_cfg_temp_unit_f = (value == "f" || value == "fahrenheit");
-    g_cfg.putBool("temp_u_f", g_cfg_temp_unit_f);
+    NVS_PUT_BOOL("temp_u_f", g_cfg_temp_unit_f);
     if (g_runtime != nullptr) {
       g_runtime->set_temperature_unit(g_cfg_temp_unit_f ? TemperatureUnit::Fahrenheit
                                                         : TemperatureUnit::Celsius);
@@ -558,32 +575,32 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     }
   } else if (key == "ota_hostname") {
     g_cfg_ota_hostname = value;
-    g_cfg.putString("ota_host", value);
+    NVS_PUT_STR("ota_host", value);
   } else if (key == "ota_password") {
     g_cfg_ota_password = value;
-    g_cfg.putString("ota_pwd", value);
+    NVS_PUT_STR("ota_pwd", value);
   } else if (key == "espnow_channel") {
     const long parsed = atol(raw_value);
     if (parsed < 1 || parsed > 14) return false;
     g_cfg_espnow_channel = static_cast<uint8_t>(parsed);
-    g_cfg.putUChar("esp_ch", g_cfg_espnow_channel);
+    NVS_PUT_UCHAR("esp_ch", g_cfg_espnow_channel);
     g_cfg_reboot_required = true;
   } else if (key == "espnow_peer_mac") {
     g_cfg_espnow_peer_mac = value;
-    g_cfg.putString("esp_peer", value);
+    NVS_PUT_STR("esp_peer", value);
     g_cfg_reboot_required = true;
   } else if (key == "espnow_lmk") {
     g_cfg_espnow_lmk = value;
-    g_cfg.putString("esp_lmk", value);
+    NVS_PUT_STR("esp_lmk", value);
     g_cfg_reboot_required = true;
   } else if (key == "controller_base_topic") {
     g_cfg_controller_base_topic = value;
-    g_cfg.putString("ctrl_base", value);
+    NVS_PUT_STR("ctrl_base", value);
   } else if (key == "controller_timeout_ms") {
     const long parsed = atol(raw_value);
     if (parsed < 1000 || parsed > 600000) return false;
     g_cfg_controller_timeout_ms = static_cast<uint32_t>(parsed);
-    g_cfg.putUInt("ctrl_to", g_cfg_controller_timeout_ms);
+    NVS_PUT_UINT("ctrl_to", g_cfg_controller_timeout_ms);
     g_cfg_reboot_required = true;
   } else {
     known = false;
@@ -602,6 +619,12 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
   }
   return true;
 }
+
+#undef NVS_PUT_STR
+#undef NVS_PUT_UINT
+#undef NVS_PUT_UCHAR
+#undef NVS_PUT_FLOAT
+#undef NVS_PUT_BOOL
 
 bool parse_bool_payload(const char *value) {
   return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 || strcmp(value, "on") == 0;
@@ -1879,18 +1902,20 @@ void ensure_mdns_ready() {
 }
 
 void rgb_flush_cb(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
-  if (g_panel != nullptr) {
-    // Drain any stale VSYNC signals so the take below waits for the
-    // VSYNC that happens *after* draw_bitmap queues the buffer swap.
-    xSemaphoreTake(g_flush_ready_sem, 0);
-
-    esp_lcd_rgb_panel_restart(g_panel);
-    esp_lcd_panel_draw_bitmap(g_panel, 0, 0, kDisplayWidth, kDisplayHeight, color_p);
-
-    // Wait for the buffer swap to actually complete at VSYNC before
-    // letting LVGL draw into the next buffer.
-    xSemaphoreTake(g_flush_ready_sem, pdMS_TO_TICKS(100));
+  if (g_panel == nullptr || g_flush_ready_sem == nullptr) {
+    lv_disp_flush_ready(disp_drv);
+    return;
   }
+  // Drain any stale VSYNC signals so the take below waits for the
+  // VSYNC that happens *after* draw_bitmap queues the buffer swap.
+  xSemaphoreTake(g_flush_ready_sem, 0);
+
+  esp_lcd_rgb_panel_restart(g_panel);
+  esp_lcd_panel_draw_bitmap(g_panel, 0, 0, kDisplayWidth, kDisplayHeight, color_p);
+
+  // Wait for the buffer swap to actually complete at VSYNC before
+  // letting LVGL draw into the next buffer.
+  xSemaphoreTake(g_flush_ready_sem, pdMS_TO_TICKS(100));
   lv_disp_flush_ready(disp_drv);
 }
 
@@ -1926,6 +1951,7 @@ void show_page(ThermostatPage page);
 void apply_backlight(bool screensaver_active);
 
 void poll_touch() {
+  if (!g_sensors_initialized) { g_touch.touched = false; return; }
   uint8_t status = 0;
   if (!gt911_read(0x814E, &status, 1)) {
     g_touch.touched = false;
@@ -2028,14 +2054,14 @@ void apply_backlight(bool screensaver_active) {
 }
 
 void refresh_ui() {
-  if (g_runtime == nullptr || g_status_label == nullptr) return;
+  if (g_runtime == nullptr || !g_ui_ready) return;
 
   const uint32_t now = millis();
 
-  lv_label_set_text(g_status_label, g_runtime->status_text(now).c_str());
-  lv_label_set_text(g_indoor_label, g_runtime->indoor_temp_text().c_str());
-  lv_label_set_text(g_humidity_label, g_runtime->indoor_humidity_text().c_str());
-  lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
+  if (g_status_label != nullptr) lv_label_set_text(g_status_label, g_runtime->status_text(now).c_str());
+  if (g_indoor_label != nullptr) lv_label_set_text(g_indoor_label, g_runtime->indoor_temp_text().c_str());
+  if (g_humidity_label != nullptr) lv_label_set_text(g_humidity_label, g_runtime->indoor_humidity_text().c_str());
+  if (g_setpoint_label != nullptr) lv_label_set_text(g_setpoint_label, g_runtime->setpoint_text().c_str());
   // Show/hide outdoor section based on weather data availability
   if (g_outdoor_section != nullptr) {
     if (g_have_weather_data) {
@@ -2075,112 +2101,90 @@ void refresh_ui() {
   const uint32_t since_mqtt_ms = last_mqtt_ms > 0 ? (now - last_mqtt_ms) : 0;
   const uint32_t since_ctrl_ms = last_ctrl_hb_ms > 0 ? (now - last_ctrl_hb_ms) : 0;
 
-  String system_text;
-  system_text.reserve(256);
-  system_text += "fw: ";
-  system_text += THERMOSTAT_FIRMWARE_VERSION;
-  system_text += "\nboot_count: ";
-  system_text += String(g_boot_count);
-  system_text += "\nreset: ";
-  system_text += g_reset_reason;
-  system_text += "\nuptime_s: ";
-  system_text += String(uptime_s);
-  system_text += "\nfree_heap_b: ";
-  system_text += String(static_cast<unsigned long>(esp_get_free_heap_size()));
+  static char system_text[256];
+  snprintf(system_text, sizeof(system_text),
+    "fw: %s\nboot_count: %lu\nreset: %s\nuptime_s: %lu\nfree_heap_b: %lu",
+    THERMOSTAT_FIRMWARE_VERSION,
+    (unsigned long)g_boot_count,
+    g_reset_reason.c_str(),
+    (unsigned long)uptime_s,
+    (unsigned long)esp_get_free_heap_size());
 
-  String wifi_text;
-  wifi_text.reserve(256);
-  wifi_text += "connected: ";
-  wifi_text += wifi_connected ? "yes" : "no";
-  wifi_text += "\nip: ";
-  wifi_text += wifi_connected ? WiFi.localIP().toString() : String("N/A");
-  wifi_text += "\nssid: ";
-  wifi_text += wifi_connected ? WiFi.SSID() : String("N/A");
-  wifi_text += "\nmac: ";
-  wifi_text += WiFi.macAddress();
-  wifi_text += "\nchannel: ";
-  wifi_text += String(wifi_connected ? WiFi.channel() : 0);
-  wifi_text += "\nrssi_dbm: ";
-  wifi_text += String(wifi_connected ? WiFi.RSSI() : 0);
-
-  String mqtt_text;
-  mqtt_text.reserve(300);
-  mqtt_text += "connected: ";
-  mqtt_text += mqtt_connected ? "yes" : "no";
-  mqtt_text += "\nstate: ";
-  mqtt_text += String(g_mqtt.state());
-  mqtt_text += "\nhost: ";
-  mqtt_text += g_cfg_mqtt_host;
-  mqtt_text += ":";
-  mqtt_text += String(g_cfg_mqtt_port);
-  mqtt_text += "\nclient_id: ";
-  mqtt_text += g_cfg_mqtt_client_id;
-  mqtt_text += "\nbase_topic: ";
-  mqtt_text += g_cfg_mqtt_base_topic;
-  mqtt_text += "\nuser: ";
-  mqtt_text += g_cfg_mqtt_user.length() > 0 ? g_cfg_mqtt_user : String("(none)");
-  mqtt_text += "\npassword: ";
-  mqtt_text += g_cfg_mqtt_password.length() > 0 ? "set" : "unset";
-  mqtt_text += "\nlast_cmd_ms: ";
-  mqtt_text += String(last_mqtt_ms);
-  mqtt_text += "\nsince_cmd_ms: ";
-  mqtt_text += String(since_mqtt_ms);
-
-  String controller_text;
-  controller_text.reserve(128);
-  controller_text += "last_hb_ms: ";
-  controller_text += String(last_ctrl_hb_ms);
-  controller_text += "\nsince_hb_ms: ";
-  controller_text += String(since_ctrl_ms);
-
-  String espnow_text;
-  espnow_text.reserve(180);
-  espnow_text += "channel: ";
-  espnow_text += String(g_cfg_espnow_channel);
-  espnow_text += "\npeer_mac: ";
-  espnow_text += g_cfg_espnow_peer_mac;
-  espnow_text += "\ntx_ok: ";
-  espnow_text += String(static_cast<unsigned long>(g_runtime->espnow_send_ok_count()));
-  espnow_text += "\ntx_fail: ";
-  espnow_text += String(static_cast<unsigned long>(g_runtime->espnow_send_fail_count()));
-
-  String config_text;
-  config_text.reserve(220);
-  config_text += "temp_unit: ";
-  config_text += g_cfg_temp_unit_f ? "F" : "C";
-  config_text += "\ntemp_comp_c: ";
-  config_text += String(g_cfg_temp_comp_c, 2);
-  config_text += "\ndisplay_timeout_s: ";
-  config_text += String(g_display_timeout_ms / 1000UL);
-  config_text += "\nbrightness_pct: ";
-  config_text += String(g_cfg_backlight_active_pct);
-  config_text += "\nsaver_pct: ";
-  config_text += String(g_cfg_backlight_screensaver_pct);
-  config_text += "\nreboot_required: ";
-  config_text += g_cfg_reboot_required ? "true" : "false";
-  config_text += "\nreboot_pending: ";
-  config_text += g_reboot_requested ? "true" : "false";
-
-  String errors_text;
-  errors_text.reserve(160);
-  errors_text += "mqtt: ";
-  errors_text += g_last_mqtt_error;
-  errors_text += "\nota: ";
-  errors_text += g_last_ota_error;
-  errors_text += "\nespnow: ";
-  errors_text += g_last_espnow_error;
-
-  if (g_settings_system_label != nullptr) lv_label_set_text(g_settings_system_label, system_text.c_str());
-  if (g_settings_wifi_label != nullptr) lv_label_set_text(g_settings_wifi_label, wifi_text.c_str());
-  if (g_settings_mqtt_label != nullptr) lv_label_set_text(g_settings_mqtt_label, mqtt_text.c_str());
-  if (g_settings_controller_label != nullptr) {
-    lv_label_set_text(g_settings_controller_label, controller_text.c_str());
+  static char wifi_text[256];
+  {
+    char ip_buf[20] = "N/A";
+    char ssid_buf[64] = "N/A";
+    if (wifi_connected) {
+      snprintf(ip_buf, sizeof(ip_buf), "%s", WiFi.localIP().toString().c_str());
+      snprintf(ssid_buf, sizeof(ssid_buf), "%s", WiFi.SSID().c_str());
+    }
+    snprintf(wifi_text, sizeof(wifi_text),
+      "connected: %s\nip: %s\nssid: %s\nmac: %s\nchannel: %d\nrssi_dbm: %d",
+      wifi_connected ? "yes" : "no",
+      ip_buf, ssid_buf,
+      WiFi.macAddress().c_str(),
+      wifi_connected ? WiFi.channel() : 0,
+      wifi_connected ? (int)WiFi.RSSI() : 0);
   }
-  if (g_settings_espnow_label != nullptr) lv_label_set_text(g_settings_espnow_label, espnow_text.c_str());
-  if (g_settings_config_label != nullptr) lv_label_set_text(g_settings_config_label, config_text.c_str());
-  if (g_settings_errors_label != nullptr) lv_label_set_text(g_settings_errors_label, errors_text.c_str());
-  if (g_settings_display_label != nullptr) lv_label_set_text(g_settings_display_label, system_text.c_str());
-  if (g_settings_diag_label != nullptr) lv_label_set_text(g_settings_diag_label, errors_text.c_str());
+
+  static char mqtt_text[300];
+  snprintf(mqtt_text, sizeof(mqtt_text),
+    "connected: %s\nstate: %d\nhost: %s:%u\nclient_id: %s\nbase_topic: %s\nuser: %s\npassword: %s\nlast_cmd_ms: %lu\nsince_cmd_ms: %lu",
+    mqtt_connected ? "yes" : "no",
+    g_mqtt.state(),
+    g_cfg_mqtt_host.c_str(),
+    (unsigned)g_cfg_mqtt_port,
+    g_cfg_mqtt_client_id.c_str(),
+    g_cfg_mqtt_base_topic.c_str(),
+    g_cfg_mqtt_user.length() > 0 ? g_cfg_mqtt_user.c_str() : "(none)",
+    g_cfg_mqtt_password.length() > 0 ? "set" : "unset",
+    (unsigned long)last_mqtt_ms,
+    (unsigned long)since_mqtt_ms);
+
+  static char controller_text[128];
+  snprintf(controller_text, sizeof(controller_text),
+    "last_hb_ms: %lu\nsince_hb_ms: %lu",
+    (unsigned long)last_ctrl_hb_ms,
+    (unsigned long)since_ctrl_ms);
+
+  static char espnow_text[180];
+  snprintf(espnow_text, sizeof(espnow_text),
+    "channel: %u\npeer_mac: %s\ntx_ok: %lu\ntx_fail: %lu",
+    (unsigned)g_cfg_espnow_channel,
+    g_cfg_espnow_peer_mac.c_str(),
+    (unsigned long)g_runtime->espnow_send_ok_count(),
+    (unsigned long)g_runtime->espnow_send_fail_count());
+
+  static char config_text[220];
+  snprintf(config_text, sizeof(config_text),
+    "temp_unit: %s\ntemp_comp_c: %.2f\ndisplay_timeout_s: %lu\nbrightness_pct: %u\nsaver_pct: %u\nreboot_required: %s\nreboot_pending: %s",
+    g_cfg_temp_unit_f ? "F" : "C",
+    (double)g_cfg_temp_comp_c,
+    (unsigned long)(g_display_timeout_ms / 1000UL),
+    (unsigned)g_cfg_backlight_active_pct,
+    (unsigned)g_cfg_backlight_screensaver_pct,
+    g_cfg_reboot_required ? "true" : "false",
+    g_reboot_requested ? "true" : "false");
+
+  static char errors_text[160];
+  snprintf(errors_text, sizeof(errors_text),
+    "mqtt: %s\nota: %s\nespnow: %s\nsensor_fails: %u",
+    g_last_mqtt_error.c_str(),
+    g_last_ota_error.c_str(),
+    g_last_espnow_error.c_str(),
+    (unsigned)g_sensor_fail_count);
+
+  if (g_settings_system_label != nullptr) lv_label_set_text(g_settings_system_label, system_text);
+  if (g_settings_wifi_label != nullptr) lv_label_set_text(g_settings_wifi_label, wifi_text);
+  if (g_settings_mqtt_label != nullptr) lv_label_set_text(g_settings_mqtt_label, mqtt_text);
+  if (g_settings_controller_label != nullptr) {
+    lv_label_set_text(g_settings_controller_label, controller_text);
+  }
+  if (g_settings_espnow_label != nullptr) lv_label_set_text(g_settings_espnow_label, espnow_text);
+  if (g_settings_config_label != nullptr) lv_label_set_text(g_settings_config_label, config_text);
+  if (g_settings_errors_label != nullptr) lv_label_set_text(g_settings_errors_label, errors_text);
+  if (g_settings_display_label != nullptr) lv_label_set_text(g_settings_display_label, system_text);
+  if (g_settings_diag_label != nullptr) lv_label_set_text(g_settings_diag_label, errors_text);
   if (g_timeout_slider != nullptr && !lv_obj_has_state(g_timeout_slider, LV_STATE_PRESSED)) {
     lv_slider_set_value(g_timeout_slider, static_cast<int32_t>(g_display_timeout_ms / 1000UL),
                         LV_ANIM_OFF);
@@ -2408,6 +2412,7 @@ void create_ui() {
   g_mode_status_label = handles.mode_status_label;
 
   show_page(ThermostatPage::Home);
+  g_ui_ready = true;
 }
 
 void init_display_and_lvgl() {
@@ -2441,6 +2446,8 @@ void init_display_and_lvgl() {
   panel_config.bounce_buffer_size_px = 10 * kDisplayWidth;
   panel_config.num_fbs = 2;
 
+  lv_init();
+
   delay(kDisplayInitSettleMs);
   if (esp_lcd_new_rgb_panel(&panel_config, &g_panel) == ESP_OK) {
     esp_lcd_panel_reset(g_panel);
@@ -2448,34 +2455,38 @@ void init_display_and_lvgl() {
 
     // Register VSYNC callback so the flush can wait for the buffer swap
     g_flush_ready_sem = xSemaphoreCreateBinary();
+    if (!g_flush_ready_sem) {
+      Serial.println("[display] FATAL: failed to create VSYNC semaphore");
+      return;
+    }
     esp_lcd_rgb_panel_event_callbacks_t cbs = {};
     cbs.on_vsync = on_vsync_ready;
     esp_lcd_rgb_panel_register_event_callbacks(g_panel, &cbs, nullptr);
+
+    // Get the panel's two PSRAM framebuffers for double-buffered direct mode.
+    // LVGL draws dirty areas into one buffer while the panel DMA reads the other.
+    // On flush, esp_lcd_panel_draw_bitmap detects the source is a panel buffer
+    // and does an atomic pointer swap instead of a copy.
+    void *panel_fb0 = nullptr;
+    void *panel_fb1 = nullptr;
+    esp_lcd_rgb_panel_get_frame_buffer(g_panel, 2, &panel_fb0, &panel_fb1);
+
+    const size_t buf_pixels = kDisplayWidth * kDisplayHeight;
+    g_buf_1 = static_cast<lv_color_t *>(panel_fb0);
+    g_buf_2 = static_cast<lv_color_t *>(panel_fb1);
+
+    lv_disp_draw_buf_init(&g_draw_buf, g_buf_1, g_buf_2, buf_pixels);
+    lv_disp_drv_init(&g_disp_drv);
+    g_disp_drv.hor_res = kDisplayWidth;
+    g_disp_drv.ver_res = kDisplayHeight;
+    g_disp_drv.flush_cb = rgb_flush_cb;
+    g_disp_drv.draw_buf = &g_draw_buf;
+    g_disp_drv.direct_mode = 1;
+    g_disp_drv.full_refresh = 1;
+    lv_disp_drv_register(&g_disp_drv);
+  } else {
+    Serial.println("[display] FATAL: esp_lcd_new_rgb_panel failed");
   }
-
-  // Get the panel's two PSRAM framebuffers for double-buffered direct mode.
-  // LVGL draws dirty areas into one buffer while the panel DMA reads the other.
-  // On flush, esp_lcd_panel_draw_bitmap detects the source is a panel buffer
-  // and does an atomic pointer swap instead of a copy.
-  void *panel_fb0 = nullptr;
-  void *panel_fb1 = nullptr;
-  esp_lcd_rgb_panel_get_frame_buffer(g_panel, 2, &panel_fb0, &panel_fb1);
-
-  lv_init();
-
-  const size_t buf_pixels = kDisplayWidth * kDisplayHeight;
-  g_buf_1 = static_cast<lv_color_t *>(panel_fb0);
-  g_buf_2 = static_cast<lv_color_t *>(panel_fb1);
-
-  lv_disp_draw_buf_init(&g_draw_buf, g_buf_1, g_buf_2, buf_pixels);
-  lv_disp_drv_init(&g_disp_drv);
-  g_disp_drv.hor_res = kDisplayWidth;
-  g_disp_drv.ver_res = kDisplayHeight;
-  g_disp_drv.flush_cb = rgb_flush_cb;
-  g_disp_drv.draw_buf = &g_draw_buf;
-  g_disp_drv.direct_mode = 1;
-  g_disp_drv.full_refresh = 1;
-  lv_disp_drv_register(&g_disp_drv);
 
   lv_indev_drv_init(&g_indev_drv);
   g_indev_drv.type = LV_INDEV_TYPE_POINTER;
@@ -2522,6 +2533,7 @@ void init_sensors() {
     if (y_max > 0) g_touch_y_max = y_max;
     Serial.printf("[touch] GT911 resolution: %ux%u\n", g_touch_x_max, g_touch_y_max);
   }
+  g_sensors_initialized = true;
 }
 
 void init_network() {
@@ -2544,13 +2556,58 @@ void poll_sensors(uint32_t now_ms) {
   if (g_sensor_type == SensorType::AHT) {
     sensors_event_t humidity, temp;
     if (g_aht.getEvent(&humidity, &temp)) {
+      g_sensor_fail_count = 0;
       g_runtime->on_local_sensor_update(temp.temperature, humidity.relative_humidity);
+    } else {
+      ++g_sensor_fail_count;
+      Serial.printf("[sensor] AHT read failed (fail_count=%u)\n", (unsigned)g_sensor_fail_count);
+      if (g_sensor_fail_count >= 5) {
+        Serial.println("[sensor] too many failures, attempting I2C reset");
+        g_sensor_i2c.end();
+        g_sensor_i2c.begin(kSensorI2cSda, kSensorI2cScl, 100000U);
+        g_sensor_type = SensorType::None;
+        g_sensor_fail_count = 0;
+        if (g_aht.begin(&g_sensor_i2c)) {
+          sensors_event_t h, t;
+          if (g_aht.getEvent(&h, &t) &&
+              !(t.temperature == 0.0f && h.relative_humidity == 0.0f)) {
+            g_sensor_type = SensorType::AHT;
+            Serial.println("[sensor] AHT re-detected after reset");
+          }
+        }
+        if (g_sensor_type == SensorType::None && g_si7021.begin()) {
+          g_sensor_type = SensorType::Si7021;
+          Serial.println("[sensor] Si7021 re-detected after reset");
+        }
+      }
     }
   } else if (g_sensor_type == SensorType::Si7021) {
     float temp = g_si7021.readTemperature();
     float hum = g_si7021.readHumidity();
     if (std::isfinite(temp) && std::isfinite(hum)) {
+      g_sensor_fail_count = 0;
       g_runtime->on_local_sensor_update(temp, hum);
+    } else {
+      ++g_sensor_fail_count;
+      Serial.printf("[sensor] Si7021 read failed (fail_count=%u)\n", (unsigned)g_sensor_fail_count);
+      if (g_sensor_fail_count >= 5) {
+        Serial.println("[sensor] too many failures, attempting I2C reset");
+        g_sensor_i2c.end();
+        g_sensor_i2c.begin(kSensorI2cSda, kSensorI2cScl, 100000U);
+        g_sensor_type = SensorType::None;
+        g_sensor_fail_count = 0;
+        if (g_si7021.begin()) {
+          g_sensor_type = SensorType::Si7021;
+          Serial.println("[sensor] Si7021 re-detected after reset");
+        } else if (g_aht.begin(&g_sensor_i2c)) {
+          sensors_event_t h, t;
+          if (g_aht.getEvent(&h, &t) &&
+              !(t.temperature == 0.0f && h.relative_humidity == 0.0f)) {
+            g_sensor_type = SensorType::AHT;
+            Serial.println("[sensor] AHT re-detected after reset");
+          }
+        }
+      }
     }
   } else if (!std::isnan(g_remote_indoor_temp_c)) {
     g_runtime->on_local_sensor_update(g_remote_indoor_temp_c, g_remote_indoor_humidity);
@@ -2604,9 +2661,11 @@ void thermostat_firmware_setup() {
   g_runtime->set_temperature_unit(g_cfg_temp_unit_f ? TemperatureUnit::Fahrenheit
                                                     : TemperatureUnit::Celsius);
   ota_rollback_begin();
+  esp_task_wdt_add(NULL);  // register main task with TWDT
 }
 
 void thermostat_firmware_loop() {
+  esp_task_wdt_reset();
   uint32_t now = millis();
   if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
     shutdown_display_for_reboot();
@@ -2672,6 +2731,18 @@ void thermostat_firmware_loop() {
   if ((now - g_last_ui_refresh_ms) >= kUiRefreshMs) {
     g_last_ui_refresh_ms = now;
     refresh_ui();
+  }
+
+  // Isolation reboot: if both MQTT and ESP-NOW are silent for >15 minutes,
+  // the network stack is likely wedged — reboot to recover.
+  if (now > kIsolationRebootMs) {
+    const uint32_t hb_ms = g_runtime != nullptr ? g_runtime->last_controller_heartbeat_ms() : 0;
+    const bool espnow_stale = (hb_ms == 0) ||
+      (static_cast<uint32_t>(now - hb_ms) > kIsolationRebootMs);
+    if (!g_mqtt.connected() && espnow_stale) {
+      Serial.println("[watchdog] isolation_reboot: no MQTT and no ESP-NOW for >15m");
+      ESP.restart();
+    }
   }
 }
 

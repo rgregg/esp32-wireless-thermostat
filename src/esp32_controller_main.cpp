@@ -73,6 +73,9 @@ constexpr uint32_t kCtrlMqttPublishMs = 10000;
 constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
 constexpr uint32_t kCtrlHttpTimeoutMs = 8000;
+// Reboot if both MQTT and ESP-NOW have been silent for this long.
+// Covers wedged network-stack states that the WiFi watchdog ping doesn't catch.
+constexpr uint32_t kCtrlIsolationRebootMs = 15UL * 60UL * 1000UL;
 struct CtrlWeatherResult {
   float temp_c = 0.0f;
   thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
@@ -85,6 +88,13 @@ static bool g_ctrl_weather_coords_valid = false;  // guarded by g_ctrl_weather_m
 static SemaphoreHandle_t g_ctrl_weather_mutex = nullptr;
 static TaskHandle_t g_ctrl_weather_task_handle = nullptr;
 static uint32_t g_ctrl_weather_last_applied_ms = 0;
+// Updated by the weather task at the start of each iteration. Monitored by
+// the main loop to detect a wedged TLS/SSL connection that ignores the timeout.
+static volatile uint32_t g_ctrl_weather_task_heartbeat_ms = 0;
+// Max time allowed between task heartbeats: two full poll periods + both HTTP
+// timeouts. If this elapses the task is considered wedged and is restarted.
+constexpr uint32_t kCtrlWeatherTaskWatchdogMs =
+    2 * kCtrlWeatherPollMs + 2 * kCtrlHttpTimeoutMs;
 bool g_ctrl_wifi_provisioning_started = false;
 bool g_ctrl_wifi_has_attempted_stored_connect = false;
 uint32_t g_ctrl_first_wifi_attempt_ms = 0;
@@ -258,6 +268,8 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_ota_hostname = g_ctrl_cfg.getString("ota_host", g_cfg_ctrl_ota_hostname);
   g_cfg_ctrl_ota_password = g_ctrl_cfg.getString("ota_pwd", g_cfg_ctrl_ota_password);
   g_cfg_ctrl_espnow_channel = static_cast<uint8_t>(g_ctrl_cfg.getUChar("esp_ch", g_cfg_ctrl_espnow_channel));
+  if (g_cfg_ctrl_espnow_channel < 1 || g_cfg_ctrl_espnow_channel > 14)
+    g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
   g_cfg_ctrl_espnow_peer_mac = g_ctrl_cfg.getString("esp_peer", g_cfg_ctrl_espnow_peer_mac);
   g_cfg_ctrl_espnow_peer_macs = g_ctrl_cfg.getString("esp_peers", g_cfg_ctrl_espnow_peer_macs);
   g_cfg_ctrl_espnow_lmk = g_ctrl_cfg.getString("esp_lmk", g_cfg_ctrl_espnow_lmk);
@@ -603,11 +615,19 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, const char *api_key,
                                                 icon_out);
 }
 
+static void ctrl_weather_task_start();        // forward declaration
+void ctrl_audit(const char *fmt, ...);        // forward declaration
+
 static void ctrl_weather_task(void *) {
   for (;;) {
+    g_ctrl_weather_task_heartbeat_ms = millis();
+
     // Snapshot config strings under mutex; retry every 5s until ready.
+    // Update heartbeat inside this loop so the watchdog doesn't fire while
+    // we're legitimately waiting for WiFi or config to become available.
     std::string api_key, zip_raw;
     for (;;) {
+      g_ctrl_weather_task_heartbeat_ms = millis();
       if (g_ctrl_weather_mutex &&
           xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         api_key  = g_cfg_ctrl_pirateweather_api_key.c_str();
@@ -658,7 +678,31 @@ static void ctrl_weather_task(void *) {
   }
 }
 
-void ctrl_poll_weather(uint32_t /*now_ms*/) {
+static void ctrl_weather_task_start() {
+  g_ctrl_weather_task_heartbeat_ms = millis();
+  const BaseType_t ok =
+      xTaskCreatePinnedToCore(ctrl_weather_task, "ctrl_weather", 8192,
+                              nullptr, 1, &g_ctrl_weather_task_handle, 0);
+  if (ok != pdPASS) {
+    ctrl_audit("ctrl_weather: task create failed, weather disabled");
+    g_ctrl_weather_task_handle = nullptr;
+  }
+}
+
+void ctrl_poll_weather(uint32_t now_ms) {
+  // Watchdog: if the task heartbeat has been stale for too long, the task is
+  // likely wedged on a hung TLS/SSL call that ignored the HTTP timeout. Kill
+  // and restart it.
+  if (g_ctrl_weather_task_handle != nullptr &&
+      g_ctrl_weather_task_heartbeat_ms != 0 &&
+      static_cast<uint32_t>(now_ms - g_ctrl_weather_task_heartbeat_ms) >
+          kCtrlWeatherTaskWatchdogMs) {
+    // Forcibly killing the task via vTaskDelete leaks C++ stack objects
+    // (HTTPClient, WiFiClientSecure) since their destructors won't run.
+    // Rebooting is the only safe recovery from a hung TLS call.
+    ctrl_audit("ctrl_weather: task wedged, rebooting to recover");
+    esp_restart();
+  }
   if (!g_ctrl_weather_pending.ready.load(std::memory_order_acquire) ||
       g_controller == nullptr) return;
   const float temp_c = g_ctrl_weather_pending.temp_c;
@@ -1461,7 +1505,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
 
-  char value[128];
+  char value[256];
   const size_t copy_len = (length < sizeof(value) - 1) ? length : sizeof(value) - 1;
   memcpy(value, payload, copy_len);
   value[copy_len] = '\0';
@@ -1729,6 +1773,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     g_ctrl_mqtt_reconfigure_required = false;
     g_ctrl_mqtt_discovery_sent = false;
     g_ctrl_mqtt.disconnect();
+    g_ctrl_last_mqtt_attempt_ms = 0;  // reconnect immediately on next loop
   }
   if (WiFi.status() != WL_CONNECTED || g_ctrl_mqtt.connected()) {
     return;
@@ -1755,23 +1800,31 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   }
   g_ctrl_last_mqtt_error = "none";
 
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/lockout").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/mode").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/fan_mode").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/target_temp_c").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/packed_word").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/sync").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reboot").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reset_sequence").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/primary_sensor_mac").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/espnow_only").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/temp_c").c_str());
-  g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str());
-  g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str());
-  g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str());
-  g_ctrl_mqtt.subscribe(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/+");
+  const bool subs_ok =
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/lockout").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/mode").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/fan_mode").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/target_temp_c").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/packed_word").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/sync").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reboot").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reset_sequence").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/primary_sensor_mac").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/espnow_only").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/temp_c").c_str()) &&
+      g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str()) &&
+      g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str()) &&
+      g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str()) &&
+      g_ctrl_mqtt.subscribe(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/+");
+  if (!subs_ok) {
+    ctrl_audit("mqtt_subscribe_failed: disconnecting to retry");
+    g_ctrl_mqtt.disconnect();
+    // Leave g_ctrl_last_mqtt_attempt_ms as-is so kCtrlNetworkRetryMs
+    // backoff is enforced; resetting to 0 would cause rapid reconnect storms.
+    return;
+  }
   ctrl_publish_discovery();
   ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
@@ -1944,13 +1997,9 @@ void setup() {
   ota_rollback_begin();
   g_ctrl_weather_mutex = xSemaphoreCreateMutex();
   if (!g_ctrl_weather_mutex) {
-    Serial.println("ctrl_weather: failed to create mutex");
-  }
-  const BaseType_t task_ok =
-      xTaskCreatePinnedToCore(ctrl_weather_task, "ctrl_weather", 8192,
-                              nullptr, 1, &g_ctrl_weather_task_handle, 0);
-  if (task_ok != pdPASS) {
-    Serial.println("ctrl_weather: failed to create task");
+    ctrl_audit("ctrl_weather: mutex alloc failed, weather disabled");
+  } else {
+    ctrl_weather_task_start();
   }
 }
 
@@ -1983,6 +2032,24 @@ void loop() {
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
     ctrl_poll_weather(now);
+
+    // Isolation reboot: if both MQTT and ESP-NOW have been silent for
+    // kCtrlIsolationRebootMs, the network stack is likely wedged. The WiFi
+    // watchdog handles outright WiFi loss; this catches the case where WiFi
+    // appears up (ping passes) but TCP/MQTT is stuck and the display is also
+    // unreachable. Guard with now > kCtrlIsolationRebootMs so we don't fire
+    // during the first 15 minutes of boot (covers the OTA rollback window too).
+    if (now > kCtrlIsolationRebootMs) {
+      const uint32_t hb_ms = g_controller->app().runtime().heartbeat_last_seen_ms();
+      const bool espnow_stale =
+          (hb_ms == 0) ||
+          (static_cast<uint32_t>(now - hb_ms) > kCtrlIsolationRebootMs);
+      if (!g_ctrl_mqtt.connected() && espnow_stale) {
+        ctrl_audit("isolation_reboot: no MQTT and no ESP-NOW heartbeat for >15m");
+        ESP.restart();
+      }
+    }
+
     if (g_ctrl_mqtt.connected()) {
       if (!g_ctrl_have_lockout || g_ctrl_last_lockout != snap.hvac_lockout ||
           (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
