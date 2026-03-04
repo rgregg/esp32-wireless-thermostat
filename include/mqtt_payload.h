@@ -52,6 +52,18 @@ inline const char *furnace_state_to_str(FurnaceStateCode state) {
   }
 }
 
+inline FurnaceStateCode str_to_furnace_state(const char *s) {
+  if (strcmp(s, "Idle") == 0)         return FurnaceStateCode::Idle;
+  if (strcmp(s, "Heat Standby") == 0) return FurnaceStateCode::HeatMode;
+  if (strcmp(s, "Heating") == 0)      return FurnaceStateCode::HeatOn;
+  if (strcmp(s, "Cool Standby") == 0) return FurnaceStateCode::CoolMode;
+  if (strcmp(s, "Cooling") == 0)      return FurnaceStateCode::CoolOn;
+  if (strcmp(s, "Fan Running") == 0)  return FurnaceStateCode::FanOn;
+  if (strcmp(s, "Heat Wait") == 0)    return FurnaceStateCode::HeatWait;
+  if (strcmp(s, "Cool Wait") == 0)    return FurnaceStateCode::CoolWait;
+  return FurnaceStateCode::Error;
+}
+
 // --- Bool payload parsing ---
 
 inline bool parse_bool(const char *s) {

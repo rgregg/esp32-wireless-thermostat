@@ -6,6 +6,7 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -66,7 +67,7 @@ static void handle_update_upload(WebServer &server) {
   HTTPUpload &upload = server.upload();
 
   switch (upload.status) {
-    case UPLOAD_FILE_START:
+    case UPLOAD_FILE_START: {
       Serial.printf("OTA web upload: %s\n", upload.filename.c_str());
       ota_audit("ota_web: start %s", upload.filename.c_str());
       // If the current firmware hasn't been confirmed valid yet, do it now.
@@ -77,11 +78,21 @@ static void handle_update_upload(WebServer &server) {
         s_rollback_confirmed = true;
         ota_audit("ota_web: auto-confirmed rollback before update");
       }
+      // Flash writes stall both CPUs via SPI cache disable, starving the
+      // main-loop task watchdog on Core 1.  Extend the TWDT timeout to
+      // cover the full upload duration.
+      esp_task_wdt_config_t wdt_cfg = {
+          .timeout_ms = 120000,  // 2 minutes
+          .idle_core_mask = 0,
+          .trigger_panic = true,
+      };
+      esp_task_wdt_reconfigure(&wdt_cfg);
       if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
         Update.printError(Serial);
         ota_audit("ota_web: begin failed err=%u", Update.getError());
       }
       break;
+    }
 
     case UPLOAD_FILE_WRITE:
       if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
@@ -99,6 +110,16 @@ static void handle_update_upload(WebServer &server) {
         Update.printError(Serial);
         ota_audit("ota_web: end failed err=%u after %u bytes",
                   Update.getError(), upload.totalSize);
+      }
+      // Restore the default TWDT timeout.  On success the device reboots
+      // anyway, but restore for the error path.
+      {
+        esp_task_wdt_config_t wdt_cfg = {
+            .timeout_ms = 5000,
+            .idle_core_mask = 0,
+            .trigger_panic = true,
+        };
+        esp_task_wdt_reconfigure(&wdt_cfg);
       }
       break;
 
