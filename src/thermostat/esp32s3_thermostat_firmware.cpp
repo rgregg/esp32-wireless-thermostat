@@ -42,6 +42,7 @@
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
+#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -606,6 +607,9 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "mqtt_enabled") {
     g_cfg_mqtt_enabled = (strcmp(raw_value, "1") == 0);
     g_cfg.putBool("mqtt_en", g_cfg_mqtt_enabled);
+    if (!g_cfg_mqtt_enabled && g_mqtt.connected()) {
+      g_mqtt.disconnect();
+    }
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "espnow_enabled") {
     g_cfg_espnow_enabled = (strcmp(raw_value, "1") == 0);
@@ -1961,7 +1965,6 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/display_timeout_s").c_str());
   g_mqtt.subscribe(topic_for("cmd/backlight_active_pct").c_str());
   g_mqtt.subscribe(topic_for("cmd/backlight_screensaver_pct").c_str());
-  g_mqtt.subscribe(topic_for("cfg/+/set").c_str());
 
   if (g_cfg_controller_base_topic.length() > 0) {
     g_mqtt.subscribe(controller_topic_for("state/mode").c_str());
@@ -2806,9 +2809,11 @@ void thermostat_firmware_setup() {
   } else {
     Serial.println("[web] FATAL: failed to allocate web task stack from PSRAM");
   }
+  esp_task_wdt_add(NULL);  // register main task with TWDT
 }
 
 void thermostat_firmware_loop() {
+  esp_task_wdt_reset();
   uint32_t now = millis();
   if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
     shutdown_display_for_reboot();
