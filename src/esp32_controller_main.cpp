@@ -312,8 +312,6 @@ void ctrl_load_runtime_config() {
   g_cfg_ctrl_espnow_channel = static_cast<uint8_t>(g_ctrl_cfg.getUChar("esp_ch", g_cfg_ctrl_espnow_channel));
   if (g_cfg_ctrl_espnow_channel < 1 || g_cfg_ctrl_espnow_channel > 14)
     g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
-  g_cfg_ctrl_espnow_peer_mac = g_ctrl_cfg.getString("esp_peer", g_cfg_ctrl_espnow_peer_mac);
-  g_cfg_ctrl_espnow_peer_macs = g_ctrl_cfg.getString("esp_peers", g_cfg_ctrl_espnow_peer_macs);
   g_cfg_ctrl_espnow_lmk = g_ctrl_cfg.getString("esp_lmk", g_cfg_ctrl_espnow_lmk);
   g_cfg_ctrl_devices = g_ctrl_cfg.getString("devices", "");
   g_cfg_ctrl_allow_ha = g_ctrl_cfg.getBool("allow_ha", true);
