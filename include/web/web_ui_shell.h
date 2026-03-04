@@ -52,6 +52,7 @@ font-size:0.85rem}
 .toast.show{transform:translateY(0)}
 .toast.err{background:var(--er)}
 .mt{margin-top:0.75rem}
+.mb{margin-bottom:0.5rem}
 )css";
 
 // JavaScript stored in PROGMEM
@@ -152,6 +153,35 @@ function submitForm(f){
     else toast('Settings saved.');
   }).catch(function(e){toast('Error: '+e,'err')});
   return false;
+}
+function submitWithCheckboxes(form){
+  form.querySelectorAll('input[type=hidden][data-cb]').forEach(function(h){h.remove();});
+  form.querySelectorAll('input[type=checkbox]').forEach(function(cb){
+    if(!cb.checked){
+      var h=document.createElement('input');
+      h.type='hidden';h.name=cb.name;h.value='0';h.setAttribute('data-cb','1');
+      form.appendChild(h);
+    }
+  });
+  return submitForm(form);
+}
+function submitDeviceAdd(form){
+  var mac=(form.querySelector('[name="add_mac"]')||{value:''}).value.trim();
+  var role=(form.querySelector('[name="add_role"]')||{value:''}).value;
+  form.querySelectorAll('input[name="device_add"]').forEach(function(h){h.remove();});
+  var h=document.createElement('input');
+  h.type='hidden';h.name='device_add';
+  h.value=role?(mac+'='+role):mac;
+  form.appendChild(h);
+  return submitForm(form);
+}
+function removeDevice(mac){
+  var fd=new FormData();
+  fd.append('device_remove',mac);
+  fetch('/config',{method:'POST',body:fd})
+    .then(function(r){return r.text()})
+    .then(function(){toast('Device removed. Reboot required.','wn');})
+    .catch(function(e){toast('Error: '+e,'err');});
 }
 function toast(m,t){
   var el=document.getElementById('toast');

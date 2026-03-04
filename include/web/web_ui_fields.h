@@ -19,9 +19,9 @@ inline void card_end(String &html) {
   html += F("</div>");
 }
 
-// Begin a form (AJAX submission)
+// Begin a form (AJAX submission, with checkbox serialisation)
 inline void form_begin(String &html) {
-  html += F("<form onsubmit=\"return submitForm(this)\">");
+  html += F("<form onsubmit=\"return submitWithCheckboxes(this)\">");
 }
 
 // End a form with a save button
@@ -89,6 +89,17 @@ inline void password_field(String &html, const char *label, const char *name,
   html += F("><div class=\"ht\">");
   html += is_set ? "Currently set. Leave blank to keep." : "Not set.";
   html += F("</div></div>");
+}
+
+// Checkbox field
+inline void checkbox_field(String &html, const char *label, const char *name, bool checked) {
+  html += F("<div class=\"mb\"><label><input type=\"checkbox\" name=\"");
+  html += name;
+  html += F("\" value=\"1\"");
+  if (checked) html += F(" checked");
+  html += F("> ");
+  html += label;
+  html += F("</label></div>");
 }
 
 // Number input field
