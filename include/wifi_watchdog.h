@@ -26,6 +26,7 @@ struct State {
     uint32_t first_failure_ms      = 0;
     uint32_t last_success_ms       = 0;     // Last time gateway responded
     uint32_t reconnect_count       = 0;     // Reconnects since last successful ping
+    bool     wifi_connected_once   = false;  // True after first WL_CONNECTED
     bool     failing               = false;
     bool     reconnect_attempted   = false;
     bool     watchdog_disconnected = false;  // True when WE initiated disconnect
@@ -178,8 +179,12 @@ inline void wifi_watchdog_tick(uint32_t now_ms, bool connectivity_proven = false
     // Don't start the watchdog until WiFi has connected at least once.
     // Attempting to ping before the TCPIP stack is fully initialised
     // triggers an lwIP assert (udp_new_ip_type requires the TCPIP lock).
-    if (g_state.last_success_ms == 0 && !connectivity_proven) {
-        return;
+    if (!g_state.wifi_connected_once) {
+        if (WiFi.status() == WL_CONNECTED) {
+            g_state.wifi_connected_once = true;
+        } else {
+            return;
+        }
     }
 
     if (WiFi.status() != WL_CONNECTED) {

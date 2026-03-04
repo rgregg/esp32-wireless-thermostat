@@ -187,7 +187,7 @@ uint16_t g_touch_y_max = kDisplayHeight;
 esp_lcd_panel_handle_t g_panel = nullptr;
 SemaphoreHandle_t g_flush_ready_sem = nullptr;
 SemaphoreHandle_t g_api_mutex = nullptr;
-volatile bool g_mqtt_state_dirty = false;
+std::atomic<bool> g_mqtt_state_dirty{false};
 
 // Called from ISR when the panel finishes swapping framebuffers at VSYNC
 bool IRAM_ATTR on_vsync_ready(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t *,
@@ -218,7 +218,7 @@ WiFiClient g_wifi_client;
 PubSubClient g_mqtt(g_wifi_client);
 WebServer g_web(80);
 bool g_mqtt_discovery_sent = false;
-volatile bool g_web_started = false;
+std::atomic<bool> g_web_started{false};
 DeviceRegistry g_device_registry;
 bool g_mdns_started = false;
 
@@ -605,9 +605,6 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "mqtt_enabled") {
     g_cfg_mqtt_enabled = (strcmp(raw_value, "1") == 0);
     g_cfg.putBool("mqtt_en", g_cfg_mqtt_enabled);
-    if (!g_cfg_mqtt_enabled && g_mqtt.connected()) {
-      g_mqtt.disconnect();
-    }
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "espnow_enabled") {
     g_cfg_espnow_enabled = (strcmp(raw_value, "1") == 0);
@@ -879,6 +876,7 @@ void web_handle_status_get() {
   const FurnaceStateCode ctrl_state = g_mqtt_ctrl_state;
   const bool ctrl_available = g_mqtt_ctrl_available;
   const SensorType sensor_type = g_sensor_type;
+  const bool temp_unit_f = g_cfg_temp_unit_f;
   xSemaphoreGive(g_api_mutex);
 
   char buf[2048];
@@ -887,7 +885,7 @@ void web_handle_status_get() {
     strcpy(remote_temp_str, "null");
   } else {
     double remote_temp_display = static_cast<double>(remote_indoor_temp_c);
-    if (g_cfg_temp_unit_f) remote_temp_display = remote_temp_display * 9.0 / 5.0 + 32.0;
+    if (temp_unit_f) remote_temp_display = remote_temp_display * 9.0 / 5.0 + 32.0;
     snprintf(remote_temp_str, sizeof(remote_temp_str), "%.1f", remote_temp_display);
   }
   if (std::isnan(remote_indoor_humidity)) {
@@ -1123,7 +1121,7 @@ void web_handle_root() {
   status_item(html, "ESP-NOW", "espnow_connected");
   status_section(html, "Environment");
   status_item(html, "Sensor", "sensor_type");
-  status_item(html, g_cfg_temp_unit_f ? "Remote Temp (\xc2\xb0""F)" : "Remote Temp (\xc2\xb0""C)", "remote_indoor_temp_c");
+  status_item(html, temp_unit_f ? "Remote Temp (\xc2\xb0""F)" : "Remote Temp (\xc2\xb0""C)", "remote_indoor_temp_c");
   status_item(html, "Remote Humidity", "remote_indoor_humidity");
   status_item(html, "Indoor Temp", "indoor_temp_text");
   status_item(html, "Indoor Humidity", "indoor_humidity_text");
@@ -1962,6 +1960,7 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(topic_for("cmd/display_timeout_s").c_str());
   g_mqtt.subscribe(topic_for("cmd/backlight_active_pct").c_str());
   g_mqtt.subscribe(topic_for("cmd/backlight_screensaver_pct").c_str());
+  g_mqtt.subscribe(topic_for("cfg/+/set").c_str());
 
   if (g_cfg_controller_base_topic.length() > 0) {
     g_mqtt.subscribe(controller_topic_for("state/mode").c_str());
@@ -2584,7 +2583,6 @@ void init_display_and_lvgl() {
       Serial.println("[display] FATAL: failed to create VSYNC semaphore");
       return;
     }
-    g_api_mutex = xSemaphoreCreateMutex();
     esp_lcd_rgb_panel_event_callbacks_t cbs = {};
     cbs.on_vsync = on_vsync_ready;
     esp_lcd_rgb_panel_register_event_callbacks(g_panel, &cbs, nullptr);
@@ -2746,6 +2744,7 @@ void poll_sensors(uint32_t now_ms) {
 }  // namespace
 
 void thermostat_firmware_setup() {
+  g_api_mutex = xSemaphoreCreateMutex();
   g_cfg_ready = g_cfg.begin("cfg_disp", false);
   load_runtime_config();
   g_boot_count = g_cfg_ready ? (g_cfg.getUInt("boot_cnt", 0U) + 1U) : 0U;
