@@ -319,6 +319,7 @@ uint32_t g_backlight_enable_at_ms = 0;
 bool g_sensors_initialized = false;  // set true at end of init_sensors()
 bool g_ui_ready = false;             // set true at end of create_ui()
 uint8_t g_sensor_fail_count = 0;     // consecutive sensor read failures
+uint32_t g_isolation_start_ms = 0;   // when both MQTT+ESP-NOW went down (0=not isolated)
 
 // Shadow state for controller telemetry received via MQTT
 FurnaceStateCode g_mqtt_ctrl_state = FurnaceStateCode::Error;
@@ -2889,14 +2890,30 @@ void thermostat_firmware_loop() {
     refresh_ui();
   }
 
-  // Isolation reboot: if both MQTT and ESP-NOW are silent for >15 minutes,
-  // the network stack is likely wedged — reboot to recover.
-  if (now > kIsolationRebootMs) {
+  // Isolation reboot: if both MQTT and ESP-NOW have been down continuously
+  // for >15 minutes, the network stack is likely wedged — reboot to recover.
+  {
     const uint32_t hb_ms = g_runtime != nullptr ? g_runtime->last_controller_heartbeat_ms() : 0;
-    const bool espnow_stale = (hb_ms == 0) ||
-      (static_cast<uint32_t>(now - hb_ms) > kIsolationRebootMs);
-    if (!g_mqtt.connected() && espnow_stale) {
-      Serial.println("[watchdog] isolation_reboot: no MQTT and no ESP-NOW for >15m");
+    const bool espnow_active = (hb_ms > 0) &&
+        (static_cast<uint32_t>(now - hb_ms) < g_cfg_controller_timeout_ms);
+    const bool isolated = !g_mqtt.connected() && !espnow_active;
+
+    if (!isolated) {
+      g_isolation_start_ms = 0;  // reset: at least one channel is healthy
+    } else if (g_isolation_start_ms == 0) {
+      g_isolation_start_ms = now;  // start tracking isolation
+      Serial.printf("[watchdog] isolation_start: mqtt=%d espnow_hb=%lu ago=%lums\n",
+                    g_mqtt.connected() ? 1 : 0,
+                    static_cast<unsigned long>(hb_ms),
+                    hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
+    } else if (static_cast<uint32_t>(now - g_isolation_start_ms) >= kIsolationRebootMs) {
+      Serial.printf("[watchdog] isolation_reboot: isolated for %lus mqtt=%d espnow_hb=%lu ago=%lums\n",
+                    static_cast<unsigned long>((now - g_isolation_start_ms) / 1000),
+                    g_mqtt.connected() ? 1 : 0,
+                    static_cast<unsigned long>(hb_ms),
+                    hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
+      Serial.flush();
+      delay(100);
       ESP.restart();
     }
   }
