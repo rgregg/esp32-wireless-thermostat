@@ -1975,7 +1975,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
       g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str()) &&
       g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/temp_c").c_str()) &&
       g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str()) &&
-      g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command").c_str()) &&
+      g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command/+").c_str()) &&
       g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str()) &&
       g_ctrl_mqtt.subscribe(THERMOSTAT_DEVICE_DISCOVERY_PREFIX "/+");
   if (!subs_ok) {

@@ -66,6 +66,7 @@ function showTab(id){
   if(pane)pane.classList.add('on');
   try{localStorage.setItem('tab',id)}catch(e){}
   if(id==='status')startStatus();else stopStatus();
+  if(id==='system'){var img=document.getElementById('scr');if(img&&!img.getAttribute('src'))img.src=img.getAttribute('data-src')}
 }
 var _si=null;
 function startStatus(){
