@@ -1257,7 +1257,7 @@ void web_handle_root() {
   card_end(html);
 
   card_begin(html, "Screenshot");
-  html += F("<p><img src=\"/screenshot\" style=\"max-width:100%;border-radius:0.375rem\"></p>");
+  html += F("<p><img id=\"scr\" data-src=\"/screenshot\" style=\"max-width:100%;border-radius:0.375rem\"></p>");
   card_end(html);
 
   card_begin(html, "Links");
