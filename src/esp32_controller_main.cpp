@@ -73,6 +73,7 @@ uint32_t g_ctrl_boot_count = 0;
 String g_ctrl_reset_reason = "unknown";
 bool g_ctrl_reboot_requested = false;
 uint32_t g_ctrl_reboot_at_ms = 0;
+uint32_t g_ctrl_isolation_start_ms = 0;  // 0 = not isolated
 
 constexpr uint32_t kCtrlNetworkRetryMs = 5000;
 constexpr uint32_t kCtrlMqttPublishMs = 10000;
@@ -2175,19 +2176,30 @@ void loop() {
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
     ctrl_poll_weather(now);
 
-    // Isolation reboot: if both MQTT and ESP-NOW have been silent for
-    // kCtrlIsolationRebootMs, the network stack is likely wedged. The WiFi
+    // Isolation reboot: if both MQTT and ESP-NOW have been down continuously
+    // for kCtrlIsolationRebootMs, the network stack is likely wedged. The WiFi
     // watchdog handles outright WiFi loss; this catches the case where WiFi
     // appears up (ping passes) but TCP/MQTT is stuck and the display is also
-    // unreachable. Guard with now > kCtrlIsolationRebootMs so we don't fire
-    // during the first 15 minutes of boot (covers the OTA rollback window too).
-    if (now > kCtrlIsolationRebootMs) {
+    // unreachable.
+    {
       const uint32_t hb_ms = g_controller->app().runtime().heartbeat_last_seen_ms();
-      const bool espnow_stale =
-          (hb_ms == 0) ||
-          (static_cast<uint32_t>(now - hb_ms) > kCtrlIsolationRebootMs);
-      if (!g_ctrl_mqtt.connected() && espnow_stale) {
-        ctrl_audit("isolation_reboot: no MQTT and no ESP-NOW heartbeat for >15m");
+      const bool espnow_active = (hb_ms > 0) &&
+          (static_cast<uint32_t>(now - hb_ms) < kCtrlIsolationRebootMs);
+      const bool isolated = !g_ctrl_mqtt.connected() && !espnow_active;
+
+      if (!isolated) {
+        g_ctrl_isolation_start_ms = 0;
+      } else if (g_ctrl_isolation_start_ms == 0) {
+        g_ctrl_isolation_start_ms = now;
+        Serial.printf("[watchdog] isolation_start: mqtt=%d espnow_hb=%lu ago=%lums\n",
+                      g_ctrl_mqtt.connected() ? 1 : 0,
+                      static_cast<unsigned long>(hb_ms),
+                      hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
+      } else if (static_cast<uint32_t>(now - g_ctrl_isolation_start_ms) >= kCtrlIsolationRebootMs) {
+        ctrl_audit("isolation_reboot: isolated for %lus, mqtt=%d espnow_hb=%lu",
+                   static_cast<unsigned long>((now - g_ctrl_isolation_start_ms) / 1000),
+                   g_ctrl_mqtt.connected() ? 1 : 0,
+                   static_cast<unsigned long>(hb_ms));
         ESP.restart();
       }
     }
