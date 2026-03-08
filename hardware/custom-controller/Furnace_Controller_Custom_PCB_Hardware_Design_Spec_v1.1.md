@@ -392,8 +392,13 @@ requirements in the referenced sections.
 
 | Component | Key Specs | Notes |
 |-----------|-----------|-------|
-| **TI SN65HVD3082E** (recommended) | 3.3V, half-duplex, fail-safe, SOIC-8 | Proven, low cost, ±15kV ESD on bus pins |
-| _Alt:_ TI THVD1500 | 3.3V, half-duplex, ±30kV ESD, fail-safe | Higher ESD rating for harsh environments |
+| **Maxim MAX3485** (recommended) | 3.3V (VCC 3.0–3.6V), half-duplex, SOIC-8 | True 3.3V part, ±15kV ESD, pin-compatible with SN65HVD3082E footprint |
+| _Alt:_ TI SN65HVD3088E | 3.3V (VCC 3.0–3.6V), half-duplex, fail-safe | Higher data rate (50 Mbps), same pinout |
+
+> **Correction (v1.1):** The SN65HVD3082E and THVD1500 previously listed here are
+> **5V parts** (VCC 4.5–5.5V), not 3.3V-compatible. They cannot be powered directly
+> from the 3.3V rail. MAX3485 is a true 3.3V transceiver (VCC 3.0–3.6V) and is the
+> correct recommendation for this design.
 
 ------------------------------------------------------------------------
 
