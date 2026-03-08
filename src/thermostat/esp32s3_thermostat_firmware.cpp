@@ -245,6 +245,7 @@ lv_obj_t *g_home_date_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_screen_weather_label = nullptr;
 lv_obj_t *g_screen_indoor_label = nullptr;
+lv_obj_t *g_screen_status_label = nullptr;
 lv_obj_t *g_settings_diag_label = nullptr;
 lv_obj_t *g_settings_display_label = nullptr;
 lv_obj_t *g_settings_system_label = nullptr;
@@ -2217,9 +2218,13 @@ void refresh_ui() {
   if (g_screen_indoor_label != nullptr) {
     lv_label_set_text(g_screen_indoor_label, g_runtime->indoor_temp_text().c_str());
   }
+  if (g_screen_status_label != nullptr) {
+    lv_label_set_text(g_screen_status_label, g_runtime->status_text(now).c_str());
+  }
   if (g_screen.screensaver_active()) {
     thermostat::ui::update_screensaver_layout(g_screen_time_label, g_screen_weather_label,
-                                              g_screen_indoor_label, now / 60000UL);
+                                              g_screen_indoor_label, g_screen_status_label,
+                                              now / 60000UL);
   }
   const bool wifi_connected = WiFi.status() == WL_CONNECTED;
   const bool mqtt_connected = g_mqtt.connected();
@@ -2522,6 +2527,7 @@ void create_ui() {
   g_screen_time_label = handles.screen_time_label;
   g_screen_weather_label = handles.screen_weather_label;
   g_screen_indoor_label = handles.screen_indoor_label;
+  g_screen_status_label = handles.screen_status_label;
   g_settings_diag_label = handles.settings_diag_label;
   g_settings_display_label = handles.settings_display_label;
   g_settings_system_label = handles.settings_system_label;

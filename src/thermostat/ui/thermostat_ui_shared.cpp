@@ -882,6 +882,11 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_pos(out_handles->screen_indoor_label, 32, 240);
   lv_label_set_text(out_handles->screen_indoor_label, "--");
   style_label(out_handles->screen_indoor_label, font120());
+
+  out_handles->screen_status_label = lv_label_create(screensaver_root);
+  lv_obj_set_pos(out_handles->screen_status_label, 48, 200);
+  lv_label_set_text(out_handles->screen_status_label, "");
+  style_label(out_handles->screen_status_label, font40());
 }
 
 void set_mode_button_state(FurnaceMode mode) { apply_mode_state(mode); }
@@ -942,7 +947,7 @@ const char *weather_icon_symbol(WeatherIcon icon) {
 }
 
 void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv_obj_t *indoor_label,
-                               uint32_t minute_index) {
+                               lv_obj_t *status_label, uint32_t minute_index) {
   if (time_label == nullptr || weather_label == nullptr || indoor_label == nullptr) {
     return;
   }
@@ -1006,12 +1011,19 @@ void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv
     lv_obj_set_pos(time_label, static_cast<lv_coord_t>(c.time_x), static_cast<lv_coord_t>(c.time_y));
     lv_obj_set_pos(weather_label, static_cast<lv_coord_t>(c.weather_x), static_cast<lv_coord_t>(c.weather_y));
     lv_obj_set_pos(indoor_label, static_cast<lv_coord_t>(c.indoor_x), static_cast<lv_coord_t>(c.indoor_y));
+    if (status_label != nullptr) {
+      lv_obj_set_pos(status_label, static_cast<lv_coord_t>(c.weather_x),
+                     static_cast<lv_coord_t>(c.weather_y) + weather_h + 4);
+    }
     return;
   }
 
   lv_obj_set_pos(time_label, margin, margin);
   lv_obj_set_pos(weather_label, margin, margin + time_h + 20);
   lv_obj_set_pos(indoor_label, margin, margin + time_h + weather_h + 40);
+  if (status_label != nullptr) {
+    lv_obj_set_pos(status_label, margin, margin + time_h + weather_h + 28);
+  }
 }
 
 }  // namespace ui

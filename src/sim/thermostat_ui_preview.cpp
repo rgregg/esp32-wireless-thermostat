@@ -88,6 +88,7 @@ lv_obj_t *g_weather_icon_label = nullptr;
 lv_obj_t *g_screen_time_label = nullptr;
 lv_obj_t *g_screen_weather_label = nullptr;
 lv_obj_t *g_screen_indoor_label = nullptr;
+lv_obj_t *g_screen_status_label = nullptr;
 lv_obj_t *g_settings_diag_label = nullptr;
 lv_obj_t *g_settings_display_label = nullptr;
 lv_obj_t *g_settings_system_label = nullptr;
@@ -521,9 +522,13 @@ void update_labels() {
   if (g_screen_indoor_label != nullptr) {
     lv_label_set_text(g_screen_indoor_label, indoor_text.c_str());
   }
+  if (g_screen_status_label != nullptr) {
+    lv_label_set_text(g_screen_status_label, status_text.c_str());
+  }
   if (g_screen.screensaver_active()) {
     thermostat::ui::update_screensaver_layout(g_screen_time_label, g_screen_weather_label,
-                                              g_screen_indoor_label, SDL_GetTicks() / 60000U);
+                                              g_screen_indoor_label, g_screen_status_label,
+                                              SDL_GetTicks() / 60000U);
   }
 
   char system_text[256];
@@ -801,6 +806,7 @@ void create_ui() {
   g_screen_time_label = handles.screen_time_label;
   g_screen_weather_label = handles.screen_weather_label;
   g_screen_indoor_label = handles.screen_indoor_label;
+  g_screen_status_label = handles.screen_status_label;
   g_settings_diag_label = handles.settings_diag_label;
   g_settings_display_label = handles.settings_display_label;
   g_settings_system_label = handles.settings_system_label;

@@ -51,6 +51,7 @@ struct UiHandles {
   lv_obj_t *screen_time_label = nullptr;
   lv_obj_t *screen_weather_label = nullptr;
   lv_obj_t *screen_indoor_label = nullptr;
+  lv_obj_t *screen_status_label = nullptr;
   lv_obj_t *settings_diag_label = nullptr;
   lv_obj_t *settings_display_label = nullptr;
   lv_obj_t *settings_system_label = nullptr;
@@ -76,7 +77,8 @@ void set_fan_mode_buttons_enabled(bool enabled);
 void set_mode_buttons_enabled(bool enabled);
 void set_temperature_unit_button_state(TemperatureUnit unit);
 void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label,
-                               lv_obj_t *indoor_label, uint32_t minute_index);
+                               lv_obj_t *indoor_label, lv_obj_t *status_label,
+                               uint32_t minute_index);
 
 const lv_font_t *font_mdi_weather_30();
 const char *weather_icon_symbol(WeatherIcon icon);
