@@ -181,10 +181,7 @@ String g_cfg_base_topic = THERMOSTAT_BASE_TOPIC;
 String g_cfg_device_mac;   // 6-char hex suffix from WiFi MAC, set at boot
 String g_cfg_device_name;  // user-friendly name, default "controller-{MAC}"
 bool g_cfg_ha_discovery_enabled = true;
-// Legacy shims: kept alive so HA discovery compiles.  Task 4 will update.
 String g_cfg_ctrl_mqtt_client_id;   // computed from base_topic + MAC at boot
-String g_cfg_ctrl_mqtt_base_topic;  // computed from base_topic + MAC at boot
-String g_cfg_unique_device_id;      // computed from base_topic + MAC at boot
 String g_cfg_ctrl_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
 String g_cfg_ctrl_ota_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
 String g_cfg_ctrl_ota_password = THERMOSTAT_CONTROLLER_OTA_PASSWORD;
@@ -337,18 +334,12 @@ void ctrl_load_runtime_config() {
   g_cfg_fan_circ_period_min = static_cast<uint16_t>(g_ctrl_cfg.getUInt("fan_circ_per", g_cfg_fan_circ_period_min));
   g_cfg_fan_circ_duration_min = static_cast<uint16_t>(g_ctrl_cfg.getUInt("fan_circ_dur", g_cfg_fan_circ_duration_min));
 
-  // Compute legacy shim values from new config — used by MQTT connect and HA
-  // discovery until Tasks 3/4 replace all callers.
+  // Compute MQTT client ID from base_topic + MAC
   {
     char buf[192];
     mqtt_topics::client_id(buf, sizeof(buf),
         g_cfg_base_topic.c_str(), g_cfg_device_mac.c_str());
     g_cfg_ctrl_mqtt_client_id = String(buf);
-    // Legacy base topic = {base}/devices/{mac} (no trailing slash)
-    snprintf(buf, sizeof(buf), "%s/devices/%s",
-             g_cfg_base_topic.c_str(), g_cfg_device_mac.c_str());
-    g_cfg_ctrl_mqtt_base_topic = String(buf);
-    g_cfg_unique_device_id = g_cfg_base_topic + "_" + g_cfg_device_mac;
   }
 }
 
@@ -483,15 +474,11 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "base_topic") {
     g_cfg_base_topic = value;
     g_ctrl_cfg.putString("base_topic", value);
-    // Recompute legacy shims
+    // Recompute MQTT client ID
     char buf[192];
     mqtt_topics::client_id(buf, sizeof(buf),
         g_cfg_base_topic.c_str(), g_cfg_device_mac.c_str());
     g_cfg_ctrl_mqtt_client_id = String(buf);
-    snprintf(buf, sizeof(buf), "%s/devices/%s",
-             g_cfg_base_topic.c_str(), g_cfg_device_mac.c_str());
-    g_cfg_ctrl_mqtt_base_topic = String(buf);
-    g_cfg_unique_device_id = g_cfg_base_topic + "_" + g_cfg_device_mac;
     g_ctrl_mqtt_reconfigure_required = true;
     g_ctrl_mqtt_discovery_sent = false;
   } else if (key == "ha_discovery_enabled") {
@@ -855,8 +842,8 @@ void ctrl_publish_discovery() {
     return;
   }
 
-  const String base = g_cfg_ctrl_mqtt_base_topic;
-  const String dev_id = g_cfg_unique_device_id + "_controller";
+  const String base = g_cfg_base_topic + "/devices/" + g_cfg_device_mac;
+  const String dev_id = g_cfg_base_topic + "_" + g_cfg_device_mac + "_controller";
   const String dp = g_cfg_ctrl_discovery_prefix + "/";
   const String switch_topic = dp + "switch/" + dev_id + "_lockout/config";
   const String filter_topic = dp + "sensor/" + dev_id + "_filter_runtime/config";
@@ -909,10 +896,10 @@ void ctrl_publish_discovery() {
       "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\","
       "\"min_temp\":%d,\"max_temp\":%d,\"temp_step\":%s,\"temp_unit\":\"%s\","
       "\"dev\":{\"ids\":[\"%s\"],"
-      "\"name\":\"Furnace Controller\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
+      "\"name\":\"%s\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
       base.c_str(), dev_id.c_str(),
       min_temp, max_temp, step_str, unit_str,
-      dev_id.c_str());
+      dev_id.c_str(), g_cfg_device_name.c_str());
   g_ctrl_mqtt.publish(climate_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
