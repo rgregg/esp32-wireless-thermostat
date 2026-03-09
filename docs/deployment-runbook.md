@@ -3,6 +3,7 @@
 ## Defaults
 - MQTT host defaults to `mqtt.lan` on both devices.
 - MQTT username/password default to empty.
+- MQTT base topic defaults to `esp32-wireless-thermostat`. Each device publishes under `{base_topic}/devices/{MAC}/...` where `{MAC}` is the 6-character hex suffix of the device WiFi MAC address (e.g., `29A9C4`).
 - ESP-NOW default channel is `6` on both devices.
 - ESP-NOW default LMK is set on both devices (same 16-byte key in hex).
 - ESP-NOW peer MAC default is broadcast (`FF:FF:FF:FF:FF:FF`), which keeps multicast fallback.
@@ -53,12 +54,14 @@ esptool.py --chip esp32 --port /dev/<controller-serial-port> --baud 460800 \
 - Display web OTA upload: `http://<display-ip>/update`
 - Display screenshot: `http://<display-ip>/screenshot`
 - MQTT path smoke verifier (with broker + both devices online):
-  - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan`
+  - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan --ctrl-mac <CTRL_MAC> --disp-mac <DISP_MAC>`
+- Old topic cleanup (one-time after migration):
+  - `python3 scripts/mqtt_cleanup_old_topics.py --host mqtt.lan`
 - MQTT reboot commands:
-  - Controller: publish `1` to `thermostat/furnace-controller/cmd/reboot`
-  - Display: publish `1` to `thermostat/furnace-display/cmd/reboot`
+  - Controller: publish `1` to `esp32-wireless-thermostat/devices/<CTRL_MAC>/cmd/reboot`
+  - Display: publish `1` to `esp32-wireless-thermostat/devices/<DISP_MAC>/cmd/reboot`
 - Sequence recovery command (no reboot required):
-  - Publish `1` to `thermostat/furnace-controller/cmd/reset_sequence`
+  - Publish `1` to `esp32-wireless-thermostat/devices/<CTRL_MAC>/cmd/reset_sequence`
   - Controller resets its command sequence filter and forwards reset to display.
 
 ## Release Artifacts
@@ -73,7 +76,9 @@ esptool.py --chip esp32 --port /dev/<controller-serial-port> --baud 460800 \
 
 ## Runtime Config Contract
 
-### Controller keys (`thermostat/furnace-controller/cfg/<key>/set`)
+Config keys are set via MQTT at `{base_topic}/devices/{MAC}/cfg/<key>/set` and current values are published at `{base_topic}/devices/{MAC}/cfg/<key>/state`.
+
+### Controller keys
 | Key | Type | Default | Accepted values/range | Reboot required |
 | --- | --- | --- | --- | --- |
 | `wifi_ssid` | string | `""` | any | no |
@@ -82,17 +87,16 @@ esptool.py --chip esp32 --port /dev/<controller-serial-port> --baud 460800 \
 | `mqtt_port` | integer | `1883` | `1..65535` | no |
 | `mqtt_user` | string | `""` | any | no |
 | `mqtt_password` | string (secret) | `""` | any | no |
-| `mqtt_client_id` | string | `esp32-furnace-controller` | any | no |
-| `mqtt_base_topic` | string | `thermostat/furnace-controller` | any | no |
-| `display_mqtt_base_topic` | string | `thermostat/furnace-display` | any | no |
-| `shared_device_id` | string | `wireless_thermostat_system` | any | no |
+| `base_topic` | string | `esp32-wireless-thermostat` | any | no |
+| `device_name` | string | auto-generated (`controller-{MAC}`) | any | no |
+| `ha_discovery_enabled` | boolean string | `1` | `0`, `1` | no |
 | `ota_hostname` | string | `esp32-furnace-controller` | any | no |
 | `ota_password` | string (secret) | `""` | any | no |
 | `espnow_channel` | integer | `6` | `1..14` | yes |
 | `espnow_peer_mac` | string | `FF:FF:FF:FF:FF:FF` | MAC format expected | yes |
 | `espnow_lmk` | string (secret) | `a1b2c3d4e5f60718293a4b5c6d7e8f90` | 32 hex chars expected | yes |
 
-### Thermostat keys (`thermostat/furnace-display/cfg/<key>/set`)
+### Thermostat (display) keys
 | Key | Type | Default | Accepted values/range | Reboot required |
 | --- | --- | --- | --- | --- |
 | `wifi_ssid` | string | `""` | any | no |
@@ -101,10 +105,11 @@ esptool.py --chip esp32 --port /dev/<controller-serial-port> --baud 460800 \
 | `mqtt_port` | integer | `1883` | `1..65535` | no |
 | `mqtt_user` | string | `""` | any | no |
 | `mqtt_password` | string (secret) | `""` | any | no |
-| `mqtt_client_id` | string | `esp32-furnace-thermostat` | any | no |
-| `mqtt_base_topic` | string | `thermostat/furnace-display` | any | no |
+| `base_topic` | string | `esp32-wireless-thermostat` | any | no |
+| `device_name` | string | auto-generated (`display-{MAC}`) | any | no |
+| `ha_discovery_enabled` | boolean string | `1` | `0`, `1` | no |
+| `paired_controller_mac` | string | `""` | 6-char hex MAC suffix | no |
 | `discovery_prefix` | string | `homeassistant` | any | no |
-| `shared_device_id` | string | `wireless_thermostat_system` | any | no |
 | `pirateweather_api_key` | string (secret) | `""` | any | no |
 | `pirateweather_zip` | string | `""` | ZIP string | no |
 | `display_timeout_s` | integer | `300` | clamped to `30..600` | no |
@@ -128,13 +133,14 @@ esptool.py --chip esp32 --port /dev/<controller-serial-port> --baud 460800 \
 - If API config is missing or fetches fail, display falls back to stub weather (`Cloudy`, `6.0C`).
 
 ## Discovery and Telemetry
-- Controller base topic default: `thermostat/furnace-controller`
-- Display base topic default: `thermostat/furnace-display`
+- Base topic default: `esp32-wireless-thermostat`
+- Each device publishes under `{base_topic}/devices/{MAC}/...`
+- Device discovery: each device publishes a retained announce message at `{base_topic}/devices/{MAC}/announce` containing role, firmware version, and device name.
 - Protocol-aligned command transport over MQTT:
-  - Thermostat publishes packed command word mirror: `thermostat/furnace-display/state/packed_command/<MAC>`
-  - Controller can accept packed command word directly: `thermostat/furnace-controller/cmd/packed_word`
+  - Thermostat publishes packed command word: `{base_topic}/devices/{DISP_MAC}/state/packed_command`
+  - Controller accepts packed command word directly: `{base_topic}/devices/{CTRL_MAC}/cmd/packed_word`
   - Home Assistant granular topics remain supported (`cmd/mode`, `cmd/fan_mode`, `cmd/target_temp_c`, etc.)
-- Health telemetry:
+- Health telemetry (published under each device's `state/` subtree):
   - `state/boot_count`
   - `state/reset_reason`
   - `state/uptime_s`
@@ -175,7 +181,7 @@ New firmware boots in a **pending-verify** state. The device must establish WiFi
 3. Wait for display to reconnect to WiFi + MQTT and resume telemetry.
 4. Update controller second via OTA.
 5. Re-run MQTT smoke verification:
-   - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan`
+   - `python3 scripts/mqtt_path_smoke.py --host mqtt.lan --ctrl-mac <CTRL_MAC> --disp-mac <DISP_MAC>`
 
 ### Health Checks After Each Node Update
 - Device responds on HTTP root and `/config`.

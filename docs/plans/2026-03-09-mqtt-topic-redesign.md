@@ -1,5 +1,7 @@
 # MQTT Topic Redesign
 
+> **Status: Implemented** — This design was implemented in the `mqtt-refactor` branch (Tasks 1-10).
+
 ## Problem
 
 The current MQTT structure splits topics across three unrelated prefixes:
