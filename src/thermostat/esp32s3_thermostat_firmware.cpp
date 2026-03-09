@@ -1878,27 +1878,38 @@ void wifi_event_handler(arduino_event_t *event) {
   }
 }
 
+static bool g_wifi_radio_started = false;
+
+static void ensure_wifi_radio_started() {
+  if (g_wifi_radio_started) return;
+  g_wifi_radio_started = true;
+  WiFi.mode(WIFI_STA);
+  WiFi.onEvent(wifi_event_handler);
+  WiFi.setAutoReconnect(true);
+}
+
 void ensure_wifi_connected(uint32_t now_ms) {
   if (g_cfg_wifi_reconnect_required) {
     g_cfg_wifi_reconnect_required = false;
+    ensure_wifi_radio_started();
     WiFi.disconnect();
     g_last_wifi_attempt_ms = 0;
   }
   if (WiFi.status() == WL_CONNECTED) return;
 
   if (g_cfg_wifi_ssid.length() > 0) {
+    ensure_wifi_radio_started();
     if ((now_ms - g_last_wifi_attempt_ms) < kNetworkRetryMs) return;
     g_last_wifi_attempt_ms = now_ms;
     WiFi.begin(g_cfg_wifi_ssid.c_str(), g_cfg_wifi_password.c_str());
     return;
   }
 
+  // No SSID configured — start BLE provisioning after delay
   if (g_wifi_provisioning_started) return;
   if (!g_wifi_has_attempted_stored_connect) {
     g_wifi_has_attempted_stored_connect = true;
     g_first_wifi_attempt_ms = now_ms;
-    g_last_wifi_attempt_ms = now_ms;
-    WiFi.begin();
     return;
   }
 
@@ -1906,10 +1917,6 @@ void ensure_wifi_connected(uint32_t now_ms) {
     start_wifi_provisioning();
     return;
   }
-
-  if ((now_ms - g_last_wifi_attempt_ms) < kNetworkRetryMs) return;
-  g_last_wifi_attempt_ms = now_ms;
-  WiFi.begin();
 }
 
 void ensure_mqtt_connected(uint32_t now_ms) {
@@ -2659,16 +2666,14 @@ void init_sensors() {
 }
 
 void init_network() {
-  WiFi.mode(WIFI_STA);
-
-  // Compute device MAC (last 3 bytes, uppercase hex, no colons)
+  // Read MAC address without starting the WiFi radio — keeps internal RAM
+  // free for BLE provisioning on fresh devices with no stored SSID.
   {
-    String mac = WiFi.macAddress();
-    g_cfg_device_mac = "";
-    g_cfg_device_mac += mac[9]; g_cfg_device_mac += mac[10];
-    g_cfg_device_mac += mac[12]; g_cfg_device_mac += mac[13];
-    g_cfg_device_mac += mac[15]; g_cfg_device_mac += mac[16];
-    g_cfg_device_mac.toUpperCase();
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char buf[7];
+    snprintf(buf, sizeof(buf), "%02X%02X%02X", mac[3], mac[4], mac[5]);
+    g_cfg_device_mac = String(buf);
     if (g_cfg_device_name.isEmpty()) {
       g_cfg_device_name = "display-" + g_cfg_device_mac;
     }
@@ -2681,8 +2686,11 @@ void init_network() {
     g_cfg_mqtt_client_id = String(cid_buf);
   }
 
-  WiFi.onEvent(wifi_event_handler);
-  WiFi.setAutoReconnect(true);
+  // Only start WiFi if we have credentials — otherwise leave radio off so
+  // BLE provisioning can use the internal RAM.
+  if (g_cfg_wifi_ssid.length() > 0) {
+    ensure_wifi_radio_started();
+  }
   g_mqtt.setBufferSize(1024);
   g_mqtt.setServer(g_cfg_mqtt_host.c_str(), g_cfg_mqtt_port);
   g_mqtt.setCallback(mqtt_on_message);
@@ -2762,6 +2770,82 @@ void poll_sensors(uint32_t now_ms) {
 
 }  // namespace
 
+// ---------- BLE provisioning boot mode ----------
+// When no WiFi SSID is configured, we enter a minimal boot mode:
+// 1. Start BLE immediately (before display, which consumes internal RAM)
+// 2. Init display and show a simple "configure WiFi" message
+// 3. Loop only LVGL ticks + watchdog until BLE provides credentials → reboot
+static bool g_provisioning_boot_mode = false;
+
+extern "C" const lv_font_t thermostat_font_montserrat_20;
+extern "C" const lv_font_t thermostat_font_montserrat_30;
+
+static void run_provisioning_boot() {
+  Serial.println("[provision] No WiFi configured — entering BLE provisioning mode");
+  g_provisioning_boot_mode = true;
+
+  // Start BLE first while internal RAM is still available (display not yet init)
+#ifdef IMPROV_WIFI_BLE_ENABLED
+  ImprovBleConfig cfg = {};
+  cfg.device_name = "Thermostat";
+  cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  cfg.hardware_variant = "ESP32-S3";
+  cfg.device_url = nullptr;
+  cfg.reboot_after_provision = true;
+  bool ble_ok = improv_ble_start(cfg, [](const char *ssid, const char *password) {
+    Serial.printf("[provision] Credentials received for: %s\n", ssid);
+    g_cfg.putString("wifi_ssid", ssid);
+    g_cfg.putString("wifi_pwd", password);
+  });
+  Serial.printf("[provision] BLE started: %s\n", ble_ok ? "ok" : "FAILED");
+#endif
+
+  // Now init display — BLE is already running and allocated its memory
+  init_backlight();
+  init_display_and_lvgl();
+
+  // Simple provisioning screen: dark background, centered text
+  lv_obj_t *scr = lv_scr_act();
+  lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+
+  lv_obj_t *title = lv_label_create(scr);
+  lv_label_set_text(title, "WiFi Setup Required");
+  lv_obj_set_style_text_color(title, lv_color_white(), 0);
+  lv_obj_set_style_text_font(title, &thermostat_font_montserrat_30, 0);
+  lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
+
+  lv_obj_t *body = lv_label_create(scr);
+  lv_label_set_text(body, "Use the Improv Wi-Fi app or\nimprov-wifi.com to configure");
+  lv_obj_set_style_text_color(body, lv_color_make(0xAA, 0xAA, 0xAA), 0);
+  lv_obj_set_style_text_font(body, &thermostat_font_montserrat_20, 0);
+  lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
+
+  // Turn on backlight
+  ledcWrite(kBacklightPin, 200);
+
+  // Minimal loop: LVGL ticks + watchdog + deferred reboot after BLE response
+  esp_task_wdt_add(NULL);
+  uint32_t last_tick = millis();
+  for (;;) {
+    esp_task_wdt_reset();
+#ifdef IMPROV_WIFI_BLE_ENABLED
+    if (improv_ble_reboot_pending()) {
+      Serial.println("[provision] Rebooting with new credentials...");
+      ESP.restart();
+    }
+#endif
+    uint32_t now = millis();
+    if ((now - last_tick) >= kUiTickMs) {
+      lv_tick_inc(now - last_tick);
+      last_tick = now;
+      lv_timer_handler();
+    }
+    delay(1);
+  }
+}
+
 void thermostat_firmware_setup() {
   g_api_mutex = xSemaphoreCreateMutex();
   g_cfg_ready = g_cfg.begin("cfg_disp", false);
@@ -2771,6 +2855,13 @@ void thermostat_firmware_setup() {
     g_cfg.putUInt("boot_cnt", g_boot_count);
   }
   g_reset_reason = reset_reason_text(esp_reset_reason());
+
+  // If no WiFi SSID is configured, enter minimal BLE provisioning mode.
+  // This must happen before display init to keep internal RAM free for BLE.
+  if (g_cfg_wifi_ssid.isEmpty()) {
+    run_provisioning_boot();
+    return;  // never reached — run_provisioning_boot loops forever
+  }
 
   ThermostatDeviceRuntimeConfig cfg;
   static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};

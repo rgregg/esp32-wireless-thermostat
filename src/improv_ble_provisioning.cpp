@@ -13,6 +13,9 @@
 
 static ImprovWiFiBLE s_improv_ble;
 static bool s_active = false;
+static bool s_reboot_after = false;
+static bool s_reboot_pending = false;
+static uint32_t s_reboot_at_ms = 0;
 static ImprovBleConnectedCb s_on_connected = nullptr;
 
 static ImprovTypes::ChipFamily chip_family_from_variant(const char *variant) {
@@ -27,17 +30,21 @@ bool improv_ble_start(const ImprovBleConfig &config, ImprovBleConnectedCb on_con
     if (s_active) return false;
 
     s_on_connected = on_connected;
+    s_reboot_after = config.reboot_after_provision;
 
-    // The onImprovConnected callback fires after tryConnectToWifi returns true.
-    // We save credentials and schedule a reboot here.
     s_improv_ble.onImprovConnected([](const char *ssid, const char *password) {
         Serial.printf("[Improv] Credentials accepted for: %s\n", ssid);
         if (s_on_connected) {
             s_on_connected(ssid, password);
         }
-        Serial.println("[Improv] Rebooting to connect with new credentials...");
-        delay(500);
-        ESP.restart();
+        if (s_reboot_after) {
+            // Schedule reboot — don't reboot here because the library still
+            // needs to send STATE_PROVISIONED and the device URL response
+            // after this callback returns.
+            Serial.println("[Improv] Will reboot in 2s after BLE response completes...");
+            s_reboot_pending = true;
+            s_reboot_at_ms = millis() + 2000;
+        }
     });
 
     s_improv_ble.onImprovError([](ImprovTypes::Error err) {
@@ -102,6 +109,10 @@ void improv_ble_stop() {
 
 bool improv_ble_is_active() {
     return s_active;
+}
+
+bool improv_ble_reboot_pending() {
+    return s_reboot_pending && (int32_t)(millis() - s_reboot_at_ms) >= 0;
 }
 
 #endif
