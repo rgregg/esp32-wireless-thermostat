@@ -16,6 +16,7 @@
 #include "controller/controller_runtime.h"
 #include "espnow_cmd_word.h"
 #include "mqtt_payload.h"
+#include "mqtt_topics.h"
 #include "sim_mqtt_client.h"
 #include "sim_weather_client.h"
 #include "thermostat/thermostat_state.h"
@@ -26,10 +27,11 @@ namespace {
 constexpr int kDisplayWidth = 700;
 constexpr int kDisplayHeight = 500;
 
-// MQTT topics matching real hardware
-constexpr const char *kControllerBaseTopic = "thermostat/furnace-controller";
-constexpr const char *kDisplayBaseTopic = "thermostat/furnace-display";
-constexpr const char *kMqttClientId = "sim-controller";
+// MQTT topics matching real hardware (new unified structure)
+constexpr const char *kBaseTopic = "esp32-wireless-thermostat";
+constexpr const char *kControllerMac = "SIM_CTRL";
+constexpr const char *kDisplayMac = "SIM_DISP";
+constexpr const char *kMqttClientId = "esp32-wireless-thermostat-SIM_CTRL";
 constexpr const char *kMqttHost = "localhost";
 constexpr int kMqttPort = 1883;
 
@@ -59,12 +61,16 @@ bool g_running = true;
 sim::SimMqttClient g_mqtt;
 bool g_mqtt_connected = false;
 
-std::string ctrl_topic(const char *suffix) {
-  return std::string(kControllerBaseTopic) + "/" + suffix;
+std::string self_topic(const char *suffix) {
+  char buf[192];
+  mqtt_topics::device_topic(buf, sizeof(buf), kBaseTopic, kControllerMac, suffix);
+  return std::string(buf);
 }
 
-std::string display_topic(const char *suffix) {
-  return std::string(kDisplayBaseTopic) + "/" + suffix;
+std::string peer_topic(const char *mac, const char *suffix) {
+  char buf[192];
+  mqtt_topics::device_topic(buf, sizeof(buf), kBaseTopic, mac, suffix);
+  return std::string(buf);
 }
 
 // SimControllerTransport: bridges ControllerApp telemetry to MQTT topics
@@ -75,8 +81,8 @@ class SimControllerTransport : public thermostat::IControllerTransport {
 
     char buf[32];
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(outdoor_temp_c));
-    g_mqtt.publish(ctrl_topic("state/outdoor_temp_c"), buf, true);
-    g_mqtt.publish(ctrl_topic("state/outdoor_condition"),
+    g_mqtt.publish(self_topic("state/outdoor_temp_c"), buf, true);
+    g_mqtt.publish(self_topic("state/outdoor_condition"),
                    thermostat::weather_icon_display_text(icon), true);
   }
 
@@ -85,31 +91,31 @@ class SimControllerTransport : public thermostat::IControllerTransport {
 
     char buf[64];
 
-    g_mqtt.publish(ctrl_topic("state/availability"), "online", true);
+    g_mqtt.publish(self_topic("state/availability"), "online", true);
 
     const char *mode_str = "off";
     if (t.mode_code == 1) mode_str = "heat";
     else if (t.mode_code == 2) mode_str = "cool";
-    g_mqtt.publish(ctrl_topic("state/mode"), mode_str, true);
+    g_mqtt.publish(self_topic("state/mode"), mode_str, true);
 
     const char *fan_str = "auto";
     if (t.fan_code == 1) fan_str = "on";
     else if (t.fan_code == 2) fan_str = "circulate";
-    g_mqtt.publish(ctrl_topic("state/fan_mode"), fan_str, true);
+    g_mqtt.publish(self_topic("state/fan_mode"), fan_str, true);
 
     snprintf(buf, sizeof(buf), "%.1f", t.setpoint_c);
-    g_mqtt.publish(ctrl_topic("state/target_temp_c"), buf, true);
+    g_mqtt.publish(self_topic("state/target_temp_c"), buf, true);
 
     snprintf(buf, sizeof(buf), "%d", static_cast<int>(t.state));
-    g_mqtt.publish(ctrl_topic("state/furnace_state"), buf, true);
+    g_mqtt.publish(self_topic("state/furnace_state"), buf, true);
 
     snprintf(buf, sizeof(buf), "%.1f", t.filter_runtime_hours);
-    g_mqtt.publish(ctrl_topic("state/filter_runtime_hours"), buf, true);
+    g_mqtt.publish(self_topic("state/filter_runtime_hours"), buf, true);
 
-    g_mqtt.publish(ctrl_topic("state/lockout"), t.lockout ? "1" : "0", true);
+    g_mqtt.publish(self_topic("state/lockout"), t.lockout ? "1" : "0", true);
 
     snprintf(buf, sizeof(buf), "%u", t.seq);
-    g_mqtt.publish(ctrl_topic("state/telemetry_seq"), buf, true);
+    g_mqtt.publish(self_topic("state/telemetry_seq"), buf, true);
   }
 };
 
@@ -214,29 +220,32 @@ void publish_controller_extras() {
   const auto &rt = g_app->runtime();
   char buf[64];
 
-  g_mqtt.publish(ctrl_topic("state/relay_heat"), rt.heat_demand() ? "1" : "0", true);
-  g_mqtt.publish(ctrl_topic("state/relay_cool"), rt.cool_demand() ? "1" : "0", true);
-  g_mqtt.publish(ctrl_topic("state/relay_fan"), rt.fan_demand() ? "1" : "0", true);
+  g_mqtt.publish(self_topic("state/relay_heat"), rt.heat_demand() ? "1" : "0", true);
+  g_mqtt.publish(self_topic("state/relay_cool"), rt.cool_demand() ? "1" : "0", true);
+  g_mqtt.publish(self_topic("state/relay_fan"), rt.fan_demand() ? "1" : "0", true);
 
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>((SDL_GetTicks() - g_start_time_ms) / 1000));
-  g_mqtt.publish(ctrl_topic("state/uptime_s"), buf, true);
+  g_mqtt.publish(self_topic("state/uptime_s"), buf, true);
 
-  g_mqtt.publish(ctrl_topic("state/failsafe"), rt.failsafe_active() ? "1" : "0", true);
-  g_mqtt.publish(ctrl_topic("state/filter_change_required"),
+  g_mqtt.publish(self_topic("state/failsafe"), rt.failsafe_active() ? "1" : "0", true);
+  g_mqtt.publish(self_topic("state/filter_change_required"),
                  rt.filter_runtime_hours() >= kFilterChangeThresholdHours ? "1" : "0", true);
 }
 
-// Parse sensor topic: {base}/sensor/{mac}/{suffix}
+// Parse sensor topic: {base}/devices/{mac}/sensor/{suffix}
 // Returns true if topic matches, populating mac_out and suffix_out.
-bool parse_sensor_topic(const std::string &base, const std::string &topic,
+bool parse_sensor_topic(const std::string &topic,
                         std::string &mac_out, std::string &suffix_out) {
-  const std::string prefix = base + "/sensor/";
+  const std::string prefix = std::string(kBaseTopic) + "/devices/";
   if (topic.compare(0, prefix.size(), prefix) != 0) return false;
-  // MAC is 17 chars "AA:BB:CC:DD:EE:FF" followed by "/"
-  if (topic.size() < prefix.size() + 18) return false;
-  if (topic[prefix.size() + 17] != '/') return false;
-  mac_out = topic.substr(prefix.size(), 17);
-  suffix_out = topic.substr(prefix.size() + 18);
+  // Find the next "/" after the MAC
+  size_t mac_end = topic.find('/', prefix.size());
+  if (mac_end == std::string::npos) return false;
+  mac_out = topic.substr(prefix.size(), mac_end - prefix.size());
+  // Check for "/sensor/" after MAC
+  const std::string sensor_seg = "/sensor/";
+  if (topic.compare(mac_end, sensor_seg.size(), sensor_seg) != 0) return false;
+  suffix_out = topic.substr(mac_end + sensor_seg.size());
   return !suffix_out.empty();
 }
 
@@ -261,9 +270,9 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     g_last_mqtt_command_ms = now;
   }
 
-  // MQTT sensor intake: {base}/sensor/{mac}/temp_c or humidity
+  // MQTT sensor intake: {base}/devices/{mac}/sensor/temp_c or humidity
   std::string sensor_mac, sensor_suffix;
-  if (parse_sensor_topic(kControllerBaseTopic, topic, sensor_mac, sensor_suffix)) {
+  if (parse_sensor_topic(topic, sensor_mac, sensor_suffix)) {
     uint8_t parsed_mac[6];
     if (parse_mac_string(sensor_mac, parsed_mac)) {
       const float fval = static_cast<float>(atof(payload.c_str()));
@@ -279,7 +288,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   }
 
   // Handle display's packed command (primary communication path)
-  if (topic == display_topic("state/packed_command")) {
+  if (topic == peer_topic(kDisplayMac, "state/packed_command")) {
     uint32_t packed = static_cast<uint32_t>(strtoul(payload.c_str(), nullptr, 10));
     CommandWord cmd = espnow_cmd::decode(packed);
 
@@ -298,13 +307,13 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
   // Direct controller commands — build packed command word and route through app
   const auto &rt = g_app->runtime();
 
-  if (topic == ctrl_topic("cmd/lockout")) {
+  if (topic == self_topic("cmd/lockout")) {
     g_app->set_hvac_lockout(mqtt_payload::parse_bool(payload.c_str()));
     publish_controller_extras();
     return;
   }
 
-  if (topic == ctrl_topic("cmd/mode")) {
+  if (topic == self_topic("cmd/mode")) {
     FurnaceMode mode = mqtt_payload::str_to_mode(payload.c_str());
 
     uint32_t packed = thermostat::build_packed_command(
@@ -316,7 +325,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     return;
   }
 
-  if (topic == ctrl_topic("cmd/fan_mode")) {
+  if (topic == self_topic("cmd/fan_mode")) {
     FanMode fan = mqtt_payload::str_to_fan(payload.c_str());
 
     uint32_t packed = thermostat::build_packed_command(
@@ -328,7 +337,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     return;
   }
 
-  if (topic == ctrl_topic("cmd/target_temp_c")) {
+  if (topic == self_topic("cmd/target_temp_c")) {
     float temp = static_cast<float>(atof(payload.c_str()));
 
     uint32_t packed = thermostat::build_packed_command(
@@ -340,7 +349,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     return;
   }
 
-  if (topic == ctrl_topic("cmd/filter_reset")) {
+  if (topic == self_topic("cmd/filter_reset")) {
     if (mqtt_payload::parse_bool(payload.c_str())) {
       uint32_t packed = thermostat::build_packed_command(
           rt.mode(), rt.fan_mode(), rt.target_temperature_c(),
@@ -371,21 +380,21 @@ void ensure_mqtt_connected() {
   printf("[MQTT] Connected!\n");
 
   // Clear any retained messages from previous sessions that could have stale sequence numbers
-  g_mqtt.publish(display_topic("state/packed_command"), "", true);
+  g_mqtt.publish(peer_topic(kDisplayMac, "state/packed_command"), "", true);
 
   // Reset the sequence tracker so we accept the next command regardless of sequence
   g_app->reset_remote_command_sequence();
 
-  g_mqtt.subscribe(ctrl_topic("cmd/lockout"));
-  g_mqtt.subscribe(ctrl_topic("cmd/mode"));
-  g_mqtt.subscribe(ctrl_topic("cmd/fan_mode"));
-  g_mqtt.subscribe(ctrl_topic("cmd/target_temp_c"));
-  g_mqtt.subscribe(ctrl_topic("cmd/filter_reset"));
-  g_mqtt.subscribe(display_topic("state/packed_command"));
+  g_mqtt.subscribe(self_topic("cmd/lockout"));
+  g_mqtt.subscribe(self_topic("cmd/mode"));
+  g_mqtt.subscribe(self_topic("cmd/fan_mode"));
+  g_mqtt.subscribe(self_topic("cmd/target_temp_c"));
+  g_mqtt.subscribe(self_topic("cmd/filter_reset"));
+  g_mqtt.subscribe(peer_topic(kDisplayMac, "state/packed_command"));
 
-  // Subscribe to sensor intake topics from display nodes
-  g_mqtt.subscribe(ctrl_topic("sensor/+/temp_c"));
-  g_mqtt.subscribe(ctrl_topic("sensor/+/humidity"));
+  // Subscribe to sensor intake topics from any device
+  g_mqtt.subscribe(peer_topic("+", "sensor/temp_c"));
+  g_mqtt.subscribe(peer_topic("+", "sensor/humidity"));
 
   publish_controller_extras();
 }
@@ -946,7 +955,7 @@ bool init_sdl() {
 
 void shutdown() {
   if (g_mqtt_connected) {
-    g_mqtt.publish(ctrl_topic("state/availability"), "offline", true);
+    g_mqtt.publish(self_topic("state/availability"), "offline", true);
     g_mqtt.disconnect();
   }
 
