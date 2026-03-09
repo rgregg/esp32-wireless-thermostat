@@ -9,6 +9,34 @@
   - Note: ESP-NOW encryption requires a unicast peer MAC; with broadcast peer, traffic is unencrypted.
   - To enforce allowed-device communication and encrypted ESP-NOW traffic, set `espnow_peer_mac` to the other device's MAC on both devices.
 
+## Flashing Firmware
+
+### OTA (preferred)
+- Controller: `curl -F "firmware=@firmware.bin" http://<controller-ip>/update`
+- Display: `curl -F "firmware=@firmware.bin" http://<display-ip>/update`
+- Both also support ArduinoOTA (hostname-based, may have password set).
+
+### Serial
+For initial flashing or recovery when OTA is unavailable.
+
+**Display (ESP32-S3)** — auto-reset works:
+```
+esptool.py --chip esp32s3 --port /dev/<display-serial-port> --baud 460800 \
+  --no-stub --before default-reset --after hard-reset \
+  write_flash 0x10000 firmware.bin
+```
+
+**Controller (ESP32)** — auto-reset does NOT work; manually enter bootloader
+by holding BOOT, pressing RESET, then releasing BOOT:
+```
+esptool.py --chip esp32 --port /dev/<controller-serial-port> --baud 460800 \
+  --no-stub --before default-reset --after hard-reset \
+  write_flash 0x10000 firmware.bin
+```
+
+> **Note:** The stub flasher fails at 921600 baud on both devices. Use
+> `--no-stub` with 460800 baud.
+
 ## First Boot
 1. Flash controller and display firmware.
 2. Join both devices to WiFi.
@@ -103,7 +131,7 @@
 - Controller base topic default: `thermostat/furnace-controller`
 - Display base topic default: `thermostat/furnace-display`
 - Protocol-aligned command transport over MQTT:
-  - Thermostat publishes packed command word mirror: `thermostat/furnace-display/state/packed_command`
+  - Thermostat publishes packed command word mirror: `thermostat/furnace-display/state/packed_command/<MAC>`
   - Controller can accept packed command word directly: `thermostat/furnace-controller/cmd/packed_word`
   - Home Assistant granular topics remain supported (`cmd/mode`, `cmd/fan_mode`, `cmd/target_temp_c`, etc.)
 - Health telemetry:
