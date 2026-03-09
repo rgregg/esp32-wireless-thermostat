@@ -121,9 +121,9 @@ git commit -m "feat: add shared mqtt_topics.h topic builder with tests"
 
 ---
 
-### Task 2: Add `base_topic` and `ha_discovery_enabled` config to controller
+### Task 2: Add `base_topic`, `ha_discovery_enabled`, and `device_name` config to controller
 
-Replace `mqtt_base_topic`, `display_mqtt_base_topic`, and `mqtt_client_id` config keys with `base_topic` and `ha_discovery_enabled`. Update NVS load/save and config publishing.
+Replace `mqtt_base_topic`, `display_mqtt_base_topic`, and `mqtt_client_id` config keys with `base_topic`, `ha_discovery_enabled`, and `device_name`. Update NVS load/save and config publishing.
 
 **Files:**
 - Modify: `src/esp32_controller_main.cpp`
@@ -162,6 +162,7 @@ String g_cfg_display_mqtt_base_topic;
 // NEW:
 String g_cfg_base_topic;
 String g_cfg_device_mac;  // 6-char hex, set from WiFi MAC at boot
+String g_cfg_device_name; // user-friendly name, default "controller-{MAC}"
 bool g_cfg_ha_discovery_enabled = true;
 ```
 
@@ -192,14 +193,17 @@ String peer_topic_for(const char *peer_mac, const char *suffix) {
 
 - Load `base_topic` from NVS key `"base_topic"` (default: `THERMOSTAT_BASE_TOPIC`)
 - Load `ha_discovery_enabled` from NVS key `"ha_disc"` (default: `true`)
+- Load `device_name` from NVS key `"device_name"` (default: `"controller-{MAC}"`)
 - Remove NVS keys: `"mqtt_cid"`, `"mqtt_base"`, `"disp_base"`
 - Compute `g_cfg_device_mac` from `WiFi.macAddress()` (last 3 bytes, uppercase hex, no colons)
 - Auto-generate client ID: `mqtt_topics::client_id(buf, ..., base_topic, device_mac)`
+- If `device_name` is empty on first boot, auto-generate as `"controller-" + g_cfg_device_mac`
 
 **Step 5: Update config key handlers**
 
 - Add handler for `"base_topic"` → save to NVS, set `g_ctrl_mqtt_discovery_sent = false`
 - Add handler for `"ha_discovery_enabled"` → save to NVS
+- Add handler for `"device_name"` → save to NVS, set `g_ctrl_mqtt_discovery_sent = false`
 - Remove handlers for `"mqtt_client_id"`, `"mqtt_base_topic"`, `"display_mqtt_base_topic"`
 
 **Step 6: Update config publishing and web UI**
@@ -265,9 +269,9 @@ The MQTT message callback needs to parse the new topic format. Extract the devic
 
 After subscribing, publish a retained JSON announce message:
 ```json
-{"role":"controller","firmware":"v0.9.0","name":"esp32-furnace-controller-AABBCC"}
+{"role":"controller","firmware":"v0.9.0","name":"controller-29A9C4"}
 ```
-to `self_topic_for("announce")`.
+to `self_topic_for("announce")`. The `name` field uses `g_cfg_device_name`.
 
 **Step 6: Guard HA discovery**
 
@@ -355,7 +359,8 @@ With:
 
 **Step 2: Update config variables and NVS**
 
-- Replace `g_cfg_mqtt_client_id`, `g_cfg_mqtt_base_topic`, `g_cfg_controller_base_topic` with `g_cfg_base_topic`, `g_cfg_device_mac`, `g_cfg_ha_discovery_enabled`
+- Replace `g_cfg_mqtt_client_id`, `g_cfg_mqtt_base_topic`, `g_cfg_controller_base_topic` with `g_cfg_base_topic`, `g_cfg_device_mac`, `g_cfg_device_name`, `g_cfg_ha_discovery_enabled`
+- Load `device_name` from NVS key `"device_name"` (default: `"display-{MAC}"`)
 - Store paired controller MAC in config (existing `devices` mechanism or new `controller_mac` key)
 - Auto-generate client ID from base_topic + MAC
 
@@ -424,8 +429,9 @@ Wire up all display MQTT operations to new topic paths. Key change: sensor data 
 **Step 4: Publish announce on connect**
 
 ```json
-{"role":"display","firmware":"v0.9.0","name":"esp32-furnace-thermostat-55D0E8"}
+{"role":"display","firmware":"v0.9.0","name":"display-55D0E8"}
 ```
+The `name` field uses `g_cfg_device_name`.
 
 **Step 5: Guard HA discovery**
 

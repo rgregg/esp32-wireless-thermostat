@@ -97,7 +97,8 @@ Sensor data (published):
 
 **Announce:** Each device publishes a retained message on connect to
 `{base_topic}/devices/{MAC}/announce` containing role (`controller`,
-`display`, `sensor`), firmware version, and device name.
+`display`, `sensor`), firmware version, and configurable device name
+(from `device_name` config key).
 
 **Controller authorization:**
 - Maintains a list of authorized device MACs (existing `devices` config)
@@ -137,6 +138,9 @@ and `controller_base_topic` config keys are removed.
 **New:**
 - `base_topic` — default `esp32-wireless-thermostat`
 - `ha_discovery_enabled` — boolean, default `true`
+- `device_name` — string, default auto-generated as `{role}-{last3MAC}`
+  (e.g. `controller-29A9C4`, `display-55D0E8`). Used in announce payload
+  and HA discovery as device display name.
 
 **Unchanged:** WiFi, MQTT broker host/port/user/password, ESP-NOW,
 OTA, weather, display settings, `discovery_prefix`, `devices`.
