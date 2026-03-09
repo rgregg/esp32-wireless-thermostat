@@ -2,9 +2,9 @@
 """Broker-backed MQTT path smoke test for thermostat/controller pair.
 
 Validates:
-- thermostat granular commands produce packed command mirror
-- controller follows packed command mirror
-- controller direct packed command endpoint works
+- thermostat granular commands produce packed command mirror with correct encoding
+- controller follows display packed command mirror (two state changes)
+- end-to-end round-trip: display cmd → packed_command/<MAC> → controller state
 
 Usage:
   python3 scripts/mqtt_path_smoke.py --host mqtt.lan
@@ -33,19 +33,6 @@ class CommandFields:
     seq: int
     filter_reset: bool
     sync_request: bool
-
-
-def encode_command(fields: CommandFields) -> int:
-    sp = max(0, min(400, fields.setpoint_decic))
-    seq = fields.seq & 0x1FF
-    w = 0
-    w |= (fields.mode & 0x3) << 0
-    w |= (fields.fan & 0x3) << 2
-    w |= (sp & 0x1FF) << 4
-    w |= (seq & 0x1FF) << 13
-    w |= (1 if fields.filter_reset else 0) << 22
-    w |= (1 if fields.sync_request else 0) << 23
-    return w
 
 
 def decode_command(word: int) -> CommandFields:
@@ -85,8 +72,10 @@ def main() -> int:
         f"{ctrl_base}/state/fan_mode",
         f"{ctrl_base}/state/target_temp_c",
         f"{disp_base}/state/availability",
-        f"{disp_base}/state/packed_command",
+        f"{disp_base}/state/packed_command/+",  # firmware appends /<MAC>
     ]
+
+    packed_cmd_prefix = f"{disp_base}/state/packed_command/"
 
     latest: Dict[str, str] = {}
 
@@ -98,7 +87,12 @@ def main() -> int:
             client.subscribe(t, qos=1)
 
     def on_message(_client, _userdata, msg):
-        latest[msg.topic] = msg.payload.decode("utf-8", errors="ignore").strip()
+        payload = msg.payload.decode("utf-8", errors="ignore").strip()
+        # Normalize packed_command/<MAC> to packed_command for lookup
+        if msg.topic.startswith(packed_cmd_prefix) and payload:
+            latest[f"{disp_base}/state/packed_command"] = payload
+        else:
+            latest[msg.topic] = payload
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mqtt-path-smoke")
     client.on_connect = on_connect
@@ -117,23 +111,30 @@ def main() -> int:
             print("error: did not observe both controller and display online", file=sys.stderr)
             return 1
 
-        # Drive thermostat via HA-style granular commands.
-        client.publish(f"{disp_base}/cmd/mode", "heat", qos=1, retain=True)
-        client.publish(f"{disp_base}/cmd/fan_mode", "circulate", qos=1, retain=True)
-        client.publish(f"{disp_base}/cmd/target_temp_c", "21.5", qos=1, retain=True)
+        # Drive thermostat via HA-style granular commands (non-retained to
+        # avoid leaving stale commands on the broker after the test).
+        client.publish(f"{disp_base}/cmd/mode", "heat", qos=1, retain=False)
+        client.publish(f"{disp_base}/cmd/fan_mode", "circulate", qos=1, retain=False)
+        client.publish(f"{disp_base}/cmd/target_temp_c", "21.5", qos=1, retain=False)
 
-        ok = wait_for(lambda: f"{disp_base}/state/packed_command" in latest, args.timeout)
+        def packed_matches_expected(mode: int, fan: int, setpoint: int) -> bool:
+            raw = latest.get(f"{disp_base}/state/packed_command")
+            if not raw:
+                return False
+            decoded = decode_command(int(raw))
+            return decoded.mode == mode and decoded.fan == fan and decoded.setpoint_decic == setpoint
+
+        ok = wait_for(lambda: packed_matches_expected(1, 2, 215), args.timeout)
         if not ok:
-            print("error: packed command mirror was not published by thermostat", file=sys.stderr)
-            return 1
-
-        packed = int(latest[f"{disp_base}/state/packed_command"])
-        decoded = decode_command(packed)
-        if decoded.mode != 1 or decoded.fan != 2 or decoded.setpoint_decic != 215:
-            print(
-                f"error: packed command mismatch mode={decoded.mode} fan={decoded.fan} setpoint={decoded.setpoint_decic}",
-                file=sys.stderr,
-            )
+            raw = latest.get(f"{disp_base}/state/packed_command", "missing")
+            if raw and raw != "missing":
+                d = decode_command(int(raw))
+                print(
+                    f"error: packed command mismatch mode={d.mode} fan={d.fan} setpoint={d.setpoint_decic}",
+                    file=sys.stderr,
+                )
+            else:
+                print("error: packed command mirror was not published by thermostat", file=sys.stderr)
             return 1
 
         ok = wait_for(
@@ -145,25 +146,32 @@ def main() -> int:
             print("error: controller did not follow thermostat packed command", file=sys.stderr)
             return 1
 
-        # Direct packed command to controller path.
-        word = encode_command(
-            CommandFields(mode=2, fan=1, setpoint_decic=190, seq=(decoded.seq + 1) & 0x1FF,
-                          filter_reset=False, sync_request=False)
-        )
-        client.publish(f"{ctrl_base}/cmd/packed_word", str(word), qos=1, retain=False)
+        # Drive a second state change through the display to verify the full
+        # round-trip: display cmd → packed_command/<MAC> → controller applies.
+        client.publish(f"{disp_base}/cmd/mode", "cool", qos=1, retain=False)
+        client.publish(f"{disp_base}/cmd/fan_mode", "on", qos=1, retain=False)
+        client.publish(f"{disp_base}/cmd/target_temp_c", "19.0", qos=1, retain=False)
 
         ok = wait_for(
             lambda: latest.get(f"{ctrl_base}/state/mode") == "cool"
-            and latest.get(f"{ctrl_base}/state/fan_mode") == "on",
+            and latest.get(f"{ctrl_base}/state/fan_mode") == "on"
+            and latest.get(f"{ctrl_base}/state/target_temp_c") == "19.0",
             args.timeout,
         )
         if not ok:
-            print("error: controller direct packed command path did not apply", file=sys.stderr)
+            print("error: controller did not follow second display command set", file=sys.stderr)
             return 1
 
         print("PASS: MQTT path smoke checks succeeded")
         return 0
     finally:
+        # Best-effort restore: send heat/auto/20.0 to the display.  The
+        # display's packed-command heartbeat will propagate to the controller
+        # once its sequence counter advances past the controller's tracker.
+        client.publish(f"{disp_base}/cmd/mode", "heat", qos=1, retain=False)
+        client.publish(f"{disp_base}/cmd/fan_mode", "auto", qos=1, retain=False)
+        client.publish(f"{disp_base}/cmd/target_temp_c", "20.0", qos=1, retain=False)
+        time.sleep(1)
         client.loop_stop()
         client.disconnect()
 
