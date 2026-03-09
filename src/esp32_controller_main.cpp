@@ -181,11 +181,9 @@ String g_cfg_base_topic = THERMOSTAT_BASE_TOPIC;
 String g_cfg_device_mac;   // 6-char hex suffix from WiFi MAC, set at boot
 String g_cfg_device_name;  // user-friendly name, default "controller-{MAC}"
 bool g_cfg_ha_discovery_enabled = true;
-// Legacy shims: kept alive so existing MQTT connect, HA discovery, and
-// display_topic_for() compile.  Tasks 3/4 will replace all callers.
+// Legacy shims: kept alive so HA discovery compiles.  Task 4 will update.
 String g_cfg_ctrl_mqtt_client_id;   // computed from base_topic + MAC at boot
 String g_cfg_ctrl_mqtt_base_topic;  // computed from base_topic + MAC at boot
-String g_cfg_display_mqtt_base_topic = "thermostat/furnace-display";
 String g_cfg_unique_device_id;      // computed from base_topic + MAC at boot
 String g_cfg_ctrl_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
 String g_cfg_ctrl_ota_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
@@ -367,17 +365,35 @@ String self_topic_for(const char *suffix) {
   return device_topic_for(g_cfg_device_mac.c_str(), suffix);
 }
 
-// Legacy alias — will be removed in Task 3 when all callers are updated
-String ctrl_topic_for(const char *suffix) {
-  return self_topic_for(suffix);
-}
-
-// Legacy alias — will be removed in Task 3
-String display_topic_for(const char *suffix) {
-  String out(g_cfg_display_mqtt_base_topic);
-  out += "/";
-  out += suffix;
-  return out;
+// Find first display device MAC from g_cfg_ctrl_devices ("MAC[=role];...").
+// Returns the short MAC string or empty if none found.
+static String get_first_display_mac() {
+  String remaining = g_cfg_ctrl_devices;
+  while (remaining.length() > 0) {
+    int semi = remaining.indexOf(';');
+    String entry = (semi >= 0) ? remaining.substring(0, semi) : remaining;
+    remaining = (semi >= 0) ? remaining.substring(semi + 1) : "";
+    entry.trim();
+    if (entry.length() == 0) continue;
+    int eq = entry.indexOf('=');
+    String mac_str = (eq >= 0) ? entry.substring(0, eq) : entry;
+    String role = (eq >= 0) ? entry.substring(eq + 1) : "";
+    mac_str.trim(); role.trim();
+    // Return any device without an explicit role, or with role "display"
+    if (role.isEmpty() || role == "display") {
+      // Extract last 6 hex chars if it's a full MAC "AA:BB:CC:DD:EE:FF"
+      if (mac_str.length() == 17 && mac_str[2] == ':') {
+        String suffix;
+        suffix += mac_str.substring(9, 11);
+        suffix += mac_str.substring(12, 14);
+        suffix += mac_str.substring(15, 17);
+        suffix.toUpperCase();
+        return suffix;
+      }
+      return mac_str;  // already short form
+    }
+  }
+  return "";
 }
 
 
@@ -390,7 +406,7 @@ void ctrl_publish_cfg_value(const char *key, const String &value) {
   if (!g_ctrl_mqtt.connected()) {
     return;
   }
-  String topic = ctrl_topic_for("cfg");
+  String topic = self_topic_for("cfg");
   topic += "/";
   topic += key;
   topic += "/state";
@@ -674,22 +690,6 @@ bool ctrl_is_broadcast_mac(const uint8_t mac[6]) {
   return memcmp(mac, kBroadcast, sizeof(kBroadcast)) == 0;
 }
 
-// Parse sensor topic: {base}/sensor/{mac}/{suffix}
-// Returns true if topic matches, setting mac_out and suffix_out.
-bool ctrl_parse_sensor_topic(const char *base, const char *topic,
-                             char mac_out[18], const char **suffix_out) {
-  const size_t base_len = strlen(base);
-  if (strncmp(topic, base, base_len) != 0) return false;
-  // Expect "/sensor/" after base
-  if (strncmp(topic + base_len, "/sensor/", 8) != 0) return false;
-  const char *mac_start = topic + base_len + 8;
-  // MAC is 17 chars "AA:BB:CC:DD:EE:FF"
-  if (strlen(mac_start) < 18 || mac_start[17] != '/') return false;
-  memcpy(mac_out, mac_start, 17);
-  mac_out[17] = '\0';
-  *suffix_out = mac_start + 18;
-  return true;
-}
 
 bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
   if (text == nullptr || strlen(text) != 32) {
@@ -844,8 +844,8 @@ void ctrl_poll_weather(uint32_t now_ms) {
   if (g_ctrl_mqtt.connected()) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(temp_c));
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/weather_condition").c_str(),
+    g_ctrl_mqtt.publish(self_topic_for("state/outdoor_temp_c").c_str(), buf, true);
+    g_ctrl_mqtt.publish(self_topic_for("state/weather_condition").c_str(),
                         thermostat::weather_icon_display_text(icon), true);
   }
 }
@@ -1079,7 +1079,7 @@ void ctrl_publish_discovery() {
 // Audit log: MQTT publish callback and helpers
 void ctrl_audit_publish(const char *msg) {
   if (g_ctrl_mqtt.connected()) {
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/audit").c_str(), msg, false);
+    g_ctrl_mqtt.publish(self_topic_for("state/audit").c_str(), msg, false);
   }
 }
 
@@ -1549,88 +1549,88 @@ void ctrl_publish_runtime_state() {
   const char *fan = mqtt_payload::fan_to_str(snap.fan_mode);
 
   char buf[32];
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/availability").c_str(), "online", true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/lockout").c_str(), lockout ? "1" : "0", true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/mode").c_str(), mode, true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/fan_mode").c_str(), fan, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/availability").c_str(), "online", true);
+  g_ctrl_mqtt.publish(self_topic_for("state/lockout").c_str(), lockout ? "1" : "0", true);
+  g_ctrl_mqtt.publish(self_topic_for("state/mode").c_str(), mode, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/fan_mode").c_str(), fan, true);
   {
     float target = rt.target_temperature_c();
     if (g_ctrl_temp_unit_f) target = target * 9.0f / 5.0f + 32.0f;
     snprintf(buf, sizeof(buf), g_ctrl_temp_unit_f ? "%.0f" : "%.1f", static_cast<double>(target));
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/target_temp_c").c_str(), buf, true);
+    g_ctrl_mqtt.publish(self_topic_for("state/target_temp_c").c_str(), buf, true);
   }
   const auto &app = g_controller->app();
   if (app.has_indoor_temperature()) {
     float current = app.indoor_temperature_c();
     if (g_ctrl_temp_unit_f) current = current * 9.0f / 5.0f + 32.0f;
     snprintf(buf, sizeof(buf), g_ctrl_temp_unit_f ? "%.0f" : "%.1f", static_cast<double>(current));
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/current_temp_c").c_str(), buf, true);
+    g_ctrl_mqtt.publish(self_topic_for("state/current_temp_c").c_str(), buf, true);
   }
   if (app.has_indoor_humidity()) {
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_humidity_pct()));
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/current_humidity").c_str(), buf, true);
+    g_ctrl_mqtt.publish(self_topic_for("state/current_humidity").c_str(), buf, true);
   }
   snprintf(buf, sizeof(buf), "%.2f", rt.filter_runtime_hours());
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_runtime_hours").c_str(), buf, true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/filter_change_required").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/filter_runtime_hours").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/filter_change_required").c_str(),
                       rt.filter_runtime_hours() >= kFilterChangeThresholdHours ? "1" : "0", true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/max_runtime_exceeded").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/max_runtime_exceeded").c_str(),
                       rt.max_runtime_exceeded() ? "1" : "0", true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/furnace_state").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/furnace_state").c_str(),
                       mqtt_payload::furnace_state_to_str(rt.furnace_state()), true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/firmware_version").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/firmware_version").c_str(),
                       THERMOSTAT_FIRMWARE_VERSION, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_boot_count));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/boot_count").c_str(), buf, true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/reset_reason").c_str(), g_ctrl_reset_reason.c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/boot_count").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/reset_reason").c_str(), g_ctrl_reset_reason.c_str(),
                       true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/uptime_s").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(rt.heartbeat_last_seen_ms()));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_controller->transport().send_ok_count()));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/espnow_send_ok_count").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/espnow_send_ok_count").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_controller->transport().send_fail_count()));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
   if (g_ctrl_last_espnow_error != "begin_failed") {
     g_ctrl_last_espnow_error =
         g_controller->transport().send_fail_count() > 0 ? "send_failed" : "none";
   }
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(esp_get_free_heap_size()));
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/free_heap_bytes").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/free_heap_bytes").c_str(), buf, true);
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/wifi_rssi").c_str(), buf, true);
+    g_ctrl_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
   }
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/error_mqtt").c_str(), g_ctrl_last_mqtt_error.c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/error_mqtt").c_str(), g_ctrl_last_mqtt_error.c_str(),
                       true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/error_ota").c_str(), g_ctrl_last_ota_error.c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/error_ota").c_str(), g_ctrl_last_ota_error.c_str(),
                       true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/error_espnow").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/error_espnow").c_str(),
                       g_ctrl_last_espnow_error.c_str(), true);
   if (app.has_outdoor_weather()) {
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.outdoor_temp_c()));
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_temp_c").c_str(), buf, true);
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/outdoor_condition").c_str(),
+    g_ctrl_mqtt.publish(self_topic_for("state/outdoor_temp_c").c_str(), buf, true);
+    g_ctrl_mqtt.publish(self_topic_for("state/outdoor_condition").c_str(),
                         thermostat::weather_icon_display_text(app.outdoor_icon()), true);
   }
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/allow_ha").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/allow_ha").c_str(),
                       g_cfg_ctrl_allow_ha ? "true" : "false", true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/mqtt_enabled").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/mqtt_enabled").c_str(),
                       g_cfg_ctrl_mqtt_enabled ? "true" : "false", true);
-  g_ctrl_mqtt.publish(ctrl_topic_for("state/espnow_enabled").c_str(),
+  g_ctrl_mqtt.publish(self_topic_for("state/espnow_enabled").c_str(),
                       g_cfg_ctrl_espnow_enabled ? "true" : "false", true);
   {
     const auto &relay = g_relay_io.latched_output();
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/relay_heat").c_str(), relay.heat ? "ON" : "OFF", true);
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/relay_cool").c_str(), relay.cool ? "ON" : "OFF", true);
-    g_ctrl_mqtt.publish(ctrl_topic_for("state/relay_fan").c_str(), relay.fan ? "ON" : "OFF", true);
+    g_ctrl_mqtt.publish(self_topic_for("state/relay_heat").c_str(), relay.heat ? "ON" : "OFF", true);
+    g_ctrl_mqtt.publish(self_topic_for("state/relay_cool").c_str(), relay.cool ? "ON" : "OFF", true);
+    g_ctrl_mqtt.publish(self_topic_for("state/relay_fan").c_str(), relay.fan ? "ON" : "OFF", true);
   }
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
@@ -1700,69 +1700,87 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   value[copy_len] = '\0';
 
   const String topic_str(topic);
-  // Device registry: {base_topic}/devices/{MAC} messages from peers
-  {
-    const String dev_prefix = g_cfg_base_topic + "/devices/";
-    if (topic_str.startsWith(dev_prefix)) {
-      String peer_mac = topic_str.substring(dev_prefix.length());
-      // Skip our own MAC
-      if (peer_mac != WiFi.macAddress()) {
-        // Parse the JSON payload to extract device fields
-        char buf[256];
-        size_t buf_len = (length < sizeof(buf) - 1) ? length : sizeof(buf) - 1;
-        memcpy(buf, payload, buf_len);
-        buf[buf_len] = '\0';
-        char name[48] = "", type[16] = "", ip[16] = "";
-        bool ok = json_extract_string(buf, "name", name, sizeof(name))
-                && json_extract_string(buf, "type", type, sizeof(type))
-                && json_extract_string(buf, "ip", ip, sizeof(ip));
-        if (ok) {
-          g_device_registry.upsert(peer_mac.c_str(), name, type, ip);
-        }
+
+  // Peer device topics: {base_topic}/devices/{MAC}/{suffix}
+  // Self topics also match this prefix, so check MAC to distinguish.
+  const String dev_prefix = g_cfg_base_topic + "/devices/";
+  if (topic_str.startsWith(dev_prefix)) {
+    int mac_end = topic_str.indexOf('/', dev_prefix.length());
+    if (mac_end < 0) return;  // malformed — no suffix
+    String peer_mac = topic_str.substring(dev_prefix.length(), mac_end);
+    String suffix = topic_str.substring(mac_end + 1);
+
+    const bool is_self = (peer_mac == g_cfg_device_mac) ||
+                         (peer_mac == WiFi.macAddress());
+    if (!is_self) {
+      // ── Peer device messages ──
+      if (suffix == "announce") {
+        char name[48] = "", role[16] = "", ip[16] = "";
+        json_extract_string(value, "name", name, sizeof(name));
+        json_extract_string(value, "role", role, sizeof(role));
+        json_extract_string(value, "ip", ip, sizeof(ip));
+        g_device_registry.upsert(peer_mac.c_str(), name, role, ip);
+        return;
       }
-      return;
-    }
-  }
 
-  if (topic_str == display_topic_for("state/availability")) {
-    if (g_disp_availability != value) {
-      ctrl_audit("display: %s->%s [mqtt]", g_disp_availability.c_str(), value);
-    }
-    g_disp_availability = value;
-    // Display being online serves as heartbeat — it can relay commands
-    if (g_controller != nullptr && strcmp(value, "online") == 0) {
-      g_controller->app().on_heartbeat(millis());
-    }
-    return;
-  }
-
-  // MQTT sensor intake: {base}/sensor/{mac}/temp_c or humidity
-  char sensor_mac[18];
-  const char *sensor_suffix = nullptr;
-  if (ctrl_parse_sensor_topic(g_cfg_ctrl_mqtt_base_topic.c_str(), topic, sensor_mac,
-                              &sensor_suffix)) {
-    uint8_t parsed_mac[6];
-    if (ctrl_parse_mac(sensor_mac, parsed_mac) && g_controller != nullptr) {
-      const float fval = static_cast<float>(atof(value));
-      if (strcmp(sensor_suffix, "temp_c") == 0) {
-        if (isfinite(fval) && fval >= -40.0f && fval <= 85.0f) {
-          ctrl_audit("indoor_temp: %.1fC [mqtt/sensor %s]",
-                     static_cast<double>(fval), sensor_mac);
-          g_controller->app().on_indoor_temperature_c(fval, parsed_mac);
-          // Valid temperature from primary sensor keeps failsafe from triggering
+      if (suffix == "state/availability") {
+        if (g_disp_availability != value) {
+          ctrl_audit("device %s: %s->%s [mqtt]", peer_mac.c_str(),
+                     g_disp_availability.c_str(), value);
+        }
+        // TODO: track per-device availability. For now, treat as display availability
+        g_disp_availability = value;
+        if (g_controller != nullptr && strcmp(value, "online") == 0) {
           g_controller->app().on_heartbeat(millis());
         }
-      } else if (strcmp(sensor_suffix, "humidity") == 0) {
-        if (isfinite(fval) && fval >= 0.0f && fval <= 100.0f) {
-          g_controller->app().on_indoor_humidity(fval, parsed_mac);
-        }
+        return;
       }
+
+      if (suffix == "state/packed_command") {
+        if (g_controller != nullptr) {
+          g_controller->app().on_heartbeat(millis());
+        }
+        if (!g_cfg_ctrl_allow_ha || !g_cfg_ctrl_mqtt_enabled) return;
+        uint32_t packed = 0;
+        if (ctrl_parse_u32_payload(value, &packed)) {
+          // Short MAC in topic path can't be parsed by ctrl_parse_mac;
+          // pass nullptr — MQTT auth is handled differently from ESP-NOW.
+          ctrl_apply_packed_command(packed, true, nullptr);
+        }
+        return;
+      }
+
+      if (suffix == "sensor/temp_c") {
+        if (g_controller != nullptr) {
+          float fval = static_cast<float>(atof(value));
+          if (isfinite(fval) && fval >= -40.0f && fval <= 85.0f) {
+            ctrl_audit("indoor_temp: %.1fC [mqtt/sensor %s]",
+                       static_cast<double>(fval), peer_mac.c_str());
+            g_controller->app().on_indoor_temperature_c(fval, nullptr);
+            g_controller->app().on_heartbeat(millis());
+          }
+        }
+        return;
+      }
+
+      if (suffix == "sensor/humidity") {
+        if (g_controller != nullptr) {
+          float fval = static_cast<float>(atof(value));
+          if (isfinite(fval) && fval >= 0.0f && fval <= 100.0f) {
+            g_controller->app().on_indoor_humidity(fval, nullptr);
+          }
+        }
+        return;
+      }
+
+      return;  // unknown peer suffix — ignore
     }
-    return;
+    // is_self: fall through to cmd/cfg handlers below
   }
 
+  // Self cmd/ and cfg/ topics: {base_topic}/devices/{our_mac}/...
   const bool ha_allowed = g_cfg_ctrl_allow_ha && g_cfg_ctrl_mqtt_enabled;
-  if (topic_str.startsWith(ctrl_topic_for("cmd/")) && ha_allowed) {
+  if (topic_str.startsWith(self_topic_for("cmd/")) && ha_allowed) {
     g_ctrl_last_mqtt_command_ms = millis();
   }
 
@@ -1772,18 +1790,18 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 
   // Block lockout and HVAC commands when HA is not allowed
   if (!ha_allowed) {
-    if (topic_str == ctrl_topic_for("cmd/lockout") ||
-        topic_str == ctrl_topic_for("cmd/mode") ||
-        topic_str == ctrl_topic_for("cmd/fan_mode") ||
-        topic_str == ctrl_topic_for("cmd/target_temp_c") ||
-        topic_str == ctrl_topic_for("cmd/packed_word") ||
-        topic_str == ctrl_topic_for("cmd/sync") ||
-        topic_str == ctrl_topic_for("cmd/filter_reset")) {
+    if (topic_str == self_topic_for("cmd/lockout") ||
+        topic_str == self_topic_for("cmd/mode") ||
+        topic_str == self_topic_for("cmd/fan_mode") ||
+        topic_str == self_topic_for("cmd/target_temp_c") ||
+        topic_str == self_topic_for("cmd/packed_word") ||
+        topic_str == self_topic_for("cmd/sync") ||
+        topic_str == self_topic_for("cmd/filter_reset")) {
       return;
     }
   }
 
-  if (topic_str == ctrl_topic_for("cmd/lockout")) {
+  if (topic_str == self_topic_for("cmd/lockout")) {
     const bool new_lockout = mqtt_payload::parse_bool(value);
     ctrl_audit("lockout: %s [mqtt]", new_lockout ? "on" : "off");
     g_controller->app().set_hvac_lockout(new_lockout);
@@ -1791,7 +1809,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
 
-  if (topic_str == ctrl_topic_for("cmd/packed_word")) {
+  if (topic_str == self_topic_for("cmd/packed_word")) {
     uint32_t packed = 0;
     if (ctrl_parse_u32_payload(value, &packed)) {
       ctrl_apply_packed_command(packed, true);
@@ -1800,19 +1818,19 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
 
   // Direct controller command topics
-  if (topic_str == ctrl_topic_for("cmd/mode")) {
+  if (topic_str == self_topic_for("cmd/mode")) {
     g_ctrl_shadow_mode = mqtt_payload::str_to_mode(value);
     g_ctrl_have_shadow = true;
     ctrl_apply_mqtt_shadow(false, false);
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/fan_mode")) {
+  if (topic_str == self_topic_for("cmd/fan_mode")) {
     g_ctrl_shadow_fan = mqtt_payload::str_to_fan(value);
     g_ctrl_have_shadow = true;
     ctrl_apply_mqtt_shadow(false, false);
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/target_temp_c")) {
+  if (topic_str == self_topic_for("cmd/target_temp_c")) {
     float sp = static_cast<float>(atof(value));
     if (!isfinite(sp)) return;  // reject NaN/Inf
     if (g_ctrl_temp_unit_f) sp = (sp - 32.0f) * 5.0f / 9.0f;
@@ -1823,44 +1841,29 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_apply_mqtt_shadow(false, false);
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/sync") && mqtt_payload::parse_bool(value)) {
+  if (topic_str == self_topic_for("cmd/sync") && mqtt_payload::parse_bool(value)) {
     ctrl_apply_mqtt_shadow(true, false);
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/reboot") && mqtt_payload::parse_bool(value)) {
+  if (topic_str == self_topic_for("cmd/reboot") && mqtt_payload::parse_bool(value)) {
     ctrl_schedule_reboot();
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/reset_sequence") && mqtt_payload::parse_bool(value)) {
+  if (topic_str == self_topic_for("cmd/reset_sequence") && mqtt_payload::parse_bool(value)) {
     g_controller->app().reset_remote_command_sequence();
     g_ctrl_mqtt_seq = 0;
-    g_ctrl_mqtt.publish(display_topic_for("cmd/reset_sequence").c_str(), "1", false);
+    // Forward reset to each known display device
+    String disp_mac = get_first_display_mac();
+    if (disp_mac.length() > 0) {
+      g_ctrl_mqtt.publish(device_topic_for(disp_mac.c_str(), "cmd/reset_sequence").c_str(),
+                          "1", false);
+    }
     ctrl_publish_runtime_state();
     return;
   }
-  if (topic_str == ctrl_topic_for("cmd/filter_reset") && mqtt_payload::parse_bool(value)) {
+  if (topic_str == self_topic_for("cmd/filter_reset") && mqtt_payload::parse_bool(value)) {
     ctrl_apply_mqtt_shadow(false, true);
     return;
-  }
-  // Thermostat mirrored packed command path (MQTT-primary path).
-  // Topic: {display_base}/state/packed_command/{mac}
-  {
-    const String prefix = display_topic_for("state/packed_command/");
-    if (topic_str.startsWith(prefix)) {
-      // Display sending commands proves it's alive — update failsafe heartbeat
-      if (g_controller != nullptr) {
-        g_controller->app().on_heartbeat(millis());
-      }
-      if (!g_cfg_ctrl_allow_ha || !g_cfg_ctrl_mqtt_enabled) return;
-      uint32_t packed = 0;
-      if (ctrl_parse_u32_payload(value, &packed)) {
-        uint8_t src_mac[6];
-        const char *mac_str = topic + prefix.length();
-        const uint8_t *mac_ptr = ctrl_parse_mac(mac_str, src_mac) ? src_mac : nullptr;
-        ctrl_apply_packed_command(packed, true, mac_ptr);
-      }
-      return;
-    }
   }
 }
 
@@ -1963,7 +1966,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
 
   bool ok = false;
-  String will_topic = ctrl_topic_for("state/availability");
+  String will_topic = self_topic_for("state/availability");
   if (g_cfg_ctrl_mqtt_user.length() == 0) {
     ok = g_ctrl_mqtt.connect(g_cfg_ctrl_mqtt_client_id.c_str(),
                              will_topic.c_str(), 1, true, "offline");
@@ -1979,23 +1982,23 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   g_ctrl_last_mqtt_error = "none";
 
   const bool subs_ok =
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/lockout").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/mode").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/fan_mode").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/target_temp_c").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/packed_word").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/sync").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reboot").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/reset_sequence").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/filter_reset").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/primary_sensor_mac").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cmd/espnow_only").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("cfg/+/set").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/temp_c").c_str()) &&
-      g_ctrl_mqtt.subscribe(ctrl_topic_for("sensor/+/humidity").c_str()) &&
-      g_ctrl_mqtt.subscribe(display_topic_for("state/packed_command/+").c_str()) &&
-      g_ctrl_mqtt.subscribe(display_topic_for("state/availability").c_str()) &&
-      g_ctrl_mqtt.subscribe((g_cfg_base_topic + "/devices/+").c_str());
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/lockout").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/mode").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/fan_mode").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/target_temp_c").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/packed_word").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/sync").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/reboot").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/reset_sequence").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/filter_reset").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/primary_sensor_mac").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/espnow_only").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cfg/+/set").c_str()) &&
+      g_ctrl_mqtt.subscribe(device_topic_for("+", "sensor/temp_c").c_str()) &&
+      g_ctrl_mqtt.subscribe(device_topic_for("+", "sensor/humidity").c_str()) &&
+      g_ctrl_mqtt.subscribe(device_topic_for("+", "state/packed_command").c_str()) &&
+      g_ctrl_mqtt.subscribe(device_topic_for("+", "state/availability").c_str()) &&
+      g_ctrl_mqtt.subscribe(device_topic_for("+", "announce").c_str());
   if (!subs_ok) {
     ctrl_audit("mqtt_subscribe_failed: disconnecting to retry");
     g_ctrl_mqtt.disconnect();
@@ -2003,24 +2006,21 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     // backoff is enforced; resetting to 0 would cause rapid reconnect storms.
     return;
   }
-  ctrl_publish_discovery();
+  if (g_cfg_ha_discovery_enabled) {
+    ctrl_publish_discovery();
+  }
   ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
 
-  // Device registry: publish our identity so other devices/tools can discover us
+  // Publish announce so other devices/tools can discover us
   {
-    String mac = WiFi.macAddress();
-    String reg_topic = g_cfg_base_topic + "/devices/" + mac;
-    char reg_buf[256];
-    snprintf(reg_buf, sizeof(reg_buf),
-             "{\"mac\":\"%s\",\"ip\":\"%s\",\"type\":\"controller\","
-             "\"name\":\"%s\",\"base_topic\":\"%s\",\"firmware\":\"%s\"}",
-             mac.c_str(),
-             WiFi.localIP().toString().c_str(),
+    char announce_buf[256];
+    snprintf(announce_buf, sizeof(announce_buf),
+             "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
+             THERMOSTAT_FIRMWARE_VERSION,
              g_cfg_device_name.c_str(),
-             g_cfg_base_topic.c_str(),
-             THERMOSTAT_FIRMWARE_VERSION);
-    g_ctrl_mqtt.publish(reg_topic.c_str(), reg_buf, true);
+             WiFi.localIP().toString().c_str());
+    g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
   }
 }
 
