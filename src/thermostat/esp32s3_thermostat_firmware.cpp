@@ -1970,10 +1970,10 @@ void poll_touch() {
   const uint16_t raw_y = static_cast<uint16_t>(data[3] << 8 | data[2]);
 
   // Scale touch coordinates to display resolution if GT911 config differs
-  const int16_t x = (g_touch_x_max != kDisplayWidth)
+  const int16_t x = (g_touch_x_max > 0 && g_touch_x_max != kDisplayWidth)
                         ? static_cast<int16_t>(static_cast<uint32_t>(raw_x) * kDisplayWidth / g_touch_x_max)
                         : static_cast<int16_t>(raw_x);
-  const int16_t y = (g_touch_y_max != kDisplayHeight)
+  const int16_t y = (g_touch_y_max > 0 && g_touch_y_max != kDisplayHeight)
                         ? static_cast<int16_t>(static_cast<uint32_t>(raw_y) * kDisplayHeight / g_touch_y_max)
                         : static_cast<int16_t>(raw_y);
 
@@ -2731,6 +2731,11 @@ static void run_provisioning_boot() {
 
 void thermostat_firmware_setup() {
   g_api_mutex = xSemaphoreCreateMutex();
+  if (g_api_mutex == nullptr) {
+    Serial.println("[init] FATAL: failed to create api_mutex");
+    delay(3000);
+    ESP.restart();
+  }
   g_cfg_ready = g_cfg.begin("cfg_disp", false);
   load_runtime_config();
   g_boot_count = g_cfg_ready ? (g_cfg.getUInt("boot_cnt", 0U) + 1U) : 0U;
@@ -2846,7 +2851,7 @@ void thermostat_firmware_loop() {
   }
 
   uint32_t now = millis();
-  if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
+  if (g_reboot_requested && static_cast<uint32_t>(now - g_reboot_at_ms) < 0x80000000u) {
     shutdown_display_for_reboot();
     delay(kRebootPanelOffDelayMs);
     ESP.restart();
@@ -2854,7 +2859,7 @@ void thermostat_firmware_loop() {
   }
 
   if (!g_backlight_enabled && g_backlight_enable_at_ms > 0 &&
-      static_cast<int32_t>(now - g_backlight_enable_at_ms) >= 0) {
+      static_cast<uint32_t>(now - g_backlight_enable_at_ms) < 0x80000000u) {
     g_backlight_enabled = true;
     apply_backlight(g_screen.screensaver_active());
   }

@@ -2046,7 +2046,7 @@ void loop() {
                   g_ctrl_mqtt.connected() ? "yes" : "no",
                   g_ctrl_wifi.provisioning_active() ? "active" : "idle");
   }
-  if (g_ctrl_reboot_requested && static_cast<int32_t>(now - g_ctrl_reboot_at_ms) >= 0) {
+  if (g_ctrl_reboot_requested && static_cast<uint32_t>(now - g_ctrl_reboot_at_ms) < 0x80000000u) {
     ESP.restart();
   }
   if (g_controller != nullptr) {
