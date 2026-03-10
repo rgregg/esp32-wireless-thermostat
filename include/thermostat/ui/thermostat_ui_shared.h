@@ -22,6 +22,7 @@ struct UiCallbacks {
   lv_event_cb_t on_sync = nullptr;
   lv_event_cb_t on_filter_reset = nullptr;
   lv_event_cb_t on_wifi_reset = nullptr;
+  lv_event_cb_t on_restart = nullptr;
   lv_event_cb_t on_timeout_slider = nullptr;
   lv_event_cb_t on_brightness_slider = nullptr;
   lv_event_cb_t on_dim_slider = nullptr;
