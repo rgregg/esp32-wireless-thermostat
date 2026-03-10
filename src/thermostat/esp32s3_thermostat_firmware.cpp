@@ -36,6 +36,7 @@
 #include "thermostat/ui/thermostat_ui_shared.h"
 #include "management_paths.h"
 #include "device_registry.h"
+#include "mac_address_utils.h"
 
 #include <Adafruit_AHTX0.h>
 #include <Adafruit_Si7021.h>
@@ -331,46 +332,8 @@ uint8_t percent_to_duty(uint8_t percent) {
   return static_cast<uint8_t>((static_cast<uint16_t>(percent) * 255U + 50U) / 100U);
 }
 
-const char *mode_to_mqtt(FurnaceMode mode) {
-  switch (mode) {
-    case FurnaceMode::Heat:
-      return "heat";
-    case FurnaceMode::Cool:
-      return "cool";
-    case FurnaceMode::Off:
-    default:
-      return "off";
-  }
-}
-
-const char *fan_to_mqtt(FanMode mode) {
-  switch (mode) {
-    case FanMode::AlwaysOn:
-      return "on";
-    case FanMode::Circulate:
-      return "circulate";
-    case FanMode::Automatic:
-    default:
-      return "auto";
-  }
-}
-
-// Returns uppercase full MAC with colons, e.g. "AA:BB:CC:DD:EE:FF".
-// Uses esp_efuse_mac_get_default() which works without WiFi init.
-static String mac_full() {
-  uint8_t mac[6];
-  if (esp_efuse_mac_get_default(mac) != ESP_OK) return String("00:00:00:00:00:00");
-  char buf[18];
-  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(buf);
-}
-
-// Strip colons from a MAC string for use in MQTT topics, hostnames, etc.
-static String mac_strip_colons(const String &mac) {
-  String out = mac;
-  out.replace(":", "");
-  return out;
-}
+using mac_utils::mac_full;
+using mac_utils::mac_strip_colons;
 
 void load_runtime_config() {
   if (!g_cfg_ready) return;
@@ -1287,8 +1250,8 @@ void mqtt_publish_state() {
   const uint32_t now = millis();
 
   g_mqtt.publish(self_topic_for("state/availability").c_str(), "online", true);
-  g_mqtt.publish(self_topic_for("state/mode").c_str(), mode_to_mqtt(g_runtime->local_mode()), true);
-  g_mqtt.publish(self_topic_for("state/fan_mode").c_str(), fan_to_mqtt(g_runtime->local_fan_mode()),
+  g_mqtt.publish(self_topic_for("state/mode").c_str(), mqtt_payload::mode_to_str(g_runtime->local_mode()), true);
+  g_mqtt.publish(self_topic_for("state/fan_mode").c_str(), mqtt_payload::fan_to_str(g_runtime->local_fan_mode()),
                  true);
 
   char buf[32];

@@ -37,6 +37,7 @@
 #include "web/web_ui_escape.h"
 #include "web/web_ui_shell.h"
 #include "web/web_ui_fields.h"
+#include "mac_address_utils.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
 thermostat::ControllerRelayIo g_relay_io;
@@ -239,22 +240,8 @@ static String ctrl_find_temp_sensor_mac_str(const String &devices) {
   return "";
 }
 
-// Returns uppercase full MAC with colons, e.g. "AA:BB:CC:DD:EE:FF".
-// Uses esp_efuse_mac_get_default() which works without WiFi init.
-static String mac_full() {
-  uint8_t mac[6];
-  if (esp_efuse_mac_get_default(mac) != ESP_OK) return String("00:00:00:00:00:00");
-  char buf[18];
-  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(buf);
-}
-
-// Strip colons from a MAC string for use in MQTT topics, hostnames, etc.
-static String mac_strip_colons(const String &mac) {
-  String out = mac;
-  out.replace(":", "");
-  return out;
-}
+using mac_utils::mac_full;
+using mac_utils::mac_strip_colons;
 
 void ctrl_load_runtime_config() {
   if (!g_ctrl_cfg_ready) {
