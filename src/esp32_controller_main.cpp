@@ -21,7 +21,6 @@
 #if defined(ARDUINO)
 #include <Arduino.h>
 #include <atomic>
-#include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
@@ -66,7 +65,6 @@ float g_ctrl_shadow_setpoint_c = 20.0f;
 FurnaceMode g_ctrl_persisted_mode = FurnaceMode::Off;
 FanMode g_ctrl_persisted_fan = FanMode::Automatic;
 float g_ctrl_persisted_setpoint_c = -999.0f;  // sentinel: force write on first call
-bool g_ctrl_ota_started = false;
 bool g_ctrl_web_started = false;
 DeviceRegistry g_device_registry;
 bool g_ctrl_mdns_started = false;
@@ -181,8 +179,7 @@ String g_cfg_device_name;  // user-friendly name, default "controller-{MAC}"
 bool g_cfg_ha_discovery_enabled = true;
 String g_cfg_ctrl_mqtt_client_id;   // computed from base_topic + MAC at boot
 String g_cfg_ctrl_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
-String g_cfg_ctrl_ota_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
-String g_cfg_ctrl_ota_password = THERMOSTAT_CONTROLLER_OTA_PASSWORD;
+String g_cfg_ctrl_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
 uint8_t g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
 String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
 String g_cfg_ctrl_devices = "";  // NVS "devices": semicolon-separated "MAC[=role]"
@@ -268,7 +265,7 @@ void ctrl_load_runtime_config() {
   g_cfg_device_mac = mac_full();
   // Compact form (no colons) for hostnames and MQTT topics.
   g_cfg_device_mac_compact = mac_strip_colons(g_cfg_device_mac);
-  g_cfg_ctrl_ota_hostname = String(THERMOSTAT_CONTROLLER_OTA_HOSTNAME) + "-" + g_cfg_device_mac_compact;
+  g_cfg_ctrl_hostname = String(THERMOSTAT_CONTROLLER_OTA_HOSTNAME) + "-" + g_cfg_device_mac_compact;
 
   // One-time migration: clear old NVS keys that are no longer used.
   g_ctrl_cfg.remove("shared_id");
@@ -293,8 +290,7 @@ void ctrl_load_runtime_config() {
     g_cfg_device_name = "controller-" + g_cfg_device_mac;
   }
   g_cfg_ctrl_discovery_prefix = g_ctrl_cfg.getString("disc_pref", g_cfg_ctrl_discovery_prefix);
-  g_cfg_ctrl_ota_hostname = g_ctrl_cfg.getString("ota_host", g_cfg_ctrl_ota_hostname);
-  g_cfg_ctrl_ota_password = g_ctrl_cfg.getString("ota_pwd", g_cfg_ctrl_ota_password);
+  g_cfg_ctrl_hostname = g_ctrl_cfg.getString("ota_host", g_cfg_ctrl_hostname);
   g_cfg_ctrl_espnow_channel = static_cast<uint8_t>(g_ctrl_cfg.getUChar("esp_ch", g_cfg_ctrl_espnow_channel));
   if (g_cfg_ctrl_espnow_channel < 1 || g_cfg_ctrl_espnow_channel > 14)
     g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
@@ -450,11 +446,8 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_ctrl_cfg.putString("disc_pref", value);
     g_ctrl_mqtt_discovery_sent = false;
   } else if (key == "ota_hostname") {
-    g_cfg_ctrl_ota_hostname = value;
+    g_cfg_ctrl_hostname = value;
     g_ctrl_cfg.putString("ota_host", value);
-  } else if (key == "ota_password") {
-    g_cfg_ctrl_ota_password = value;
-    g_ctrl_cfg.putString("ota_pwd", value);
   } else if (key == "espnow_channel") {
     const long parsed = atol(raw_value);
     if (parsed < 1 || parsed > 14) {
@@ -1060,8 +1053,7 @@ void ctrl_web_handle_config_get() {
   body += "\"device_name\":\"" + web_ui::json_escape(g_cfg_device_name) + "\",";
   body += "\"ha_discovery_enabled\":" + String(g_cfg_ha_discovery_enabled ? "true" : "false") + ",";
   body += "\"discovery_prefix\":\"" + web_ui::json_escape(g_cfg_ctrl_discovery_prefix) + "\",";
-  body += "\"ota_hostname\":\"" + web_ui::json_escape(g_cfg_ctrl_ota_hostname) + "\",";
-  body += "\"ota_password\":\"" + String(g_cfg_ctrl_ota_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"hostname\":\"" + web_ui::json_escape(g_cfg_ctrl_hostname) + "\",";
   body += "\"espnow_channel\":" + String(g_cfg_ctrl_espnow_channel) + ",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_ctrl_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
   body += "\"devices\":\"" + web_ui::json_escape(g_cfg_ctrl_devices) + "\",";
@@ -1214,7 +1206,7 @@ void ctrl_web_handle_root() {
     {"hw", "Hardware"},
     {"system", "System"},
   };
-  page_begin(html, "Furnace Controller", g_cfg_ctrl_ota_hostname.c_str(),
+  page_begin(html, "Furnace Controller", g_cfg_ctrl_hostname.c_str(),
              tabs, sizeof(tabs) / sizeof(tabs[0]));
 
   // ── Status tab ──
@@ -1428,8 +1420,7 @@ void ctrl_web_handle_root() {
   // Sensor & OTA card
   card_begin(html, "Sensor & OTA");
   form_begin(html);
-  text_field(html, "OTA Hostname", "ota_hostname", g_cfg_ctrl_ota_hostname);
-  password_field(html, "OTA Password", "ota_password", g_cfg_ctrl_ota_password.length() > 0);
+  text_field(html, "Hostname", "ota_hostname", g_cfg_ctrl_hostname);
   form_end(html, "Save");
   card_end(html);
 
@@ -1898,34 +1889,11 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   }
 }
 
-void ctrl_ensure_ota_ready() {
-  if (WiFi.status() != WL_CONNECTED) {
-    return;
-  }
-  if (!g_ctrl_ota_started) {
-    ArduinoOTA.setHostname(g_cfg_ctrl_ota_hostname.c_str());
-    if (g_cfg_ctrl_ota_password.length() > 0) {
-      ArduinoOTA.setPassword(g_cfg_ctrl_ota_password.c_str());
-    }
-    ArduinoOTA.onError([](ota_error_t error) {
-      g_ctrl_last_ota_error = String("ota_error_") + String(static_cast<unsigned>(error));
-      ctrl_audit("ota_arduino: failed err=%u", static_cast<unsigned>(error));
-    });
-    ArduinoOTA.onEnd([]() {
-      g_ctrl_last_ota_error = "none";
-      ctrl_audit("ota_arduino: ok");
-    });
-    ArduinoOTA.begin();
-    g_ctrl_ota_started = true;
-  }
-  ArduinoOTA.handle();
-}
-
 void ctrl_ensure_mdns_ready() {
   if (WiFi.status() != WL_CONNECTED || g_ctrl_mdns_started) {
     return;
   }
-  const char *host = g_cfg_ctrl_ota_hostname.length() > 0 ? g_cfg_ctrl_ota_hostname.c_str()
+  const char *host = g_cfg_ctrl_hostname.length() > 0 ? g_cfg_ctrl_hostname.c_str()
                                                            : "furnace-controller";
   if (MDNS.begin(host)) {
     MDNS.addService("http", "tcp", 80);
@@ -2036,6 +2004,10 @@ void setup() {
   g_audit_log.set_publish_callback(ctrl_audit_publish);
   g_controller->app().runtime_mut().set_audit_callback(ctrl_runtime_audit_bridge);
   ota_set_audit_callback(ctrl_runtime_audit_bridge);
+  ota_set_prepare_callback([]() {
+    // Log only — MQTT disconnect is handled in the main loop.
+    Serial.printf("[ota] prepare: OTA starting, heap=%u\n", ESP.getFreeHeap());
+  });
 
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
@@ -2050,6 +2022,20 @@ void setup() {
 }
 
 void loop() {
+  // During OTA upload, suspend non-essential work to free CPU and
+  // network bandwidth for the flash write.
+  if (ota_web_in_progress()) {
+    // Disconnect MQTT to free TCP socket buffers for OTA upload.
+    if (g_ctrl_mqtt.connected()) {
+      g_ctrl_mqtt.disconnect();
+      Serial.printf("[ota] disconnected MQTT to free heap: %u bytes free\n",
+                    ESP.getFreeHeap());
+    }
+    ota_web_process_flash_ops();
+    delay(1);
+    return;
+  }
+
   static uint32_t last_heartbeat = 0;
   const uint32_t now = millis();
   if (now - last_heartbeat >= 5000) {
@@ -2071,7 +2057,6 @@ void loop() {
     wifi_watchdog_tick(now, g_ctrl_mqtt.connected());
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
-    ctrl_ensure_ota_ready();
     ctrl_ensure_mqtt_connected(now);
     g_ctrl_mqtt.loop();
     const bool mqtt_primary_active =

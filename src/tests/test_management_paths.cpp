@@ -58,7 +58,6 @@ TEST_CASE(management_paths_parse_form_keys) {
 TEST_CASE(management_paths_secret_key_classification) {
   ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("wifi_password"));
   ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("mqtt_password"));
-  ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("ota_password"));
   ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("espnow_lmk"));
   ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("pirateweather_api_key"));
 

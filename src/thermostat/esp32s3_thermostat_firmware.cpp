@@ -11,7 +11,6 @@
 
 #include <Wire.h>
 #include <lvgl.h>
-#include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -265,7 +264,6 @@ bool g_have_weather_data = false;
 uint32_t g_display_timeout_ms = static_cast<uint32_t>(THERMOSTAT_DISPLAY_TIMEOUT_S) * 1000UL;
 uint8_t g_cfg_backlight_active_pct = THERMOSTAT_BACKLIGHT_ACTIVE_PCT;
 uint8_t g_cfg_backlight_screensaver_pct = THERMOSTAT_BACKLIGHT_SCREENSAVER_PCT;
-bool g_ota_started = false;
 float g_cfg_temp_comp_c = 0.0f;
 bool g_cfg_temp_unit_f = false;
 String g_cfg_wifi_ssid = THERMOSTAT_WIFI_SSID;
@@ -281,8 +279,7 @@ String g_cfg_device_mac;         // Full WiFi MAC "AA:BB:CC:DD:EE:FF"
 String g_cfg_device_mac_compact; // Colons stripped "AABBCCDDEEFF", for MQTT/hostnames
 String g_cfg_device_name; // user-friendly name, default "display-{MAC}"
 bool g_cfg_ha_discovery_enabled = true;
-String g_cfg_ota_hostname = THERMOSTAT_OTA_HOSTNAME;
-String g_cfg_ota_password = THERMOSTAT_OTA_PASSWORD;
+String g_cfg_hostname = THERMOSTAT_OTA_HOSTNAME;
 uint8_t g_cfg_espnow_channel = THERMOSTAT_ESPNOW_CHANNEL;
 String g_cfg_espnow_peer_mac = THERMOSTAT_ESPNOW_PEER_MAC;
 String g_cfg_espnow_lmk = THERMOSTAT_ESPNOW_LMK;
@@ -382,7 +379,7 @@ void load_runtime_config() {
   String mac = mac_full();
   String mac_compact = mac_strip_colons(mac);
   mac_compact.toLowerCase();
-  g_cfg_ota_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + mac_compact;
+  g_cfg_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + mac_compact;
 
   // One-time migration: clear stale NVS keys from old config schema.
   g_cfg.remove("shared_id");
@@ -410,8 +407,7 @@ void load_runtime_config() {
   g_cfg_ha_discovery_enabled = g_cfg.getBool("ha_disc", g_cfg_ha_discovery_enabled);
   g_cfg_device_name = g_cfg.getString("device_name", "");
   g_cfg_paired_controller_mac = g_cfg.getString("ctrl_mac", "");
-  g_cfg_ota_hostname = g_cfg.getString("ota_host", g_cfg_ota_hostname);
-  g_cfg_ota_password = g_cfg.getString("ota_pwd", g_cfg_ota_password);
+  g_cfg_hostname = g_cfg.getString("ota_host", g_cfg_hostname);
   g_cfg_espnow_channel = static_cast<uint8_t>(g_cfg.getUChar("esp_ch", g_cfg_espnow_channel));
   g_cfg_espnow_peer_mac = g_cfg.getString("esp_peer", g_cfg_espnow_peer_mac);
   g_cfg_espnow_lmk = g_cfg.getString("esp_lmk", g_cfg_espnow_lmk);
@@ -535,11 +531,8 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     // Forward unit preference to controller on next main-loop publish
     g_mqtt_state_dirty = true;
   } else if (key == "ota_hostname") {
-    g_cfg_ota_hostname = value;
+    g_cfg_hostname = value;
     NVS_PUT_STR("ota_host", value);
-  } else if (key == "ota_password") {
-    g_cfg_ota_password = value;
-    NVS_PUT_STR("ota_pwd", value);
   } else if (key == "espnow_channel") {
     const long parsed = atol(raw_value);
     if (parsed < 1 || parsed > 14) return false;
@@ -778,8 +771,7 @@ void web_handle_config_get() {
   body += "\"backlight_screensaver_pct\":" + String(g_cfg_backlight_screensaver_pct) + ",";
   body += "\"temp_comp_c\":" + String(g_cfg_temp_comp_c, 2) + ",";
   body += "\"temperature_unit\":\"" + String(g_cfg_temp_unit_f ? "f" : "c") + "\",";
-  body += "\"ota_hostname\":\"" + web_ui::json_escape(g_cfg_ota_hostname) + "\",";
-  body += "\"ota_password\":\"" + String(g_cfg_ota_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"hostname\":\"" + web_ui::json_escape(g_cfg_hostname) + "\",";
   body += "\"espnow_channel\":" + String(g_cfg_espnow_channel) + ",";
   body += "\"espnow_peer_mac\":\"" + web_ui::json_escape(g_cfg_espnow_peer_mac) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
@@ -1025,7 +1017,7 @@ void web_handle_root() {
 
   // Snapshot config globals under mutex (brief hold), then build HTML outside
   xSemaphoreTake(g_api_mutex, portMAX_DELAY);
-  const String ota_hostname = g_cfg_ota_hostname;
+  const String ota_hostname = g_cfg_hostname;
   const bool reboot_required = g_cfg_reboot_required;
   const String wifi_ssid = g_cfg_wifi_ssid;
   const bool wifi_pwd_set = g_cfg_wifi_password.length() > 0;
@@ -1047,7 +1039,6 @@ void web_handle_root() {
   const bool temp_unit_f = g_cfg_temp_unit_f;
   const float temp_comp = g_cfg_temp_comp_c;
   const uint32_t ctrl_timeout = g_cfg_controller_timeout_ms;
-  const bool ota_pwd_set = g_cfg_ota_password.length() > 0;
   const bool mqtt_enabled = g_cfg_mqtt_enabled;
   const bool espnow_enabled = g_cfg_espnow_enabled;
   xSemaphoreGive(g_api_mutex);
@@ -1192,8 +1183,7 @@ void web_handle_root() {
   number_field(html, "Controller Timeout (ms)", "controller_timeout_ms",
                String(ctrl_timeout), "1000", "600000", "1",
                "Time before controller is considered disconnected");
-  text_field(html, "OTA Hostname", "ota_hostname", ota_hostname);
-  password_field(html, "OTA Password", "ota_password", ota_pwd_set);
+  text_field(html, "Hostname", "ota_hostname", ota_hostname);
   form_end(html, "Save");
   card_end(html);
 
@@ -1251,6 +1241,13 @@ void ensure_web_ready() {
     g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
     g_web.on("/screenshot", HTTP_GET, web_handle_screenshot);
     ota_web_setup(g_web);
+    ota_set_prepare_callback([]() {
+      // Log only — do NOT touch PubSubClient here (runs on web task / Core 0,
+      // PubSubClient is used on Core 1).  The main loop handles teardown.
+      Serial.printf("[ota] prepare: OTA starting, heap=%u internal=%u\n",
+                    ESP.getFreeHeap(),
+                    heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    });
     g_web.begin();
     g_web_started = true;
   }
@@ -1885,27 +1882,10 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   }
 }
 
-void ensure_ota_ready() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  if (!g_ota_started) {
-    ArduinoOTA.setHostname(g_cfg_ota_hostname.c_str());
-    if (g_cfg_ota_password.length() > 0) {
-      ArduinoOTA.setPassword(g_cfg_ota_password.c_str());
-    }
-    ArduinoOTA.onError([](ota_error_t error) {
-      g_last_ota_error = String("ota_error_") + String(static_cast<unsigned>(error));
-    });
-    ArduinoOTA.onEnd([]() { g_last_ota_error = "none"; });
-    ArduinoOTA.begin();
-    g_ota_started = true;
-  }
-  ArduinoOTA.handle();
-}
-
 void ensure_mdns_ready() {
   if (WiFi.status() != WL_CONNECTED || g_mdns_started) return;
   const char *host =
-      g_cfg_ota_hostname.length() > 0 ? g_cfg_ota_hostname.c_str() : "furnace-display";
+      g_cfg_hostname.length() > 0 ? g_cfg_hostname.c_str() : "furnace-display";
   if (MDNS.begin(host)) {
     MDNS.addService("http", "tcp", 80);
     g_mdns_started = true;
@@ -2819,6 +2799,48 @@ void thermostat_firmware_setup() {
 
 void thermostat_firmware_loop() {
   esp_task_wdt_reset();
+
+  // During OTA upload, skip heavy work (LVGL, MQTT, sensors) to free
+  // CPU for flash writes.  Use a long yield so the main task doesn't
+  // compete with the web/WiFi tasks on the scheduler.
+  if (ota_web_in_progress()) {
+    // One-time teardown: shut down non-essential subsystems to free internal
+    // SRAM for the WiFi/TCP stack during OTA.  After OTA (success or failure)
+    // we always reboot, so no need to restart these.
+    static bool ota_teardown_done = false;
+    if (!ota_teardown_done) {
+      ota_teardown_done = true;
+      uint32_t heap_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+
+      // MQTT — frees ~5-6KB (TCP socket buffers)
+      if (g_mqtt.connected()) {
+        g_mqtt.disconnect();
+      }
+      // mDNS — frees ~2-5KB
+      MDNS.end();
+      g_mdns_started = false;
+      // I2C sensors — frees ~1-2KB
+      g_sensor_i2c.end();
+      g_touch_i2c.end();
+      // Display off + backlight off
+      ledcWrite(kBacklightPin, 0);
+      if (g_panel != nullptr) {
+        esp_lcd_panel_disp_on_off(g_panel, false);
+      }
+
+      uint32_t heap_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+      Serial.printf("[ota] teardown: freed %u bytes internal SRAM (%u -> %u)\n",
+                    heap_after - heap_before, heap_before, heap_after);
+    }
+    // Process delegated flash write operations.  The web task (PSRAM stack)
+    // cannot call Update.write() directly because SPI cache is frozen during
+    // flash writes, making PSRAM inaccessible.  This main loop task has its
+    // stack in internal SRAM, so it's safe to write flash here.
+    ota_web_process_flash_ops();
+    vTaskDelay(pdMS_TO_TICKS(1));
+    return;
+  }
+
   uint32_t now = millis();
   if (g_reboot_requested && static_cast<int32_t>(now - g_reboot_at_ms) >= 0) {
     shutdown_display_for_reboot();
@@ -2862,7 +2884,6 @@ void thermostat_firmware_loop() {
   wifi_watchdog_tick(now, g_mqtt.connected());
   ensure_mdns_ready();
   ensure_web_ready();
-  ensure_ota_ready();
   ensure_mqtt_connected(now);
   g_mqtt.loop();
   poll_weather(now);
