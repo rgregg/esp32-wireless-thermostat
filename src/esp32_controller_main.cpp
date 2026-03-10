@@ -96,7 +96,7 @@ static TaskHandle_t g_ctrl_weather_task_handle = nullptr;
 static uint32_t g_ctrl_weather_last_applied_ms = 0;
 // Updated by the weather task at the start of each iteration. Monitored by
 // the main loop to detect a wedged TLS/SSL connection that ignores the timeout.
-static volatile uint32_t g_ctrl_weather_task_heartbeat_ms = 0;
+static std::atomic<uint32_t> g_ctrl_weather_task_heartbeat_ms{0};
 // Max time allowed between task heartbeats: two full poll periods + both HTTP
 // timeouts. If this elapses the task is considered wedged and is restarted.
 constexpr uint32_t kCtrlWeatherTaskWatchdogMs =
