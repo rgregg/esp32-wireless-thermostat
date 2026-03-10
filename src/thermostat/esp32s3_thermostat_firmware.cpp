@@ -559,8 +559,9 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg.putBool("espnow_en", g_cfg_espnow_enabled);
     g_cfg_reboot_required = true;
   } else if (key == "paired_controller_mac") {
-    g_cfg_paired_controller_mac = value;
-    NVS_PUT_STR("ctrl_mac", value);
+    // Accept either colon-separated or compact MAC format.
+    g_cfg_paired_controller_mac = mac_strip_colons(String(value));
+    NVS_PUT_STR("ctrl_mac", g_cfg_paired_controller_mac);
     g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "controller_timeout_ms") {
     const long parsed = atol(raw_value);
@@ -1116,7 +1117,7 @@ void web_handle_root() {
   checkbox_field(html, "HA Discovery", "ha_discovery_enabled", ha_disc_enabled);
   text_field(html, "Paired Controller MAC", "paired_controller_mac",
              paired_ctrl_mac,
-             "Full hex MAC of paired controller (e.g. AABBCCDDEEFF)");
+             "e.g. AABBCCDDEEFF or AA:BB:CC:DD:EE:FF");
   text_field(html, "Discovery Prefix", "discovery_prefix", disc_prefix,
              "HA MQTT discovery prefix, e.g. homeassistant");
   form_end(html, "Save MQTT");
@@ -1242,9 +1243,12 @@ void ensure_web_ready() {
     g_web.on("/screenshot", HTTP_GET, web_handle_screenshot);
     ota_web_setup(g_web);
     ota_set_prepare_callback([]() {
-      // Log only — do NOT touch PubSubClient here (runs on web task / Core 0,
-      // PubSubClient is used on Core 1).  The main loop handles teardown.
-      Serial.printf("[ota] prepare: OTA starting, heap=%u internal=%u\n",
+      // Close the MQTT TCP socket immediately to free ~5-6KB of internal SRAM
+      // socket buffers before any OTA data arrives.  We call stop() on the
+      // raw WiFiClient (lwip socket close) rather than PubSubClient::disconnect()
+      // which is not thread-safe across cores.  The main loop does full teardown.
+      g_wifi_client.stop();
+      Serial.printf("[ota] prepare: closed MQTT socket, heap=%u internal=%u\n",
                     ESP.getFreeHeap(),
                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     });
