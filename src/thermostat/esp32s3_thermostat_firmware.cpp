@@ -16,6 +16,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "improv_ble_provisioning.h"
+#include "wifi_provisioning_manager.h"
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -69,7 +70,6 @@ constexpr int kTouchRstPin = 38;
 constexpr int kSensorI2cSda = 18;
 constexpr int kSensorI2cScl = 17;
 constexpr uint32_t kNetworkRetryMs = 5000;
-constexpr uint32_t kProvisionStartDelayMs = 15000;
 constexpr uint32_t kMqttPublishMs = 10000;
 constexpr uint32_t kDisplayInitSettleMs = 150;
 constexpr uint32_t kBacklightEnableDelayMs = 400;
@@ -253,13 +253,10 @@ uint32_t g_last_ui_tick_ms = 0;
 uint32_t g_last_runtime_tick_ms = 0;
 uint32_t g_last_sensor_poll_ms = 0;
 uint32_t g_last_ui_refresh_ms = 0;
-uint32_t g_last_wifi_attempt_ms = 0;
-uint32_t g_first_wifi_attempt_ms = 0;
 uint32_t g_last_mqtt_attempt_ms = 0;
 uint32_t g_last_mqtt_publish_ms = 0;
 uint32_t g_last_mqtt_command_ms = 0;
-bool g_wifi_has_attempted_stored_connect = false;
-std::atomic<bool> g_wifi_provisioning_started{false};
+WifiProvisioningManager g_wifi;
 float g_remote_indoor_temp_c = NAN;
 float g_remote_indoor_humidity = NAN;
 float g_outdoor_temp_c = 6.0f;
@@ -280,7 +277,8 @@ String g_cfg_mqtt_password = THERMOSTAT_MQTT_PASSWORD;
 String g_cfg_mqtt_client_id;  // derived: base_topic + "-" + device_mac
 String g_cfg_base_topic = THERMOSTAT_BASE_TOPIC;
 String g_cfg_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
-String g_cfg_device_mac;  // 6-char hex suffix from WiFi MAC
+String g_cfg_device_mac;         // Full WiFi MAC "AA:BB:CC:DD:EE:FF"
+String g_cfg_device_mac_compact; // Colons stripped "AABBCCDDEEFF", for MQTT/hostnames
 String g_cfg_device_name; // user-friendly name, default "display-{MAC}"
 bool g_cfg_ha_discovery_enabled = true;
 String g_cfg_ota_hostname = THERMOSTAT_OTA_HOSTNAME;
@@ -292,7 +290,6 @@ bool g_cfg_mqtt_enabled = true;    // NVS "mqtt_en"
 bool g_cfg_espnow_enabled = true;  // NVS "espnow_en"
 String g_cfg_paired_controller_mac; // MAC of paired controller (from devices list or discovery)
 uint32_t g_cfg_controller_timeout_ms = 30000;
-bool g_cfg_wifi_reconnect_required = false;
 bool g_cfg_mqtt_reconfigure_required = false;
 bool g_cfg_reboot_required = false;
 uint32_t g_boot_count = 0;
@@ -361,22 +358,31 @@ const char *fan_to_mqtt(FanMode mode) {
   }
 }
 
-// Returns lowercase last 3 bytes of base MAC as hex, e.g. "ddeeff".
+// Returns uppercase full MAC with colons, e.g. "AA:BB:CC:DD:EE:FF".
 // Uses esp_efuse_mac_get_default() which works without WiFi init.
-static String mac_suffix() {
+static String mac_full() {
   uint8_t mac[6];
-  if (esp_efuse_mac_get_default(mac) != ESP_OK) return String("000000");
-  char buf[7];
-  snprintf(buf, sizeof(buf), "%02x%02x%02x", mac[3], mac[4], mac[5]);
+  if (esp_efuse_mac_get_default(mac) != ESP_OK) return String("00:00:00:00:00:00");
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return String(buf);
+}
+
+// Strip colons from a MAC string for use in MQTT topics, hostnames, etc.
+static String mac_strip_colons(const String &mac) {
+  String out = mac;
+  out.replace(":", "");
+  return out;
 }
 
 void load_runtime_config() {
   if (!g_cfg_ready) return;
 
   // Compute MAC-based suffix for OTA hostname default.
-  String suffix = mac_suffix();
-  g_cfg_ota_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + suffix;
+  String mac = mac_full();
+  String mac_compact = mac_strip_colons(mac);
+  mac_compact.toLowerCase();
+  g_cfg_ota_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + mac_compact;
 
   // One-time migration: clear stale NVS keys from old config schema.
   g_cfg.remove("shared_id");
@@ -429,7 +435,7 @@ String device_topic_for(const char *mac, const char *suffix) {
 }
 
 String self_topic_for(const char *suffix) {
-  return device_topic_for(g_cfg_device_mac.c_str(), suffix);
+  return device_topic_for(g_cfg_device_mac_compact.c_str(), suffix);
 }
 
 String controller_topic_for(const char *suffix) {
@@ -454,12 +460,10 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
 
   if (key == "wifi_ssid") {
     g_cfg_wifi_ssid = value;
-    NVS_PUT_STR("wifi_ssid", value);
-    g_cfg_wifi_reconnect_required = true;
+    g_wifi.set_credentials(value.c_str(), g_cfg_wifi_password.c_str());
   } else if (key == "wifi_password") {
     g_cfg_wifi_password = value;
-    NVS_PUT_STR("wifi_pwd", value);
-    g_cfg_wifi_reconnect_required = true;
+    g_wifi.set_credentials(g_cfg_wifi_ssid.c_str(), value.c_str());
   } else if (key == "mqtt_host") {
     g_cfg_mqtt_host = value;
     NVS_PUT_STR("mqtt_host", value);
@@ -483,7 +487,7 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     NVS_PUT_STR("base_topic", value);
     // Recompute derived client ID
     char cid_buf[64];
-    mqtt_topics::client_id(cid_buf, sizeof(cid_buf), g_cfg_base_topic.c_str(), g_cfg_device_mac.c_str());
+    mqtt_topics::client_id(cid_buf, sizeof(cid_buf), g_cfg_base_topic.c_str(), g_cfg_device_mac_compact.c_str());
     g_cfg_mqtt_client_id = String(cid_buf);
     g_cfg_mqtt_reconfigure_required = true;
     g_mqtt_discovery_sent = false;
@@ -1121,7 +1125,7 @@ void web_handle_root() {
   checkbox_field(html, "HA Discovery", "ha_discovery_enabled", ha_disc_enabled);
   text_field(html, "Paired Controller MAC", "paired_controller_mac",
              paired_ctrl_mac,
-             "6-char hex MAC of paired controller");
+             "Full hex MAC of paired controller (e.g. AABBCCDDEEFF)");
   text_field(html, "Discovery Prefix", "discovery_prefix", disc_prefix,
              "HA MQTT discovery prefix, e.g. homeassistant");
   form_end(html, "Save MQTT");
@@ -1231,6 +1235,7 @@ static void web_server_task(void *) {
   }
   while (true) {
     g_web.handleClient();
+    ota_web_loop();
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -1386,8 +1391,8 @@ void mqtt_publish_state() {
 void mqtt_publish_discovery() {
   if (!g_mqtt.connected() || g_mqtt_discovery_sent) return;
 
-  const String base = g_cfg_base_topic + "/devices/" + g_cfg_device_mac;
-  const String node = g_cfg_base_topic + "_" + g_cfg_device_mac + "_display";
+  const String base = g_cfg_base_topic + "/devices/" + g_cfg_device_mac_compact;
+  const String node = g_cfg_base_topic + "_" + g_cfg_device_mac_compact + "_display";
 
   // Climate entity is now published by the controller. Display publishes only
   // display-specific entities (timeout, brightness, diagnostics).
@@ -1606,7 +1611,7 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       int mac_end = topic_str.length() - announce_suffix.length();
       if (mac_end > mac_begin) {
         String peer_mac = topic_str.substring(mac_begin, mac_end);
-        if (peer_mac != g_cfg_device_mac) {
+        if (peer_mac != g_cfg_device_mac_compact) {
           char buf[256];
           size_t buf_len = (length < sizeof(buf) - 1) ? length : sizeof(buf) - 1;
           memcpy(buf, payload, buf_len);
@@ -1616,7 +1621,9 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
                   && ::json_extract_string(buf, "role", role, sizeof(role))
                   && ::json_extract_string(buf, "ip", ip, sizeof(ip));
           if (ok) {
-            g_device_registry.upsert(peer_mac.c_str(), name, role, ip);
+            char formatted_mac[18];
+            format_mac_colons(peer_mac.c_str(), formatted_mac, sizeof(formatted_mac));
+            g_device_registry.upsert(formatted_mac, name, role, ip);
           }
         }
       }
@@ -1790,81 +1797,15 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   xSemaphoreGive(g_api_mutex);
 }
 
-void start_wifi_provisioning() {
-  if (g_wifi_provisioning_started) return;
-#ifdef IMPROV_WIFI_BLE_ENABLED
-  ImprovBleConfig cfg = {};
-  cfg.device_name = "Thermostat";
-  cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
-  cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
-  cfg.hardware_variant = "ESP32-S3";
-  cfg.device_url = nullptr;
-  improv_ble_start(cfg, [](const char *ssid, const char *password) {
-    g_cfg_wifi_ssid = ssid;
-    g_cfg_wifi_password = password;
-    g_cfg.putString("wifi_ssid", ssid);
-    g_cfg.putString("wifi_pwd", password);
-    g_cfg_wifi_reconnect_required = true;
-  });
-#endif
-  g_wifi_provisioning_started = true;
-}
-
 void wifi_event_handler(arduino_event_t *event) {
   if (event == nullptr) return;
-  switch (event->event_id) {
-    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-#ifdef IMPROV_WIFI_BLE_ENABLED
-      if (improv_ble_is_active()) {
-        improv_ble_stop();
-      }
-#endif
-      g_wifi_provisioning_started = false;
-      break;
-    default:
-      break;
+  if (event->event_id == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    g_wifi.on_wifi_connected();
   }
-}
-
-static bool g_wifi_radio_started = false;
-
-static void ensure_wifi_radio_started() {
-  if (g_wifi_radio_started) return;
-  g_wifi_radio_started = true;
-  WiFi.mode(WIFI_STA);
-  WiFi.onEvent(wifi_event_handler);
-  WiFi.setAutoReconnect(true);
 }
 
 void ensure_wifi_connected(uint32_t now_ms) {
-  if (g_cfg_wifi_reconnect_required) {
-    g_cfg_wifi_reconnect_required = false;
-    ensure_wifi_radio_started();
-    WiFi.disconnect();
-    g_last_wifi_attempt_ms = 0;
-  }
-  if (WiFi.status() == WL_CONNECTED) return;
-
-  if (g_cfg_wifi_ssid.length() > 0) {
-    ensure_wifi_radio_started();
-    if ((now_ms - g_last_wifi_attempt_ms) < kNetworkRetryMs) return;
-    g_last_wifi_attempt_ms = now_ms;
-    WiFi.begin(g_cfg_wifi_ssid.c_str(), g_cfg_wifi_password.c_str());
-    return;
-  }
-
-  // No SSID configured — start BLE provisioning after delay
-  if (g_wifi_provisioning_started) return;
-  if (!g_wifi_has_attempted_stored_connect) {
-    g_wifi_has_attempted_stored_connect = true;
-    g_first_wifi_attempt_ms = now_ms;
-    return;
-  }
-
-  if ((now_ms - g_first_wifi_attempt_ms) >= kProvisionStartDelayMs) {
-    start_wifi_provisioning();
-    return;
-  }
+  g_wifi.ensure_connected(now_ms);
 }
 
 void ensure_mqtt_connected(uint32_t now_ms) {
@@ -2445,8 +2386,11 @@ void create_ui() {
   callbacks.on_filter_reset = btn_filter_reset_cb;
   callbacks.on_wifi_reset = [](lv_event_t *) {
     Serial.println("[ui] WiFi reset requested — clearing credentials and rebooting");
-    g_cfg.remove("wifi_ssid");
-    g_cfg.remove("wifi_pwd");
+    g_wifi.clear_credentials();
+    schedule_reboot();
+  };
+  callbacks.on_restart = [](lv_event_t *) {
+    Serial.println("[ui] Restart requested");
     schedule_reboot();
   };
   callbacks.on_timeout_slider = timeout_slider_cb;
@@ -2623,9 +2567,10 @@ void init_network() {
   {
     uint8_t mac[6];
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    char buf[7];
-    snprintf(buf, sizeof(buf), "%02X%02X%02X", mac[3], mac[4], mac[5]);
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     g_cfg_device_mac = String(buf);
+    g_cfg_device_mac_compact = mac_strip_colons(g_cfg_device_mac);
     if (g_cfg_device_name.isEmpty()) {
       g_cfg_device_name = "display-" + g_cfg_device_mac;
     }
@@ -2634,15 +2579,22 @@ void init_network() {
   // Compute derived client ID from base_topic + device MAC
   {
     char cid_buf[64];
-    mqtt_topics::client_id(cid_buf, sizeof(cid_buf), g_cfg_base_topic.c_str(), g_cfg_device_mac.c_str());
+    mqtt_topics::client_id(cid_buf, sizeof(cid_buf), g_cfg_base_topic.c_str(), g_cfg_device_mac_compact.c_str());
     g_cfg_mqtt_client_id = String(cid_buf);
   }
 
-  // Only start WiFi if we have credentials — otherwise leave radio off so
-  // BLE provisioning can use the internal RAM.
-  if (g_cfg_wifi_ssid.length() > 0) {
-    ensure_wifi_radio_started();
-  }
+  // Initialize WiFi provisioning manager
+  WifiProvisioningConfig wifi_cfg = {};
+  wifi_cfg.device_name = "Thermostat";
+  wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  wifi_cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  wifi_cfg.hardware_variant = "ESP32-S3";
+  wifi_cfg.nvs = &g_cfg;
+  wifi_cfg.retry_interval_ms = kNetworkRetryMs;
+  wifi_cfg.reboot_after_provision = false;
+  g_wifi.begin(wifi_cfg);
+  WiFi.onEvent(wifi_event_handler);
+
   g_mqtt.setBufferSize(1024);
   g_mqtt.setServer(g_cfg_mqtt_host.c_str(), g_cfg_mqtt_port);
   g_mqtt.setCallback(mqtt_on_message);
@@ -2736,22 +2688,19 @@ static void run_provisioning_boot() {
   Serial.println("[provision] No WiFi configured — entering BLE provisioning mode");
   g_provisioning_boot_mode = true;
 
-  // Start BLE first while internal RAM is still available (display not yet init)
-#ifdef IMPROV_WIFI_BLE_ENABLED
-  ImprovBleConfig cfg = {};
-  cfg.device_name = "Thermostat";
-  cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
-  cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
-  cfg.hardware_variant = "ESP32-S3";
-  cfg.device_url = nullptr;
-  cfg.reboot_after_provision = true;
-  bool ble_ok = improv_ble_start(cfg, [](const char *ssid, const char *password) {
-    Serial.printf("[provision] Credentials received for: %s\n", ssid);
-    g_cfg.putString("wifi_ssid", ssid);
-    g_cfg.putString("wifi_pwd", password);
-  });
-  Serial.printf("[provision] BLE started: %s\n", ble_ok ? "ok" : "FAILED");
-#endif
+  // Start BLE first while internal RAM is still available (display not yet init).
+  // Use reboot_after_provision=true since WiFi+BLE can't coexist on ESP32-S3
+  // with display bounce buffers consuming internal RAM.
+  WifiProvisioningConfig wifi_cfg = {};
+  wifi_cfg.device_name = "Thermostat";
+  wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  wifi_cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  wifi_cfg.hardware_variant = "ESP32-S3";
+  wifi_cfg.nvs = &g_cfg;
+  wifi_cfg.retry_interval_ms = kNetworkRetryMs;
+  wifi_cfg.reboot_after_provision = true;
+  g_wifi.begin(wifi_cfg);
+  g_wifi.start_provisioning();
 
   // Now init display — BLE is already running and allocated its memory
   init_backlight();
@@ -2782,12 +2731,10 @@ static void run_provisioning_boot() {
   uint32_t last_tick = millis();
   for (;;) {
     esp_task_wdt_reset();
-#ifdef IMPROV_WIFI_BLE_ENABLED
-    if (improv_ble_reboot_pending()) {
+    if (g_wifi.reboot_pending()) {
       Serial.println("[provision] Rebooting with new credentials...");
       ESP.restart();
     }
-#endif
     uint32_t now = millis();
     if ((now - last_tick) >= kUiTickMs) {
       lv_tick_inc(now - last_tick);

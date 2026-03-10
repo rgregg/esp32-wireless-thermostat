@@ -14,6 +14,7 @@ static OtaAuditCallback s_ota_audit_cb = nullptr;
 static uint32_t s_rollback_start_ms = 0;
 static bool s_rollback_confirmed = false;
 static constexpr uint32_t kRollbackTimeoutMs = 180000; // 3 minutes
+static uint32_t s_reboot_at_ms = 0;
 
 void ota_set_audit_callback(OtaAuditCallback cb) { s_ota_audit_cb = cb; }
 
@@ -143,7 +144,13 @@ static void handle_update_post(WebServer &server) {
                 "<style>body{background:#111827;color:#10B981;font-family:system-ui;display:flex;"
                 "align-items:center;justify-content:center;min-height:100vh}</style></head><body>"
                 "<div><h1>Update OK</h1><p>Rebooting...</p></div></body></html>");
-    delay(500);
+    // Schedule reboot after response has time to flush.
+    s_reboot_at_ms = millis() + 1500;
+  }
+}
+
+void ota_web_loop() {
+  if (s_reboot_at_ms != 0 && millis() >= s_reboot_at_ms) {
     ESP.restart();
   }
 }

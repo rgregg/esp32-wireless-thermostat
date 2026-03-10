@@ -10,6 +10,9 @@ void ota_set_audit_callback(OtaAuditCallback cb);
 /// Register GET /update and POST /update routes on the given web server.
 void ota_web_setup(WebServer &server);
 
+/// Call from main loop to handle deferred post-OTA reboot.
+void ota_web_loop();
+
 /// Call once at boot to start the rollback confirmation timer.
 void ota_rollback_begin();
 
