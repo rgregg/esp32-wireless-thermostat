@@ -436,46 +436,6 @@ String controller_topic_for(const char *suffix) {
   return device_topic_for(g_cfg_paired_controller_mac.c_str(), suffix);
 }
 
-void publish_cfg_value(const char *key, const String &value) {
-  if (!g_mqtt.connected()) return;
-  String topic = self_topic_for("cfg");
-  topic += "/";
-  topic += key;
-  topic += "/state";
-  const char *payload = value.c_str();
-  if (thermostat::management_paths::is_secret_cfg_key(key)) {
-    payload = value.length() > 0 ? "set" : "unset";
-  }
-  g_mqtt.publish(topic.c_str(), payload, true);
-}
-
-void publish_all_cfg_state() {
-  publish_cfg_value("wifi_ssid", g_cfg_wifi_ssid);
-  publish_cfg_value("wifi_password", g_cfg_wifi_password);
-  publish_cfg_value("mqtt_host", g_cfg_mqtt_host);
-  publish_cfg_value("mqtt_port", String(g_cfg_mqtt_port));
-  publish_cfg_value("mqtt_user", g_cfg_mqtt_user);
-  publish_cfg_value("mqtt_password", g_cfg_mqtt_password);
-  publish_cfg_value("base_topic", g_cfg_base_topic);
-  publish_cfg_value("discovery_prefix", g_cfg_discovery_prefix);
-  publish_cfg_value("ha_discovery_enabled", g_cfg_ha_discovery_enabled ? "1" : "0");
-  publish_cfg_value("device_name", g_cfg_device_name);
-  publish_cfg_value("display_timeout_s", String(g_display_timeout_ms / 1000UL));
-  publish_cfg_value("backlight_active_pct", String(g_cfg_backlight_active_pct));
-  publish_cfg_value("backlight_screensaver_pct", String(g_cfg_backlight_screensaver_pct));
-  publish_cfg_value("temp_comp_c", String(g_cfg_temp_comp_c, 2));
-  publish_cfg_value("temperature_unit", g_cfg_temp_unit_f ? "f" : "c");
-  publish_cfg_value("ota_hostname", g_cfg_ota_hostname);
-  publish_cfg_value("ota_password", g_cfg_ota_password);
-  publish_cfg_value("espnow_channel", String(g_cfg_espnow_channel));
-  publish_cfg_value("espnow_peer_mac", g_cfg_espnow_peer_mac);
-  publish_cfg_value("espnow_lmk", g_cfg_espnow_lmk);
-  publish_cfg_value("mqtt_enabled", g_cfg_mqtt_enabled ? "1" : "0");
-  publish_cfg_value("espnow_enabled", g_cfg_espnow_enabled ? "1" : "0");
-  publish_cfg_value("paired_controller_mac", g_cfg_paired_controller_mac);
-  publish_cfg_value("controller_timeout_ms", String(g_cfg_controller_timeout_ms));
-  publish_cfg_value("reboot_required", g_cfg_reboot_required ? "1" : "0");
-}
 
 bool try_update_runtime_config(const String &key, const char *raw_value) {
   if (!g_cfg_ready || raw_value == nullptr) return false;
@@ -1635,18 +1595,6 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 
   const uint32_t now = millis();
   const String topic_str(topic);
-  const String cfg_prefix = self_topic_for("cfg/");
-
-  if (topic_str.startsWith(cfg_prefix) && topic_str.endsWith("/set")) {
-    const int key_begin = static_cast<int>(cfg_prefix.length());
-    const int key_end = static_cast<int>(topic_str.length()) - 4;
-    if (key_end > key_begin) {
-      const String key = topic_str.substring(key_begin, key_end);
-      try_update_runtime_config(key, value);
-    }
-    xSemaphoreGive(g_api_mutex);
-    return;
-  }
 
   // Device discovery: parse announce topics from other devices
   // Topic pattern: {base}/devices/{mac}/announce
@@ -1962,7 +1910,6 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(self_topic_for("cmd/display_timeout_s").c_str());
   g_mqtt.subscribe(self_topic_for("cmd/backlight_active_pct").c_str());
   g_mqtt.subscribe(self_topic_for("cmd/backlight_screensaver_pct").c_str());
-  g_mqtt.subscribe(self_topic_for("cfg/+/set").c_str());
 
   if (g_cfg_paired_controller_mac.length() > 0) {
     g_mqtt.subscribe(controller_topic_for("state/mode").c_str());
@@ -1984,7 +1931,6 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   if (g_cfg_ha_discovery_enabled) {
     mqtt_publish_discovery();
   }
-  publish_all_cfg_state();
   mqtt_publish_state();
 
   // Publish our announce message so other devices can discover us
@@ -2497,6 +2443,12 @@ void create_ui() {
   callbacks.on_unit = btn_unit_cb;
   callbacks.on_sync = btn_sync_cb;
   callbacks.on_filter_reset = btn_filter_reset_cb;
+  callbacks.on_wifi_reset = [](lv_event_t *) {
+    Serial.println("[ui] WiFi reset requested — clearing credentials and rebooting");
+    g_cfg.remove("wifi_ssid");
+    g_cfg.remove("wifi_pwd");
+    schedule_reboot();
+  };
   callbacks.on_timeout_slider = timeout_slider_cb;
   callbacks.on_brightness_slider = brightness_slider_cb;
   callbacks.on_dim_slider = dim_slider_cb;

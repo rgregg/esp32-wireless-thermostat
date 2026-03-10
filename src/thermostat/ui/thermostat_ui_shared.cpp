@@ -143,6 +143,9 @@ void style_primary_button(lv_obj_t *button) {
 
 void style_settings_button(lv_obj_t *button) {
   lv_obj_add_style(button, &g_style_header_item, LV_PART_MAIN);
+  lv_obj_set_style_text_align(button, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_layout(button, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 }
 
 void style_settings_slider(lv_obj_t *slider) {
@@ -757,6 +760,22 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_t *filter_label = lv_label_create(filter_btn);
   lv_label_set_text(filter_label, "Filter Reset");
   style_label(filter_label, font20());
+
+  lv_obj_t *actions_row2 = make_transparent(settings_controls, 320, 56);
+  lv_obj_set_layout(actions_row2, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(actions_row2, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(actions_row2, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(actions_row2, 8, LV_PART_MAIN);
+
+  lv_obj_t *wifi_reset_btn = lv_btn_create(actions_row2);
+  lv_obj_set_size(wifi_reset_btn, 156, 56);
+  style_settings_button(wifi_reset_btn);
+  if (callbacks.on_wifi_reset != nullptr) {
+    lv_obj_add_event_cb(wifi_reset_btn, callbacks.on_wifi_reset, LV_EVENT_CLICKED, nullptr);
+  }
+  lv_obj_t *wifi_reset_label = lv_label_create(wifi_reset_btn);
+  lv_label_set_text(wifi_reset_label, "Reset WiFi");
+  style_label(wifi_reset_label, font20());
 
   lv_obj_t *display_title = lv_label_create(settings_controls);
   lv_label_set_text(display_title, "Display");

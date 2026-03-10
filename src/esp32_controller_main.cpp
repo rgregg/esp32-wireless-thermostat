@@ -393,47 +393,6 @@ void ctrl_schedule_reboot() {
   g_ctrl_reboot_at_ms = millis() + 250;
 }
 
-void ctrl_publish_cfg_value(const char *key, const String &value) {
-  if (!g_ctrl_mqtt.connected()) {
-    return;
-  }
-  String topic = self_topic_for("cfg");
-  topic += "/";
-  topic += key;
-  topic += "/state";
-  const char *payload = value.c_str();
-  if (thermostat::management_paths::is_secret_cfg_key(key)) {
-    payload = value.length() > 0 ? "set" : "unset";
-  }
-  g_ctrl_mqtt.publish(topic.c_str(), payload, true);
-}
-
-void ctrl_publish_all_cfg_state() {
-  ctrl_publish_cfg_value("wifi_ssid", g_cfg_ctrl_wifi_ssid);
-  ctrl_publish_cfg_value("wifi_password", g_cfg_ctrl_wifi_password);
-  ctrl_publish_cfg_value("mqtt_host", g_cfg_ctrl_mqtt_host);
-  ctrl_publish_cfg_value("mqtt_port", String(g_cfg_ctrl_mqtt_port));
-  ctrl_publish_cfg_value("mqtt_user", g_cfg_ctrl_mqtt_user);
-  ctrl_publish_cfg_value("mqtt_password", g_cfg_ctrl_mqtt_password);
-  ctrl_publish_cfg_value("base_topic", g_cfg_base_topic);
-  ctrl_publish_cfg_value("ha_discovery_enabled", g_cfg_ha_discovery_enabled ? "1" : "0");
-  ctrl_publish_cfg_value("device_name", g_cfg_device_name);
-  ctrl_publish_cfg_value("discovery_prefix", g_cfg_ctrl_discovery_prefix);
-  ctrl_publish_cfg_value("ota_hostname", g_cfg_ctrl_ota_hostname);
-  ctrl_publish_cfg_value("ota_password", g_cfg_ctrl_ota_password);
-  ctrl_publish_cfg_value("espnow_channel", String(g_cfg_ctrl_espnow_channel));
-  ctrl_publish_cfg_value("espnow_lmk", g_cfg_ctrl_espnow_lmk);
-  ctrl_publish_cfg_value("devices", g_cfg_ctrl_devices);
-  ctrl_publish_cfg_value("allow_ha", g_cfg_ctrl_allow_ha ? "1" : "0");
-  ctrl_publish_cfg_value("mqtt_enabled", g_cfg_ctrl_mqtt_enabled ? "1" : "0");
-  ctrl_publish_cfg_value("espnow_enabled", g_cfg_ctrl_espnow_enabled ? "1" : "0");
-  ctrl_publish_cfg_value("pirateweather_api_key", g_cfg_ctrl_pirateweather_api_key);
-  ctrl_publish_cfg_value("pirateweather_zip", g_cfg_ctrl_pirateweather_zip);
-  ctrl_publish_cfg_value("temperature_unit", g_ctrl_temp_unit_f ? "f" : "c");
-  ctrl_publish_cfg_value("fan_circulate_period", String(g_cfg_fan_circ_period_min));
-  ctrl_publish_cfg_value("fan_circulate_duration", String(g_cfg_fan_circ_duration_min));
-  ctrl_publish_cfg_value("reboot_required", g_ctrl_cfg_reboot_required ? "1" : "0");
-}
 
 bool ctrl_parse_mac(const char *text, uint8_t out[6]);
 
@@ -611,9 +570,6 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
 
   if (!known) {
     return false;
-  }
-  if (g_ctrl_mqtt.connected()) {
-    ctrl_publish_cfg_value(key.c_str(), value);
   }
   return true;
 }
@@ -1980,7 +1936,6 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/filter_reset").c_str()) &&
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/primary_sensor_mac").c_str()) &&
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/espnow_only").c_str()) &&
-      g_ctrl_mqtt.subscribe(self_topic_for("cfg/+/set").c_str()) &&
       g_ctrl_mqtt.subscribe(device_topic_for("+", "sensor/temp_c").c_str()) &&
       g_ctrl_mqtt.subscribe(device_topic_for("+", "sensor/humidity").c_str()) &&
       g_ctrl_mqtt.subscribe(device_topic_for("+", "state/packed_command").c_str()) &&
@@ -1996,7 +1951,6 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   if (g_cfg_ha_discovery_enabled) {
     ctrl_publish_discovery();
   }
-  ctrl_publish_all_cfg_state();
   ctrl_publish_runtime_state();
 
   // Publish announce so other devices/tools can discover us
