@@ -1028,7 +1028,9 @@ void ctrl_web_handle_log_get() {
 }
 
 void ctrl_web_handle_config_get() {
-  String body = "{\"controller\":{";
+  String body;
+  body.reserve(1024);
+  body = "{\"controller\":{";
   body += "\"wifi_ssid\":\"" + web_ui::json_escape(g_cfg_ctrl_wifi_ssid) + "\",";
   body += "\"wifi_password\":\"" + String(g_cfg_ctrl_wifi_password.length() > 0 ? "set" : "unset") + "\",";
   body += "\"mqtt_host\":\"" + web_ui::json_escape(g_cfg_ctrl_mqtt_host) + "\",";
@@ -1617,6 +1619,10 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   const size_t copy_len = (length < sizeof(value) - 1) ? length : sizeof(value) - 1;
   memcpy(value, payload, copy_len);
   value[copy_len] = '\0';
+  if (length >= sizeof(value)) {
+    Serial.printf("[mqtt] payload truncated: %u -> %u bytes topic=%s\n",
+                  length, static_cast<unsigned>(sizeof(value) - 1), topic);
+  }
 
   const String topic_str(topic);
 

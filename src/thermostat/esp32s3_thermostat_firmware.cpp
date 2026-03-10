@@ -1558,6 +1558,10 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   const size_t copy_len = (length < sizeof(value) - 1) ? length : sizeof(value) - 1;
   memcpy(value, payload, copy_len);
   value[copy_len] = '\0';
+  if (length >= sizeof(value)) {
+    Serial.printf("[mqtt] payload truncated: %u -> %u bytes topic=%s\n",
+                  length, static_cast<unsigned>(sizeof(value) - 1), topic);
+  }
   char normalized[128];
   memcpy(normalized, value, copy_len + 1);
   lower_in_place(normalized);
@@ -2760,11 +2764,16 @@ void thermostat_firmware_setup() {
   static StaticTask_t web_task_tcb;
   static StackType_t *web_task_stack = (StackType_t *)heap_caps_malloc(
       8192 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
+  if (!web_task_stack) {
+    Serial.println("[web] PSRAM alloc failed, falling back to internal SRAM");
+    web_task_stack = (StackType_t *)heap_caps_malloc(
+        8192 * sizeof(StackType_t), MALLOC_CAP_INTERNAL);
+  }
   if (web_task_stack) {
     xTaskCreateStaticPinnedToCore(web_server_task, "web", 8192,
                                   nullptr, 1, web_task_stack, &web_task_tcb, 0);
   } else {
-    Serial.println("[web] FATAL: failed to allocate web task stack from PSRAM");
+    Serial.println("[web] FATAL: failed to allocate web task stack");
   }
   esp_task_wdt_add(NULL);  // register main task with TWDT
 }
