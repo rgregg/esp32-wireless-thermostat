@@ -1439,6 +1439,19 @@ void ctrl_web_handle_root() {
   g_ctrl_web.send(200, "text/html", html);
 }
 
+// Web server task runs on Core 0, freeing the main loop (Core 1) from HTTP
+// handling.  This prevents OTA uploads from blocking relay control and MQTT.
+static void ctrl_web_server_task(void *) {
+  while (!g_ctrl_web_started) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+  while (true) {
+    g_ctrl_web.handleClient();
+    ota_web_loop();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
 void ctrl_ensure_web_ready() {
   if (WiFi.status() != WL_CONNECTED) {
     return;
@@ -1452,11 +1465,13 @@ void ctrl_ensure_web_ready() {
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
     ota_web_setup(g_ctrl_web);
+    ota_set_prepare_callback([]() {
+      g_ctrl_wifi_client.stop();
+      Serial.printf("[ota] prepare: closed MQTT socket, heap=%u\n", ESP.getFreeHeap());
+    });
     g_ctrl_web.begin();
     g_ctrl_web_started = true;
   }
-  g_ctrl_web.handleClient();
-  ota_web_loop();
 }
 
 void ctrl_publish_runtime_state() {
@@ -1997,15 +2012,17 @@ void setup() {
   g_audit_log.set_publish_callback(ctrl_audit_publish);
   g_controller->app().runtime_mut().set_audit_callback(ctrl_runtime_audit_bridge);
   ota_set_audit_callback(ctrl_runtime_audit_bridge);
-  ota_set_prepare_callback([]() {
-    // Log only — MQTT disconnect is handled in the main loop.
-    Serial.printf("[ota] prepare: OTA starting, heap=%u\n", ESP.getFreeHeap());
-  });
 
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
   ota_rollback_begin();
+
+  // Web server task on Core 0: handles HTTP requests without blocking the
+  // relay control / MQTT / ESP-NOW main loop on Core 1.
+  xTaskCreatePinnedToCore(ctrl_web_server_task, "web", 8192,
+                          nullptr, 1, nullptr, 0);
+
   g_ctrl_weather_mutex = xSemaphoreCreateMutex();
   if (!g_ctrl_weather_mutex) {
     ctrl_audit("ctrl_weather: mutex alloc failed, weather disabled");
