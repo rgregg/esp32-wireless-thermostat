@@ -27,7 +27,7 @@ static uint32_t s_ota_last_activity_ms = 0;
 static uint32_t s_ota_bytes_written = 0;
 static uint32_t s_ota_chunk_count = 0;
 static uint32_t s_ota_start_ms = 0;
-static constexpr uint32_t kOtaTimeoutMs = 300000; // 5 minutes
+static constexpr uint32_t kOtaTimeoutMs = 30000; // 30 seconds per chunk
 static constexpr uint32_t kOtaProgressLogBytes = 102400; // log every ~100KB
 
 // ---------------------------------------------------------------------------
