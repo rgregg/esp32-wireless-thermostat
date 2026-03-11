@@ -1,6 +1,7 @@
 #pragma once
 #if defined(ARDUINO)
 #include <Arduino.h>
+#include "web_favicon.h"
 
 namespace web_ui {
 
@@ -208,8 +209,9 @@ struct TabDef {
 inline void page_begin(String &html, const char *title, const char *subtitle,
                         const TabDef *tabs, size_t tab_count) {
   html += F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            "<title>");
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+  html += FPSTR(kFaviconLink);
+  html += F("<title>");
   html += title;
   html += F("</title><style>");
   html += FPSTR(kCss);

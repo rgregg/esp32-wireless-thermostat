@@ -3,6 +3,7 @@
 #include "ota_web_updater.h"
 
 #include <Arduino.h>
+#include "web/web_favicon.h"
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -98,36 +99,40 @@ static bool ota_send_cmd(OtaCmd cmd, uint32_t timeout_ms = 30000) {
 // Web OTA upload
 // ---------------------------------------------------------------------------
 
-static const char kUploadFormHtml[] PROGMEM = R"rawliteral(
-<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Firmware Update</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,system-ui,sans-serif;background:#111827;color:#F9FAFB;
-min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1rem}
-.card{background:#1F2937;border-radius:0.5rem;padding:1.5rem;max-width:400px;width:100%}
-h1{font-size:1.25rem;margin-bottom:1rem;text-align:center}
-input[type=file]{width:100%;padding:0.5rem;margin-bottom:1rem;border:1px solid #374151;
-border-radius:0.375rem;background:#374151;color:#F9FAFB;font-size:0.85rem}
-button{width:100%;padding:0.5rem;border:none;border-radius:0.375rem;background:#4F46E5;
-color:#fff;font-size:0.85rem;font-weight:500;cursor:pointer}
-button:hover{background:#4338CA}
-a{color:#4F46E5;text-decoration:none;display:block;text-align:center;margin-top:1rem;font-size:0.85rem}
-</style></head><body>
-<div class="card">
-<h1>Firmware Update</h1>
-<form method="POST" action="/update" enctype="multipart/form-data">
-  <input type="file" name="firmware" accept=".bin">
-  <button type="submit">Upload</button>
-</form>
-<a href="/">Back to Config</a>
-</div>
-</body></html>
-)rawliteral";
+static const char kUploadFormHtmlHead[] PROGMEM =
+    "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+// kFaviconLink inserted at runtime
+static const char kUploadFormHtmlTail[] PROGMEM =
+    "<title>Firmware Update</title><style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:-apple-system,system-ui,sans-serif;background:#111827;color:#F9FAFB;"
+    "min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1rem}"
+    ".card{background:#1F2937;border-radius:0.5rem;padding:1.5rem;max-width:400px;width:100%}"
+    "h1{font-size:1.25rem;margin-bottom:1rem;text-align:center}"
+    "input[type=file]{width:100%;padding:0.5rem;margin-bottom:1rem;border:1px solid #374151;"
+    "border-radius:0.375rem;background:#374151;color:#F9FAFB;font-size:0.85rem}"
+    "button{width:100%;padding:0.5rem;border:none;border-radius:0.375rem;background:#4F46E5;"
+    "color:#fff;font-size:0.85rem;font-weight:500;cursor:pointer}"
+    "button:hover{background:#4338CA}"
+    "a{color:#4F46E5;text-decoration:none;display:block;text-align:center;margin-top:1rem;font-size:0.85rem}"
+    "</style></head><body>"
+    "<div class=\"card\">"
+    "<h1>Firmware Update</h1>"
+    "<form method=\"POST\" action=\"/update\" enctype=\"multipart/form-data\">"
+    "  <input type=\"file\" name=\"firmware\" accept=\".bin\">"
+    "  <button type=\"submit\">Upload</button>"
+    "</form>"
+    "<a href=\"/\">Back to Config</a>"
+    "</div></body></html>";
 
 static void handle_update_get(WebServer &server) {
-  server.send(200, "text/html", kUploadFormHtml);
+  String html;
+  html.reserve(3072);
+  html += FPSTR(kUploadFormHtmlHead);
+  html += FPSTR(kFaviconLink);
+  html += FPSTR(kUploadFormHtmlTail);
+  server.send(200, "text/html", html);
 }
 
 static void handle_update_upload(WebServer &server) {
@@ -250,21 +255,33 @@ static void handle_update_post(WebServer &server) {
                 ESP.getFreeHeap(),
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  // Build a small status page with favicon.
+  auto ota_status_page = [](const char *color, const char *heading, const char *msg) {
+    String html;
+    html.reserve(2560);
+    html += F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
+    html += FPSTR(kFaviconLink);
+    html += F("<style>body{background:#111827;color:");
+    html += color;
+    html += F(";font-family:system-ui;display:flex;"
+              "align-items:center;justify-content:center;min-height:100vh}</style></head><body>"
+              "<div><h1>");
+    html += heading;
+    html += F("</h1><p>");
+    html += msg;
+    html += F("</p></div></body></html>");
+    return html;
+  };
+
   if (Update.hasError()) {
     server.send(500, "text/html",
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-                "<style>body{background:#111827;color:#EF4444;font-family:system-ui;display:flex;"
-                "align-items:center;justify-content:center;min-height:100vh}</style></head><body>"
-                "<div><h1>Update Failed</h1><p>Check serial log. Rebooting...</p>"
-                "</div></body></html>");
+                ota_status_page("#EF4444", "Update Failed",
+                                "Check serial log. Rebooting..."));
     // Subsystems were torn down for OTA — must reboot even on failure.
     s_reboot_at_ms = millis() + 3000;
   } else {
     server.send(200, "text/html",
-                "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-                "<style>body{background:#111827;color:#10B981;font-family:system-ui;display:flex;"
-                "align-items:center;justify-content:center;min-height:100vh}</style></head><body>"
-                "<div><h1>Update OK</h1><p>Rebooting...</p></div></body></html>");
+                ota_status_page("#10B981", "Update OK", "Rebooting..."));
     // Force TCP to flush the response to the client before rebooting.
     WiFiClient client = server.client();
     client.flush();
@@ -329,6 +346,7 @@ void ota_web_process_flash_ops() {
 }
 
 void ota_web_setup(WebServer &server) {
+  favicon_setup(server);
   server.on("/update", HTTP_GET,
             [&server]() { handle_update_get(server); });
   server.on(
