@@ -22,6 +22,9 @@ struct WifiProvisioningConfig {
   // Timing
   uint32_t retry_interval_ms;     // How often to retry WiFi.begin()
 
+  // DHCP hostname (set before WiFi.begin)
+  const char *hostname;
+
   // If true, reboot after BLE provisioning completes (for devices
   // where BLE and WiFi can't coexist, e.g. ESP32-S3 with display)
   bool reboot_after_provision;

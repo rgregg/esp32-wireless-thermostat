@@ -23,6 +23,9 @@ void WifiProvisioningManager::ensure_wifi_radio() {
   if (m_wifi_radio_started) return;
   m_wifi_radio_started = true;
   WiFi.mode(WIFI_STA);
+  if (m_config.hostname && m_config.hostname[0]) {
+    WiFi.setHostname(m_config.hostname);
+  }
   WiFi.setAutoReconnect(true);
 }
 

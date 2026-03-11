@@ -278,7 +278,6 @@ String g_cfg_base_topic = THERMOSTAT_BASE_TOPIC;
 String g_cfg_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
 String g_cfg_device_mac;         // Full WiFi MAC "AA:BB:CC:DD:EE:FF"
 String g_cfg_device_mac_compact; // Colons stripped "AABBCCDDEEFF", for MQTT/hostnames
-String g_cfg_device_name; // user-friendly name, default "display-{MAC}"
 bool g_cfg_ha_discovery_enabled = true;
 String g_cfg_hostname = THERMOSTAT_OTA_HOSTNAME;
 uint8_t g_cfg_espnow_channel = THERMOSTAT_ESPNOW_CHANNEL;
@@ -342,7 +341,7 @@ void load_runtime_config() {
   String mac = mac_full();
   String mac_compact = mac_strip_colons(mac);
   mac_compact.toLowerCase();
-  g_cfg_hostname = String(THERMOSTAT_OTA_HOSTNAME) + "-" + mac_compact;
+  g_cfg_hostname = "display-" + mac_compact;
 
   // One-time migration: clear stale NVS keys from old config schema.
   g_cfg.remove("shared_id");
@@ -368,7 +367,7 @@ void load_runtime_config() {
   g_cfg_base_topic = g_cfg.getString("base_topic", g_cfg_base_topic);
   g_cfg_discovery_prefix = g_cfg.getString("disc_pref", g_cfg_discovery_prefix);
   g_cfg_ha_discovery_enabled = g_cfg.getBool("ha_disc", g_cfg_ha_discovery_enabled);
-  g_cfg_device_name = g_cfg.getString("device_name", "");
+  g_cfg.remove("device_name");  // legacy key, hostname is now the single name
   g_cfg_paired_controller_mac = g_cfg.getString("ctrl_mac", "");
   g_cfg_hostname = g_cfg.getString("ota_host", g_cfg_hostname);
   g_cfg_espnow_channel = static_cast<uint8_t>(g_cfg.getUChar("esp_ch", g_cfg_espnow_channel));
@@ -454,10 +453,6 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_ha_discovery_enabled = (strcmp(raw_value, "1") == 0);
     NVS_PUT_BOOL("ha_disc", g_cfg_ha_discovery_enabled);
     g_mqtt_discovery_sent = false;
-  } else if (key == "device_name") {
-    g_cfg_device_name = value;
-    NVS_PUT_STR("device_name", value);
-    g_mqtt_discovery_sent = false;
   } else if (key == "discovery_prefix") {
     g_cfg_discovery_prefix = value;
     NVS_PUT_STR("disc_pref", value);
@@ -493,9 +488,17 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     }
     // Forward unit preference to controller on next main-loop publish
     g_mqtt_state_dirty = true;
-  } else if (key == "ota_hostname") {
+  } else if (key == "hostname") {
+    // Validate: ≤63 chars, [a-zA-Z0-9-], no leading/trailing hyphens
+    if (value.length() == 0 || value.length() > 63) return false;
+    if (value.charAt(0) == '-' || value.charAt(value.length() - 1) == '-') return false;
+    for (unsigned i = 0; i < value.length(); ++i) {
+      char c = value.charAt(i);
+      if (!isalnum(c) && c != '-') return false;
+    }
     g_cfg_hostname = value;
     NVS_PUT_STR("ota_host", value);
+    g_mqtt_discovery_sent = false;
   } else if (key == "espnow_channel") {
     const long parsed = atol(raw_value);
     if (parsed < 1 || parsed > 14) return false;
@@ -727,7 +730,6 @@ void web_handle_config_get() {
   body += "\"mqtt_user\":\"" + web_ui::json_escape(g_cfg_mqtt_user) + "\",";
   body += "\"mqtt_password\":\"" + String(g_cfg_mqtt_password.length() > 0 ? "set" : "unset") + "\",";
   body += "\"base_topic\":\"" + web_ui::json_escape(g_cfg_base_topic) + "\",";
-  body += "\"device_name\":\"" + web_ui::json_escape(g_cfg_device_name) + "\",";
   body += "\"discovery_prefix\":\"" + web_ui::json_escape(g_cfg_discovery_prefix) + "\",";
   body += "\"ha_discovery_enabled\":" + String(g_cfg_ha_discovery_enabled ? "true" : "false") + ",";
   body += "\"display_timeout_s\":" + String(g_display_timeout_ms / 1000UL) + ",";
@@ -990,7 +992,6 @@ void web_handle_root() {
   const String mqtt_user = g_cfg_mqtt_user;
   const bool mqtt_pwd_set = g_cfg_mqtt_password.length() > 0;
   const String base_topic = g_cfg_base_topic;
-  const String device_name = g_cfg_device_name;
   const bool ha_disc_enabled = g_cfg_ha_discovery_enabled;
   const String paired_ctrl_mac = g_cfg_paired_controller_mac;
   const String disc_prefix = g_cfg_discovery_prefix;
@@ -1076,13 +1077,14 @@ void web_handle_root() {
   password_field(html, "Password", "mqtt_password", mqtt_pwd_set);
   text_field(html, "Base Topic", "base_topic", base_topic,
              "e.g. esp32-wireless-thermostat");
-  text_field(html, "Device Name", "device_name", device_name);
-  checkbox_field(html, "HA Discovery", "ha_discovery_enabled", ha_disc_enabled);
-  text_field(html, "Paired Controller MAC", "paired_controller_mac",
-             paired_ctrl_mac,
-             "e.g. AABBCCDDEEFF or AA:BB:CC:DD:EE:FF");
+  checkbox_field(html, "HA Discovery", "ha_discovery_enabled", ha_disc_enabled,
+                 "ha-disc-opts");
+  html += F("<div id=\"ha-disc-opts\"");
+  if (!ha_disc_enabled) html += F(" style=\"display:none\"");
+  html += F(">");
   text_field(html, "Discovery Prefix", "discovery_prefix", disc_prefix,
              "HA MQTT discovery prefix, e.g. homeassistant");
+  html += F("</div>");
   form_end(html, "Save MQTT");
   card_end(html);
   tab_end(html);
@@ -1109,6 +1111,16 @@ void web_handle_root() {
   // ── Hardware tab ──
   tab_begin(html, "hw");
 
+  // Device card
+  card_begin(html, "Device");
+  form_begin(html);
+  text_field(html, "Hostname", "hostname", ota_hostname,
+             "Used for mDNS, DHCP, and MQTT device name",
+             "^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$",
+             "Letters, digits, hyphens; max 63 chars", 63);
+  form_end(html, "Save");
+  card_end(html);
+
   // Controller card
   card_begin(html, "Controller");
   form_begin(html);
@@ -1134,8 +1146,8 @@ void web_handle_root() {
   form_end(html, "Save ESP-NOW");
   card_end(html);
 
-  // Sensor & OTA card
-  card_begin(html, "Sensor & OTA");
+  // Sensor card
+  card_begin(html, "Sensor");
   form_begin(html);
   {
     float comp_display = temp_unit_f ? temp_comp * 1.8f : temp_comp;
@@ -1147,7 +1159,6 @@ void web_handle_root() {
   number_field(html, "Controller Timeout (ms)", "controller_timeout_ms",
                String(ctrl_timeout), "1000", "600000", "1",
                "Time before controller is considered disconnected");
-  text_field(html, "Hostname", "ota_hostname", ota_hostname);
   form_end(html, "Save");
   card_end(html);
 
@@ -1371,7 +1382,7 @@ void mqtt_publish_discovery() {
            "\"entity_category\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
            "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
            node.c_str(), base.c_str(), base.c_str(), node.c_str(),
-           g_cfg_device_name.c_str());
+           g_cfg_hostname.c_str());
   g_mqtt.publish(timeout_config.c_str(), payload, true);
 
   const String brightness_config = g_cfg_discovery_prefix + "/number/" + node +
@@ -1533,7 +1544,7 @@ void mqtt_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
            "\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
            node.c_str(), base.c_str(), node.c_str(),
-           g_cfg_device_name.c_str());
+           g_cfg_hostname.c_str());
   g_mqtt.publish(temp_config.c_str(), payload, true);
 
   const String hum_config =
@@ -1545,6 +1556,16 @@ void mqtt_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            node.c_str(), base.c_str(), node.c_str());
   g_mqtt.publish(hum_config.c_str(), payload, true);
+
+  // Re-publish announce so /devices reflects the current hostname
+  {
+    char announce_buf[256];
+    snprintf(announce_buf, sizeof(announce_buf),
+             "{\"role\":\"display\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
+             THERMOSTAT_FIRMWARE_VERSION, g_cfg_hostname.c_str(),
+             WiFi.localIP().toString().c_str());
+    g_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
+  }
 
   g_mqtt_discovery_sent = true;
 }
@@ -1847,7 +1868,7 @@ void ensure_mqtt_connected(uint32_t now_ms) {
     char announce_buf[256];
     snprintf(announce_buf, sizeof(announce_buf),
              "{\"role\":\"display\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
-             THERMOSTAT_FIRMWARE_VERSION, g_cfg_device_name.c_str(),
+             THERMOSTAT_FIRMWARE_VERSION, g_cfg_hostname.c_str(),
              WiFi.localIP().toString().c_str());
     g_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
   }
@@ -2522,9 +2543,6 @@ void init_network() {
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     g_cfg_device_mac = String(buf);
     g_cfg_device_mac_compact = mac_strip_colons(g_cfg_device_mac);
-    if (g_cfg_device_name.isEmpty()) {
-      g_cfg_device_name = "display-" + g_cfg_device_mac;
-    }
   }
 
   // Compute derived client ID from base_topic + device MAC
@@ -2541,6 +2559,7 @@ void init_network() {
   wifi_cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
   wifi_cfg.hardware_variant = "ESP32-S3";
   wifi_cfg.nvs = &g_cfg;
+  wifi_cfg.hostname = g_cfg_hostname.c_str();
   wifi_cfg.retry_interval_ms = kNetworkRetryMs;
   wifi_cfg.reboot_after_provision = false;
   g_wifi.begin(wifi_cfg);
