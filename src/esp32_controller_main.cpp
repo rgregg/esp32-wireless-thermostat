@@ -40,7 +40,17 @@
 #include "mac_address_utils.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
-thermostat::ControllerRelayIo g_relay_io;
+#ifdef CONTROLLER_HW_XL9535
+static thermostat::ControllerRelayIoConfig s_relay_cfg = []() {
+  thermostat::ControllerRelayIoConfig c;
+  c.use_i2c     = true;
+  c.i2c_address = 0x20;  // XL9535 default; adjust if A0/A1/A2 jumpers differ
+  return c;
+}();
+#else
+static thermostat::ControllerRelayIoConfig s_relay_cfg;  // GPIO defaults: pins 32/33/25/26
+#endif
+thermostat::ControllerRelayIo g_relay_io(s_relay_cfg);
 thermostat::AuditLog g_audit_log;
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
@@ -2045,6 +2055,9 @@ void setup() {
   g_controller->app().runtime_mut().set_audit_callback(ctrl_runtime_audit_bridge);
   ota_set_audit_callback(ctrl_runtime_audit_bridge);
 
+#ifdef CONTROLLER_HW_XL9535
+  Wire.begin(3, 4);  // Feather S3: SDA=GPIO3, SCL=GPIO4
+#endif
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
