@@ -2,6 +2,10 @@
 
 #include <stdint.h>
 
+#if defined(ARDUINO)
+#include <Wire.h>
+#endif
+
 #include "thermostat_types.h"
 
 namespace thermostat {
@@ -14,6 +18,14 @@ struct ControllerRelayIoConfig {
   bool inverted = false;
   uint32_t heat_interlock_wait_ms = 500;
   uint32_t default_interlock_wait_ms = 1000;
+
+  // I2C relay backend (use_i2c = true → XL9535 via Wire; false → GPIO above)
+  bool use_i2c = false;
+#if defined(ARDUINO)
+  TwoWire *i2c_bus = &Wire;
+#endif
+  uint8_t i2c_address = 0x20;
+  uint8_t i2c_relay_offset = 0;  // bit offset within port 0 (0 = relay1 on bit 0)
 };
 
 class ControllerRelayIo {
