@@ -2,6 +2,7 @@
 
 #if defined(ARDUINO)
 #include <Arduino.h>
+#include <Wire.h>
 #endif
 
 namespace thermostat {
@@ -15,10 +16,22 @@ bool relay_off_level(bool inverted) { return inverted; }
 
 void ControllerRelayIo::begin() {
 #if defined(ARDUINO)
-  pinMode(config_.heat_pin, OUTPUT);
-  pinMode(config_.cool_pin, OUTPUT);
-  pinMode(config_.fan_pin, OUTPUT);
-  pinMode(config_.spare_pin, OUTPUT);
+  if (config_.use_i2c) {
+    // Configure XL9535 port 0 as all-outputs (register 0x06 = 0x00)
+    config_.i2c_bus->beginTransmission(config_.i2c_address);
+    config_.i2c_bus->write(0x06);  // config register, port 0
+    config_.i2c_bus->write(0x00);  // all outputs
+    uint8_t result = config_.i2c_bus->endTransmission();
+    Serial.printf("[RelayIO] XL9535 init at 0x%02X: %s (code %d)\n",
+                  config_.i2c_address,
+                  result == 0 ? "OK" : "FAILED",
+                  result);
+  } else {
+    pinMode(config_.heat_pin, OUTPUT);
+    pinMode(config_.cool_pin, OUTPUT);
+    pinMode(config_.fan_pin, OUTPUT);
+    pinMode(config_.spare_pin, OUTPUT);
+  }
 #endif
   write_outputs(RelayDemand{});
   initialized_ = true;
@@ -70,12 +83,31 @@ RelayDemand ControllerRelayIo::to_demand(RelaySelect relay) const {
 void ControllerRelayIo::write_outputs(const RelayDemand &out) {
   output_ = out;
 #if defined(ARDUINO)
-  const bool on = relay_on_level(config_.inverted);
-  const bool off = relay_off_level(config_.inverted);
-  digitalWrite(config_.heat_pin, out.heat ? on : off);
-  digitalWrite(config_.cool_pin, out.cool ? on : off);
-  digitalWrite(config_.fan_pin, out.fan ? on : off);
-  digitalWrite(config_.spare_pin, out.spare ? on : off);
+  if (config_.use_i2c) {
+    const uint8_t relay_bits = (out.heat ? 1 : 0) |
+                               (out.cool ? 2 : 0) |
+                               (out.fan  ? 4 : 0) |
+                               (out.spare? 8 : 0);
+    const uint8_t relay_mask = static_cast<uint8_t>(0x0F << config_.i2c_relay_offset);
+    const uint8_t shifted    = static_cast<uint8_t>(relay_bits << config_.i2c_relay_offset);
+    const uint8_t bitmask    = config_.inverted
+                               ? static_cast<uint8_t>(relay_mask & ~shifted)
+                               : shifted;
+    config_.i2c_bus->beginTransmission(config_.i2c_address);
+    config_.i2c_bus->write(0x02);   // output port 0 register
+    config_.i2c_bus->write(bitmask);
+    uint8_t result = config_.i2c_bus->endTransmission();
+    if (result != 0) {
+      Serial.printf("[RelayIO] I2C write failed (code %d)\n", result);
+    }
+  } else {
+    const bool on = relay_on_level(config_.inverted);
+    const bool off = relay_off_level(config_.inverted);
+    digitalWrite(config_.heat_pin, out.heat ? on : off);
+    digitalWrite(config_.cool_pin, out.cool ? on : off);
+    digitalWrite(config_.fan_pin,  out.fan  ? on : off);
+    digitalWrite(config_.spare_pin,out.spare? on : off);
+  }
 #endif
 }
 
