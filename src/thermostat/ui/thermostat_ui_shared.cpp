@@ -49,24 +49,25 @@ lv_event_cb_t g_mode_external_cb = nullptr;
 lv_event_cb_t g_unit_external_cb = nullptr;
 
 static const char *s_confirm_btns[] = {"Yes", "Cancel", ""};
+static lv_event_cb_t s_confirm_cb = nullptr;
 
 void confirm_msgbox_cb(lv_event_t *e) {
   lv_obj_t *msgbox = lv_event_get_current_target(e);
   const char *btn_text = lv_msgbox_get_active_btn_text(msgbox);
   if (btn_text == nullptr) return;
   if (strcmp(btn_text, "Yes") == 0) {
-    auto *real_cb = reinterpret_cast<lv_event_cb_t>(lv_event_get_user_data(e));
-    if (real_cb) real_cb(e);
+    if (s_confirm_cb) s_confirm_cb(e);
   }
+  s_confirm_cb = nullptr;
   lv_msgbox_close(msgbox);
 }
 
 void show_confirm_dialog(const char *title, const char *message, lv_event_cb_t on_confirm) {
+  s_confirm_cb = on_confirm;
   lv_obj_t *msgbox = lv_msgbox_create(nullptr, title, message, s_confirm_btns, false);
   lv_obj_set_style_text_font(msgbox, &thermostat_font_montserrat_20, LV_PART_MAIN);
   lv_obj_center(msgbox);
-  lv_obj_add_event_cb(msgbox, confirm_msgbox_cb, LV_EVENT_VALUE_CHANGED,
-                       reinterpret_cast<void *>(on_confirm));
+  lv_obj_add_event_cb(msgbox, confirm_msgbox_cb, LV_EVENT_VALUE_CHANGED, nullptr);
 }
 
 lv_event_cb_t g_wifi_reset_cb = nullptr;
