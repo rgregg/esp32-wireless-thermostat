@@ -499,6 +499,7 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_hostname = value;
     NVS_PUT_STR("ota_host", value);
     g_mqtt_discovery_sent = false;
+    g_cfg_reboot_required = true;  // WiFi/mDNS hostname only applied at boot
   } else if (key == "espnow_channel") {
     const long parsed = atol(raw_value);
     if (parsed < 1 || parsed > 14) return false;

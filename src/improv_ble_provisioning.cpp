@@ -112,7 +112,7 @@ bool improv_ble_is_active() {
 }
 
 bool improv_ble_reboot_pending() {
-    return s_reboot_pending && (int32_t)(millis() - s_reboot_at_ms) >= 0;
+    return s_reboot_pending && (uint32_t)(millis() - s_reboot_at_ms) < 0x80000000UL;
 }
 
 #endif

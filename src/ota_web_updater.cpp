@@ -50,7 +50,8 @@ enum class OtaCmd : uint8_t { None, Begin, Write, End, Abort };
 static std::atomic<OtaCmd> s_ota_cmd{OtaCmd::None};
 static SemaphoreHandle_t s_ota_cmd_ready = nullptr;  // web → main
 static SemaphoreHandle_t s_ota_cmd_done = nullptr;    // main → web
-static bool s_ota_cmd_ok = false;  // result of Begin/End
+static bool s_ota_cmd_ok = false;   // result of Begin/End
+static bool s_ota_aborted = false;  // true if we aborted mid-upload (e.g. bad chunk)
 
 void ota_set_audit_callback(OtaAuditCallback cb) { s_ota_audit_cb = cb; }
 void ota_set_prepare_callback(OtaPrepareCallback cb) { s_ota_prepare_cb = cb; }
@@ -69,6 +70,11 @@ static void ensure_ota_sync_init() {
   if (s_ota_cmd_ready == nullptr) {
     s_ota_cmd_ready = xSemaphoreCreateBinary();
     s_ota_cmd_done = xSemaphoreCreateBinary();
+    if (!s_ota_cmd_ready || !s_ota_cmd_done) {
+      Serial.println("[ota] FATAL: failed to create sync semaphores");
+      s_ota_aborted = true;
+      return;
+    }
     // Prefer PSRAM to save internal SRAM for WiFi/TCP stack.
     // Update.write() copies to its own internal buffer before freezing cache.
     s_ota_chunk_buf = static_cast<uint8_t *>(
@@ -85,6 +91,7 @@ static void ensure_ota_sync_init() {
 
 // Send a command to the main loop and wait for it to complete.
 static bool ota_send_cmd(OtaCmd cmd, uint32_t timeout_ms = 30000) {
+  if (!s_ota_cmd_ready || !s_ota_cmd_done) return false;
   s_ota_cmd.store(cmd);
   xSemaphoreGive(s_ota_cmd_ready);
   if (xSemaphoreTake(s_ota_cmd_done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
@@ -141,6 +148,7 @@ static void handle_update_upload(WebServer &server) {
   switch (upload.status) {
     case UPLOAD_FILE_START: {
       s_ota_in_progress = true;
+      s_ota_aborted = false;
       s_ota_last_activity_ms = millis();
       s_ota_start_ms = millis();
       s_ota_bytes_written = 0;
@@ -183,10 +191,14 @@ static void handle_update_upload(WebServer &server) {
     case UPLOAD_FILE_WRITE: {
       s_ota_last_activity_ms = millis();
       s_ota_chunk_count++;
+      if (s_ota_aborted) break;
       if (s_ota_chunk_buf == nullptr || upload.currentSize > kOtaChunkBufSize) {
-        Serial.printf("[ota] WRITE SKIP chunk=%u size=%u (buf=%p max=%u)\n",
+        Serial.printf("[ota] WRITE ABORT chunk=%u size=%u (buf=%p max=%u)\n",
                       s_ota_chunk_count, upload.currentSize,
                       s_ota_chunk_buf, kOtaChunkBufSize);
+        ota_audit("ota_web: write abort at %u bytes (bad chunk)", s_ota_bytes_written);
+        ota_send_cmd(OtaCmd::Abort);
+        s_ota_aborted = true;
         break;
       }
       // Copy chunk to internal SRAM buffer and delegate write to main task.
@@ -219,6 +231,7 @@ static void handle_update_upload(WebServer &server) {
 
     case UPLOAD_FILE_END: {
       uint32_t elapsed_ms = millis() - s_ota_start_ms;
+      if (s_ota_aborted) break;  // already aborted mid-upload; Update.abort() already sent
       // Delegate Update.end() to main loop task.
       ota_send_cmd(OtaCmd::End);
       if (s_ota_cmd_ok) {

@@ -435,6 +435,7 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_ctrl_hostname = value;
     g_ctrl_cfg.putString("ota_host", value);
     g_ctrl_mqtt_discovery_sent = false;
+    g_ctrl_cfg_reboot_required = true;  // WiFi/mDNS hostname only applied at boot
   } else if (key == "espnow_channel") {
     const long parsed = atol(raw_value);
     if (parsed < 1 || parsed > 14) {
@@ -1822,6 +1823,20 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     ctrl_apply_mqtt_shadow(false, true);
     return;
   }
+  if (topic_str == self_topic_for("cfg/fan_circulate_period/set")) {
+    if (ctrl_try_update_runtime_config("fan_circulate_period", value)) {
+      g_ctrl_mqtt.publish(self_topic_for("cfg/fan_circulate_period/state").c_str(),
+                          value, /*retain=*/true);
+    }
+    return;
+  }
+  if (topic_str == self_topic_for("cfg/fan_circulate_duration/set")) {
+    if (ctrl_try_update_runtime_config("fan_circulate_duration", value)) {
+      g_ctrl_mqtt.publish(self_topic_for("cfg/fan_circulate_duration/state").c_str(),
+                          value, /*retain=*/true);
+    }
+    return;
+  }
 }
 
 void ctrl_wifi_event_handler(arduino_event_t *event) {
@@ -1882,6 +1897,8 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/filter_reset").c_str()) &&
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/primary_sensor_mac").c_str()) &&
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/espnow_only").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cfg/fan_circulate_period/set").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cfg/fan_circulate_duration/set").c_str()) &&
       g_ctrl_mqtt.subscribe(device_topic_for("+", "sensor/temp_c").c_str()) &&
       g_ctrl_mqtt.subscribe(device_topic_for("+", "sensor/humidity").c_str()) &&
       g_ctrl_mqtt.subscribe(device_topic_for("+", "state/packed_command").c_str()) &&
