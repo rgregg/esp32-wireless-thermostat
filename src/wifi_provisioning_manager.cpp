@@ -2,6 +2,7 @@
 
 #include "wifi_provisioning_manager.h"
 #include <WiFi.h>
+#include "esp_heap_caps.h"
 
 // Single instance pointer for the static BLE callback
 static WifiProvisioningManager *s_instance = nullptr;
