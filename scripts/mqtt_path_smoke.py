@@ -4,10 +4,12 @@
 Validates:
 - thermostat granular commands produce packed command mirror with correct encoding
 - controller follows display packed command mirror (two state changes)
-- end-to-end round-trip: display cmd → packed_command/<MAC> → controller state
+- end-to-end round-trip: display cmd → packed_command → controller state
+
+Topic structure: {base_topic}/devices/{MAC}/state/... and .../cmd/...
 
 Usage:
-  python3 scripts/mqtt_path_smoke.py --host mqtt.lan
+  python3 scripts/mqtt_path_smoke.py --host mqtt.lan --ctrl-mac 29A9C4 --disp-mac 55D0E8
 """
 
 from __future__ import annotations
@@ -56,15 +58,22 @@ def wait_for(predicate, timeout_s: float, step_s: float = 0.05) -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="MQTT path smoke test for thermostat/controller pair"
+    )
     parser.add_argument("--host", default="mqtt.lan")
     parser.add_argument("--port", type=int, default=1883)
-    parser.add_argument("--prefix", default="thermostat")
+    parser.add_argument("--base-topic", default="esp32-wireless-thermostat",
+                        help="MQTT base topic (default: esp32-wireless-thermostat)")
+    parser.add_argument("--ctrl-mac", required=True,
+                        help="Controller short MAC, e.g. 29A9C4")
+    parser.add_argument("--disp-mac", required=True,
+                        help="Display short MAC, e.g. 55D0E8")
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
 
-    ctrl_base = f"{args.prefix}/furnace-controller"
-    disp_base = f"{args.prefix}/furnace-display"
+    ctrl_base = f"{args.base_topic}/devices/{args.ctrl_mac}"
+    disp_base = f"{args.base_topic}/devices/{args.disp_mac}"
 
     want_topics = [
         f"{ctrl_base}/state/availability",
@@ -72,10 +81,8 @@ def main() -> int:
         f"{ctrl_base}/state/fan_mode",
         f"{ctrl_base}/state/target_temp_c",
         f"{disp_base}/state/availability",
-        f"{disp_base}/state/packed_command/+",  # firmware appends /<MAC>
+        f"{disp_base}/state/packed_command",
     ]
-
-    packed_cmd_prefix = f"{disp_base}/state/packed_command/"
 
     latest: Dict[str, str] = {}
 
@@ -88,10 +95,7 @@ def main() -> int:
 
     def on_message(_client, _userdata, msg):
         payload = msg.payload.decode("utf-8", errors="ignore").strip()
-        # Normalize packed_command/<MAC> to packed_command for lookup
-        if msg.topic.startswith(packed_cmd_prefix) and payload:
-            latest[f"{disp_base}/state/packed_command"] = payload
-        else:
+        if payload:
             latest[msg.topic] = payload
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="mqtt-path-smoke")
@@ -117,8 +121,10 @@ def main() -> int:
         client.publish(f"{disp_base}/cmd/fan_mode", "circulate", qos=1, retain=False)
         client.publish(f"{disp_base}/cmd/target_temp_c", "21.5", qos=1, retain=False)
 
+        packed_topic = f"{disp_base}/state/packed_command"
+
         def packed_matches_expected(mode: int, fan: int, setpoint: int) -> bool:
-            raw = latest.get(f"{disp_base}/state/packed_command")
+            raw = latest.get(packed_topic)
             if not raw:
                 return False
             decoded = decode_command(int(raw))
@@ -126,7 +132,7 @@ def main() -> int:
 
         ok = wait_for(lambda: packed_matches_expected(1, 2, 215), args.timeout)
         if not ok:
-            raw = latest.get(f"{disp_base}/state/packed_command", "missing")
+            raw = latest.get(packed_topic, "missing")
             if raw and raw != "missing":
                 d = decode_command(int(raw))
                 print(
@@ -147,7 +153,7 @@ def main() -> int:
             return 1
 
         # Drive a second state change through the display to verify the full
-        # round-trip: display cmd → packed_command/<MAC> → controller applies.
+        # round-trip: display cmd → packed_command → controller applies.
         client.publish(f"{disp_base}/cmd/mode", "cool", qos=1, retain=False)
         client.publish(f"{disp_base}/cmd/fan_mode", "on", qos=1, retain=False)
         client.publish(f"{disp_base}/cmd/target_temp_c", "19.0", qos=1, retain=False)

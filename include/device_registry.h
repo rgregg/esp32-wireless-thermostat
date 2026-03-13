@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stddef.h>
+#include <stdio.h>
 
 // Simple device registry populated from MQTT device announcements.
 // Platform-agnostic: uses only C-compatible types (no Arduino String, no std::string).
@@ -64,6 +65,28 @@ private:
     dst[dst_size - 1] = '\0';
   }
 };
+
+// Format a compact MAC (e.g. "AABBCCDDEEFF") into colon-separated form
+// ("AA:BB:CC:DD:EE:FF").  If the input already contains colons or is not
+// exactly 12 hex chars, it is copied as-is.  Returns true if formatted.
+inline bool format_mac_colons(const char *compact, char *out, size_t out_size) {
+  if (compact == nullptr || out == nullptr || out_size < 18) {
+    if (out && out_size > 0) out[0] = '\0';
+    return false;
+  }
+  size_t len = strlen(compact);
+  // Already colon-separated or not a compact MAC — copy as-is
+  if (len != 12 || strchr(compact, ':') != nullptr) {
+    strncpy(out, compact, out_size - 1);
+    out[out_size - 1] = '\0';
+    return false;
+  }
+  snprintf(out, out_size, "%c%c:%c%c:%c%c:%c%c:%c%c:%c%c",
+           compact[0], compact[1], compact[2], compact[3],
+           compact[4], compact[5], compact[6], compact[7],
+           compact[8], compact[9], compact[10], compact[11]);
+  return true;
+}
 
 // Simple JSON value extractor using strstr.
 // Extracts the string value for a given key from a flat JSON object.

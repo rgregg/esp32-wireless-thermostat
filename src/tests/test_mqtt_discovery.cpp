@@ -9,10 +9,10 @@
 static constexpr size_t kMqttBufferSize = 1024;
 
 // Use a generous topic base and device ID to simulate realistic worst-case.
-// IDs include a MAC suffix (e.g. "_abcdef") as devices now append one by default.
-static const char *kBase = "thermostat/my-long-furnace-controller-name";
-static const char *kCtrlDevId = "my_long_wireless_thermostat_system_id_abcdef_controller";
-static const char *kDispDevId = "my_long_wireless_thermostat_system_id_abcdef_display";
+// Format: {base_topic}/devices/{MAC} for topics, {base_topic}_{MAC}_role for IDs.
+static const char *kBase = "esp32-wireless-thermostat/devices/AABBCCDDEEFF";
+static const char *kCtrlDevId = "esp32-wireless-thermostat_AABBCCDDEEFF_controller";
+static const char *kDispDevId = "esp32-wireless-thermostat_AABBCCDDEEFF_display";
 
 // The climate discovery payload is the largest single MQTT message published.
 // It must fit within the PubSubClient buffer to actually reach the broker.
@@ -33,8 +33,8 @@ TEST_CASE(mqtt_discovery_climate_payload_fits_buffer) {
       "\"pl_avail\":\"online\",\"pl_not_avail\":\"offline\","
       "\"min_temp\":5,\"max_temp\":35,\"temp_step\":0.5,\"temp_unit\":\"C\","
       "\"dev\":{\"ids\":[\"%s\"],"
-      "\"name\":\"Furnace Controller\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
-      kBase, kCtrlDevId, kCtrlDevId);
+      "\"name\":\"%s\",\"mf\":\"rgregg\",\"mdl\":\"ESP32 Thermostat\"}}",
+      kBase, kCtrlDevId, kCtrlDevId, "Furnace Controller");
 
   ASSERT_TRUE(len > 0);
   ASSERT_TRUE(static_cast<size_t>(len) < kMqttBufferSize);

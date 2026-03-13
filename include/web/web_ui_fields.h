@@ -91,12 +91,19 @@ inline void password_field(String &html, const char *label, const char *name,
   html += F("</div></div>");
 }
 
-// Checkbox field
-inline void checkbox_field(String &html, const char *label, const char *name, bool checked) {
+// Checkbox field. If toggle_id is set, toggling the checkbox shows/hides
+// the element with that id.
+inline void checkbox_field(String &html, const char *label, const char *name,
+                            bool checked, const char *toggle_id = nullptr) {
   html += F("<div class=\"mb\"><label><input type=\"checkbox\" name=\"");
   html += name;
   html += F("\" value=\"1\"");
   if (checked) html += F(" checked");
+  if (toggle_id) {
+    html += F(" onchange=\"document.getElementById('");
+    html += toggle_id;
+    html += F("').style.display=this.checked?'':'none'\"");
+  }
   html += F("> ");
   html += label;
   html += F("</label></div>");

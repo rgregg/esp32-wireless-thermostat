@@ -48,6 +48,31 @@ lv_event_cb_t g_fan_external_cb = nullptr;
 lv_event_cb_t g_mode_external_cb = nullptr;
 lv_event_cb_t g_unit_external_cb = nullptr;
 
+static const char *s_confirm_btns[] = {"Yes", "Cancel", ""};
+static lv_event_cb_t s_confirm_cb = nullptr;
+
+void confirm_msgbox_cb(lv_event_t *e) {
+  lv_obj_t *msgbox = lv_event_get_current_target(e);
+  const char *btn_text = lv_msgbox_get_active_btn_text(msgbox);
+  if (btn_text == nullptr) return;
+  if (strcmp(btn_text, "Yes") == 0) {
+    if (s_confirm_cb) s_confirm_cb(e);
+  }
+  s_confirm_cb = nullptr;
+  lv_msgbox_close(msgbox);
+}
+
+void show_confirm_dialog(const char *title, const char *message, lv_event_cb_t on_confirm) {
+  s_confirm_cb = on_confirm;
+  lv_obj_t *msgbox = lv_msgbox_create(nullptr, title, message, s_confirm_btns, false);
+  lv_obj_set_style_text_font(msgbox, &thermostat_font_montserrat_20, LV_PART_MAIN);
+  lv_obj_center(msgbox);
+  lv_obj_add_event_cb(msgbox, confirm_msgbox_cb, LV_EVENT_VALUE_CHANGED, nullptr);
+}
+
+lv_event_cb_t g_wifi_reset_cb = nullptr;
+lv_event_cb_t g_restart_cb = nullptr;
+
 const lv_font_t *font20() { return &thermostat_font_montserrat_20; }
 
 const lv_font_t *font26() { return &thermostat_font_montserrat_26; }
@@ -143,6 +168,9 @@ void style_primary_button(lv_obj_t *button) {
 
 void style_settings_button(lv_obj_t *button) {
   lv_obj_add_style(button, &g_style_header_item, LV_PART_MAIN);
+  lv_obj_set_style_text_align(button, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_set_layout(button, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_align(button, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 }
 
 void style_settings_slider(lv_obj_t *slider) {
@@ -692,6 +720,9 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_set_flex_flow(settings_controls, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(settings_controls, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
   lv_obj_set_style_pad_row(settings_controls, 6, LV_PART_MAIN);
+  lv_obj_add_flag(settings_controls, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scroll_dir(settings_controls, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(settings_controls, LV_SCROLLBAR_MODE_AUTO);
 
   lv_obj_t *temp_unit_title = lv_label_create(settings_controls);
   lv_label_set_text(temp_unit_title, "Temp Unit");
@@ -757,6 +788,36 @@ void build_thermostat_ui(const UiCallbacks &callbacks, UiHandles *out_handles) {
   lv_obj_t *filter_label = lv_label_create(filter_btn);
   lv_label_set_text(filter_label, "Filter Reset");
   style_label(filter_label, font20());
+
+  lv_obj_t *actions_row2 = make_transparent(settings_controls, 320, 56);
+  lv_obj_set_layout(actions_row2, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(actions_row2, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(actions_row2, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_column(actions_row2, 8, LV_PART_MAIN);
+
+  g_wifi_reset_cb = callbacks.on_wifi_reset;
+  lv_obj_t *wifi_reset_btn = lv_btn_create(actions_row2);
+  lv_obj_set_size(wifi_reset_btn, 156, 56);
+  style_settings_button(wifi_reset_btn);
+  lv_obj_add_event_cb(wifi_reset_btn, [](lv_event_t *) {
+    show_confirm_dialog("Reset WiFi",
+                        "Clear WiFi credentials and reboot into provisioning mode?",
+                        g_wifi_reset_cb);
+  }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *wifi_reset_label = lv_label_create(wifi_reset_btn);
+  lv_label_set_text(wifi_reset_label, "Reset WiFi");
+  style_label(wifi_reset_label, font20());
+
+  g_restart_cb = callbacks.on_restart;
+  lv_obj_t *restart_btn = lv_btn_create(actions_row2);
+  lv_obj_set_size(restart_btn, 156, 56);
+  style_settings_button(restart_btn);
+  lv_obj_add_event_cb(restart_btn, [](lv_event_t *) {
+    show_confirm_dialog("Restart", "Restart the display?", g_restart_cb);
+  }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *restart_label = lv_label_create(restart_btn);
+  lv_label_set_text(restart_label, "Restart");
+  style_label(restart_label, font20());
 
   lv_obj_t *display_title = lv_label_create(settings_controls);
   lv_label_set_text(display_title, "Display");
