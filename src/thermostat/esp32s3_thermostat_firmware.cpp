@@ -285,7 +285,11 @@ String g_cfg_espnow_peer_mac = THERMOSTAT_ESPNOW_PEER_MAC;
 String g_cfg_espnow_lmk = THERMOSTAT_ESPNOW_LMK;
 bool g_cfg_mqtt_enabled = true;    // NVS "mqtt_en"
 bool g_cfg_espnow_enabled = true;  // NVS "espnow_en"
-String g_cfg_paired_controller_mac; // MAC of paired controller (from devices list or discovery)
+
+// Derived from g_cfg_espnow_peer_mac (colons stripped) — single controller MAC for both transports
+String controller_mac_compact() {
+  return mac_utils::mac_strip_colons(g_cfg_espnow_peer_mac);
+}
 uint32_t g_cfg_controller_timeout_ms = 30000;
 bool g_cfg_mqtt_reconfigure_required = false;
 bool g_cfg_reboot_required = false;
@@ -368,7 +372,17 @@ void load_runtime_config() {
   g_cfg_discovery_prefix = g_cfg.getString("disc_pref", g_cfg_discovery_prefix);
   g_cfg_ha_discovery_enabled = g_cfg.getBool("ha_disc", g_cfg_ha_discovery_enabled);
   g_cfg.remove("device_name");  // legacy key, hostname is now the single name
-  g_cfg_paired_controller_mac = g_cfg.getString("ctrl_mac", "");
+  // Migrate legacy ctrl_mac NVS key → esp_peer if esp_peer was never set
+  if (g_cfg_espnow_peer_mac.length() == 0 || g_cfg_espnow_peer_mac == THERMOSTAT_ESPNOW_PEER_MAC) {
+    String legacy = g_cfg.getString("ctrl_mac", "");
+    if (legacy.length() > 0) {
+      // ctrl_mac was stored without colons; esp_peer uses colon format
+      // but mac_strip_colons handles either, so store as-is
+      g_cfg_espnow_peer_mac = legacy;
+      g_cfg.putString("esp_peer", legacy);
+    }
+  }
+  g_cfg.remove("ctrl_mac"); // clean up legacy key
   g_cfg_hostname = g_cfg.getString("ota_host", g_cfg_hostname);
   g_cfg_espnow_channel = static_cast<uint8_t>(g_cfg.getUChar("esp_ch", g_cfg_espnow_channel));
   g_cfg_espnow_peer_mac = g_cfg.getString("esp_peer", g_cfg_espnow_peer_mac);
@@ -397,7 +411,7 @@ String self_topic_for(const char *suffix) {
 }
 
 String controller_topic_for(const char *suffix) {
-  return device_topic_for(g_cfg_paired_controller_mac.c_str(), suffix);
+  return device_topic_for(controller_mac_compact().c_str(), suffix);
 }
 
 
@@ -506,9 +520,10 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_espnow_channel = static_cast<uint8_t>(parsed);
     NVS_PUT_UCHAR("esp_ch", g_cfg_espnow_channel);
     g_cfg_reboot_required = true;
-  } else if (key == "espnow_peer_mac") {
+  } else if (key == "espnow_peer_mac" || key == "paired_controller_mac") {
     g_cfg_espnow_peer_mac = value;
     NVS_PUT_STR("esp_peer", value);
+    g_cfg_mqtt_reconfigure_required = true;
     g_cfg_reboot_required = true;
   } else if (key == "espnow_lmk") {
     g_cfg_espnow_lmk = value;
@@ -525,11 +540,6 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_espnow_enabled = (strcmp(raw_value, "1") == 0);
     g_cfg.putBool("espnow_en", g_cfg_espnow_enabled);
     g_cfg_reboot_required = true;
-  } else if (key == "paired_controller_mac") {
-    // Accept either colon-separated or compact MAC format.
-    g_cfg_paired_controller_mac = mac_strip_colons(String(value));
-    NVS_PUT_STR("ctrl_mac", g_cfg_paired_controller_mac);
-    g_cfg_mqtt_reconfigure_required = true;
   } else if (key == "controller_timeout_ms") {
     const long parsed = atol(raw_value);
     if (parsed < 1000 || parsed > 600000) return false;
@@ -742,7 +752,7 @@ void web_handle_config_get() {
   body += "\"espnow_channel\":" + String(g_cfg_espnow_channel) + ",";
   body += "\"espnow_peer_mac\":\"" + web_ui::json_escape(g_cfg_espnow_peer_mac) + "\",";
   body += "\"espnow_lmk\":\"" + String(g_cfg_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
-  body += "\"paired_controller_mac\":\"" + web_ui::json_escape(g_cfg_paired_controller_mac) + "\",";
+  body += "\"paired_controller_mac\":\"" + web_ui::json_escape(controller_mac_compact()) + "\",";
   body += "\"controller_timeout_ms\":" + String(g_cfg_controller_timeout_ms) + ",";
   body += "\"reboot_required\":" + String(g_cfg_reboot_required ? "true" : "false");
   body += "}";
@@ -786,7 +796,7 @@ void web_handle_status_get() {
   const float outdoor_temp = g_outdoor_temp_c;
   const uint32_t mqtt_ctrl_applied_ms = g_mqtt_ctrl_last_applied_ms;
   const uint32_t controller_timeout = g_cfg_controller_timeout_ms;
-  const String paired_ctrl_mac = g_cfg_paired_controller_mac;
+  const String paired_ctrl_mac = controller_mac_compact();
   const FurnaceMode ctrl_mode = g_mqtt_ctrl_mode;
   const FurnaceStateCode ctrl_state = g_mqtt_ctrl_state;
   const bool ctrl_available = g_mqtt_ctrl_available;
@@ -994,7 +1004,7 @@ void web_handle_root() {
   const bool mqtt_pwd_set = g_cfg_mqtt_password.length() > 0;
   const String base_topic = g_cfg_base_topic;
   const bool ha_disc_enabled = g_cfg_ha_discovery_enabled;
-  const String paired_ctrl_mac = g_cfg_paired_controller_mac;
+  const String paired_ctrl_mac = controller_mac_compact();
   const String disc_prefix = g_cfg_discovery_prefix;
   const uint8_t espnow_channel = g_cfg_espnow_channel;
   const String espnow_peer_mac = g_cfg_espnow_peer_mac;
@@ -1711,7 +1721,7 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
 
   // Controller state topics (MQTT-primary path)
-  if (g_cfg_paired_controller_mac.length() > 0) {
+  if (controller_mac_compact().length() > 0) {
     if (topic_str == controller_topic_for("state/mode")) {
       g_mqtt_ctrl_mode = mqtt_payload::str_to_mode(normalized);
       g_mqtt_ctrl_last_update_ms = now;
@@ -1842,7 +1852,7 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   g_mqtt.subscribe(self_topic_for("cmd/backlight_active_pct").c_str());
   g_mqtt.subscribe(self_topic_for("cmd/backlight_screensaver_pct").c_str());
 
-  if (g_cfg_paired_controller_mac.length() > 0) {
+  if (controller_mac_compact().length() > 0) {
     g_mqtt.subscribe(controller_topic_for("state/mode").c_str());
     g_mqtt.subscribe(controller_topic_for("state/fan_mode").c_str());
     g_mqtt.subscribe(controller_topic_for("state/target_temp_c").c_str());
