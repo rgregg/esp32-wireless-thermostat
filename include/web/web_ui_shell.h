@@ -207,7 +207,8 @@ struct TabDef {
 };
 
 inline void page_begin(String &html, const char *title, const char *subtitle,
-                        const TabDef *tabs, size_t tab_count) {
+                        const TabDef *tabs, size_t tab_count,
+                        bool show_logout = false) {
   html += F("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
   html += FPSTR(kFaviconLink);
@@ -225,6 +226,12 @@ inline void page_begin(String &html, const char *title, const char *subtitle,
     html += F("<span class=\"chip\">");
     html += subtitle;
     html += F("</span>");
+  }
+  if (show_logout) {
+    html += F("<form method=\"post\" action=\"/logout\" style=\"margin-left:auto\">"
+              "<button type=\"submit\" class=\"btn\""
+              " style=\"background:rgba(255,255,255,0.15);font-size:0.75rem;"
+              "padding:0.2rem 0.6rem\">Sign Out</button></form>");
   }
   html += F("</div>");
 

@@ -37,6 +37,7 @@
 #include "web/web_ui_escape.h"
 #include "web/web_ui_shell.h"
 #include "web/web_ui_fields.h"
+#include "web/web_auth.h"
 #include "mac_address_utils.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
@@ -191,6 +192,7 @@ bool g_ctrl_temp_unit_f = false;
 uint16_t g_cfg_fan_circ_period_min = 60;
 uint16_t g_cfg_fan_circ_duration_min = 10;
 String g_disp_availability = "unknown";
+String g_cfg_ctrl_web_pwd_hash = "";  // NVS "web_pwd_hash": SHA-256 hex (empty = auth off)
 
 
 // ── Device list helpers ────────────────────────────────────────────────────────
@@ -316,6 +318,8 @@ void ctrl_load_runtime_config() {
   g_ctrl_temp_unit_f = g_ctrl_cfg.getBool("temp_u_f", g_ctrl_temp_unit_f);
   g_cfg_fan_circ_period_min = static_cast<uint16_t>(g_ctrl_cfg.getUInt("fan_circ_per", g_cfg_fan_circ_period_min));
   g_cfg_fan_circ_duration_min = static_cast<uint16_t>(g_ctrl_cfg.getUInt("fan_circ_dur", g_cfg_fan_circ_duration_min));
+  g_cfg_ctrl_web_pwd_hash = g_ctrl_cfg.getString("web_pwd_hash", "");
+  web_auth::set_password_hash(g_cfg_ctrl_web_pwd_hash.c_str());
 
   // Compute MQTT client ID from base_topic + MAC
   {
@@ -541,6 +545,16 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_ctrl_cfg.putUInt("fan_circ_dur", g_cfg_fan_circ_duration_min);
     if (g_controller != nullptr) {
       g_controller->app().runtime_mut().set_fan_circulate_duration_min(g_cfg_fan_circ_duration_min);
+    }
+  } else if (key == "web_password") {
+    // Empty value clears the password (disables auth).
+    // Non-empty value sets a new hashed password.
+    web_auth::set_password(value.c_str());
+    g_cfg_ctrl_web_pwd_hash = String(web_auth::get_password_hash());
+    if (g_cfg_ctrl_web_pwd_hash.length() > 0) {
+      g_ctrl_cfg.putString("web_pwd_hash", g_cfg_ctrl_web_pwd_hash);
+    } else {
+      g_ctrl_cfg.remove("web_pwd_hash");
     }
   } else {
     known = false;
@@ -1054,6 +1068,7 @@ void ctrl_runtime_audit_bridge(const char *msg) {
 }
 
 void ctrl_web_handle_log_get() {
+  if (!web_auth::require_auth(g_ctrl_web)) return;
   String body;
   body.reserve(g_audit_log.count() * 80);
   for (size_t i = 0; i < g_audit_log.count(); ++i) {
@@ -1064,6 +1079,7 @@ void ctrl_web_handle_log_get() {
 }
 
 void ctrl_web_handle_config_get() {
+  if (!web_auth::require_auth(g_ctrl_web)) return;
   String body;
   body.reserve(1024);
   body = "{\"controller\":{";
@@ -1087,12 +1103,14 @@ void ctrl_web_handle_config_get() {
   body += "\"pirateweather_api_key\":\"" +
           String(g_cfg_ctrl_pirateweather_api_key.length() > 0 ? "set" : "unset") + "\",";
   body += "\"pirateweather_zip\":\"" + web_ui::json_escape(g_cfg_ctrl_pirateweather_zip) + "\",";
+  body += "\"web_password\":\"" + String(web_auth::is_enabled() ? "set" : "unset") + "\",";
   body += "\"reboot_required\":" + String(g_ctrl_cfg_reboot_required ? "true" : "false");
   body += "}}";
   g_ctrl_web.send(200, "application/json", body);
 }
 
 void ctrl_web_handle_config_post() {
+  if (!web_auth::require_auth(g_ctrl_web)) return;
   int updated = 0;
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
@@ -1106,11 +1124,13 @@ void ctrl_web_handle_config_post() {
 }
 
 void ctrl_web_handle_reboot_post() {
+  if (!web_auth::require_auth(g_ctrl_web)) return;
   ctrl_schedule_reboot();
   g_ctrl_web.send(200, "text/plain", "rebooting\n");
 }
 
 void ctrl_web_handle_status_get() {
+  if (!web_auth::require_auth(g_ctrl_web)) return;
   if (g_controller == nullptr) {
     g_ctrl_web.send(503, "application/json", "{\"error\":\"controller not initialized\"}");
     return;
@@ -1196,6 +1216,7 @@ void ctrl_web_handle_status_get() {
 }
 
 void ctrl_web_handle_devices_get() {
+  if (!web_auth::require_auth(g_ctrl_web)) return;
   String json = "[";
   bool first = true;
   for (size_t i = 0; i < kMaxRegistryEntries; ++i) {
@@ -1217,7 +1238,33 @@ void ctrl_web_handle_devices_get() {
   g_ctrl_web.send(200, "application/json", json);
 }
 
+void ctrl_web_handle_login_get() {
+  g_ctrl_web.send(200, "text/html",
+                  web_auth::login_page(g_cfg_ctrl_hostname.c_str()));
+}
+
+void ctrl_web_handle_login_post() {
+  const String password = g_ctrl_web.arg("password");
+  if (web_auth::login(password.c_str())) {
+    web_auth::set_session_cookie(g_ctrl_web);
+    g_ctrl_web.sendHeader("Location", "/");
+    g_ctrl_web.send(302, "text/plain", "");
+  } else {
+    g_ctrl_web.send(401, "text/html",
+                    web_auth::login_page(g_cfg_ctrl_hostname.c_str(),
+                                         "Invalid password."));
+  }
+}
+
+void ctrl_web_handle_logout_post() {
+  web_auth::logout();
+  web_auth::clear_session_cookie(g_ctrl_web);
+  g_ctrl_web.sendHeader("Location", "/login");
+  g_ctrl_web.send(302, "text/plain", "");
+}
+
 void ctrl_web_handle_root() {
+  if (!web_auth::require_auth(g_ctrl_web)) return;
   using namespace web_ui;
   String html;
   html.reserve(16384);
@@ -1228,10 +1275,12 @@ void ctrl_web_handle_root() {
     {"mqtt", "MQTT"},
     {"weather", "Weather"},
     {"hw", "Hardware"},
+    {"security", "Security"},
     {"system", "System"},
   };
   page_begin(html, "Furnace Controller", g_cfg_ctrl_hostname.c_str(),
-             tabs, sizeof(tabs) / sizeof(tabs[0]));
+             tabs, sizeof(tabs) / sizeof(tabs[0]),
+             web_auth::is_enabled());
 
   // ── Status tab ──
   tab_begin(html, "status", true);
@@ -1454,6 +1503,23 @@ void ctrl_web_handle_root() {
 
   tab_end(html);
 
+  // ── Security tab ──
+  tab_begin(html, "security");
+  card_begin(html, "Web Authentication");
+  html += F("<p style=\"font-size:0.85rem;margin-bottom:0.75rem\">"
+            "Set a password to require login before accessing this page. "
+            "Leave the password blank and save to disable authentication.</p>");
+  html += F("<form onsubmit=\""
+            "var p=this.querySelector('[name=web_password]').value;"
+            "if(p.length>0&&p.length<8){toast('Password must be at least 8 characters.','err');return false;}"
+            "return submitForm(this)\">");
+  password_field(html, "New Password", "web_password", web_auth::is_enabled(),
+                 nullptr,
+                 "At least 8 characters. Leave empty to disable authentication.");
+  form_end(html, "Save Password");
+  card_end(html);
+  tab_end(html);
+
   // ── System tab ──
   tab_begin(html, "system");
   card_begin(html, "Firmware Update");
@@ -1503,11 +1569,20 @@ void ctrl_ensure_web_ready() {
     g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
+    g_ctrl_web.on("/login", HTTP_GET, ctrl_web_handle_login_get);
+    g_ctrl_web.on("/login", HTTP_POST, ctrl_web_handle_login_post);
+    g_ctrl_web.on("/logout", HTTP_POST, ctrl_web_handle_logout_post);
     ota_web_setup(g_ctrl_web);
     ota_set_prepare_callback([]() {
       g_ctrl_wifi_client.stop();
       Serial.printf("[ota] prepare: closed MQTT socket, heap=%u\n", ESP.getFreeHeap());
     });
+    ota_set_auth_callback([](WebServer &server) -> bool {
+      return web_auth::require_auth(server);
+    });
+    // Enable collection of the Cookie header for session authentication.
+    static const char *kCollectHeaders[] = {"Cookie"};
+    g_ctrl_web.collectHeaders(kCollectHeaders, 1);
     g_ctrl_web.begin();
     g_ctrl_web_started = true;
   }

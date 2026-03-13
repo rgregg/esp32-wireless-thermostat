@@ -7,6 +7,13 @@
 using OtaAuditCallback = void (*)(const char *msg);
 void ota_set_audit_callback(OtaAuditCallback cb);
 
+/// Optional authentication callback.  When set, the OTA handlers call this
+/// before serving or accepting an upload.  Return true to allow the request;
+/// return false to deny it (the callback must have already sent a response,
+/// e.g. a redirect to /login).  When not set, OTA requests are always allowed.
+using OtaAuthCallback = bool (*)(WebServer &server);
+void ota_set_auth_callback(OtaAuthCallback cb);
+
 /// Optional callback invoked at UPLOAD_FILE_START to free resources (e.g.
 /// disconnect MQTT) before the upload begins.  Runs on the web server task.
 using OtaPrepareCallback = void (*)();
