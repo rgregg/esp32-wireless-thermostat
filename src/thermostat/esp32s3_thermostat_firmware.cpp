@@ -552,7 +552,10 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_reboot_required = true;
   } else if (key == "web_password") {
     // Empty value clears the password (disables auth).
-    // Non-empty value sets a new hashed password.
+    // Non-empty value sets a new hashed password; enforce minimum length server-side.
+    if (value.length() > 0 && value.length() < 8) {
+      return false;
+    }
     web_auth::set_password(value.c_str());
     g_cfg_web_pwd_hash = String(web_auth::get_password_hash());
     if (g_cfg_web_pwd_hash.length() > 0) {

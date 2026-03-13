@@ -52,16 +52,25 @@ inline void generate_token(char out[65]) {
 
 /// Load a pre-hashed password from persistent storage.
 /// Pass nullptr or an empty / non-64-char string to disable authentication.
+/// Only accepts strings containing exactly 64 lowercase hex digits.
 /// Invalidates any existing session.
 inline void set_password_hash(const char *hash_hex) {
   s_session_token[0] = '\0';
   s_session_expiry_ms = 0;
   if (hash_hex == nullptr || strlen(hash_hex) != 64) {
     s_pwd_hash[0] = '\0';
-  } else {
-    memcpy(s_pwd_hash, hash_hex, 64);
-    s_pwd_hash[64] = '\0';
+    return;
   }
+  // Validate that every character is a hex digit to reject corrupted NVS data.
+  for (int i = 0; i < 64; ++i) {
+    const char c = hash_hex[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      s_pwd_hash[0] = '\0';
+      return;
+    }
+  }
+  memcpy(s_pwd_hash, hash_hex, 64);
+  s_pwd_hash[64] = '\0';
 }
 
 /// Hash and store a plaintext password.
@@ -119,7 +128,8 @@ inline bool is_authenticated(WebServer &server) {
   if (!is_enabled()) return true;
   if (s_session_token[0] == '\0') return false;
   const uint32_t now = millis();
-  if (now >= s_session_expiry_ms) {
+  // Use signed subtraction to correctly handle millis() rollover every ~49 days.
+  if (static_cast<int32_t>(now - s_session_expiry_ms) >= 0) {
     s_session_token[0] = '\0';
     return false;
   }
