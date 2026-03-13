@@ -627,6 +627,7 @@ bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
 }
 
 // --- Weather polling (PirateWeather API) ---
+void ctrl_audit(const char *fmt, ...);  // forward declaration for weather logging
 
 bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out) {
   if (lat_out == nullptr || lon_out == nullptr || zip[0] == '\0') return false;
@@ -634,10 +635,17 @@ bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out)
   client.setInsecure();
   HTTPClient http;
   const std::string url = pirateweather::geocode_url(zip);
-  if (!http.begin(client, url.c_str())) return false;
+  if (!http.begin(client, url.c_str())) {
+    ctrl_audit("weather: geocode http.begin failed");
+    return false;
+  }
   http.setTimeout(kCtrlHttpTimeoutMs);
   const int status = http.GET();
-  if (status != 200) { http.end(); return false; }
+  if (status != 200) {
+    ctrl_audit("weather: geocode HTTP %d for zip %s", status, zip);
+    http.end();
+    return false;
+  }
   const String body = http.getString();
   http.end();
   return pirateweather::parse_geocode_response(body.c_str(), lat_out, lon_out);
@@ -654,10 +662,17 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, const char *api_key,
   client.setInsecure();
   HTTPClient http;
   const std::string url = pirateweather::forecast_url(api_key, lat, lon);
-  if (!http.begin(client, url.c_str())) return false;
+  if (!http.begin(client, url.c_str())) {
+    ctrl_audit("weather: forecast http.begin failed");
+    return false;
+  }
   http.setTimeout(kCtrlHttpTimeoutMs);
   const int status = http.GET();
-  if (status != 200) { http.end(); return false; }
+  if (status != 200) {
+    ctrl_audit("weather: forecast HTTP %d", status);
+    http.end();
+    return false;
+  }
   const String body = http.getString();
   http.end();
   return pirateweather::parse_forecast_response(body.c_str(), temp_c_out,
@@ -665,7 +680,6 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, const char *api_key,
 }
 
 static void ctrl_weather_task_start();        // forward declaration
-void ctrl_audit(const char *fmt, ...);        // forward declaration
 
 static void ctrl_weather_task(void *) {
   for (;;) {
@@ -699,6 +713,9 @@ static void ctrl_weather_task(void *) {
 
     if (!coords_valid) {
       const std::string zip = pirateweather::normalize_zip(zip_raw.c_str());
+      if (zip.empty()) {
+        ctrl_audit("weather: invalid zip '%s'", zip_raw.c_str());
+      }
       float new_lat = 0.0f, new_lon = 0.0f;
       if (!zip.empty() && ctrl_fetch_zip_coordinates(zip.c_str(), &new_lat, &new_lon)) {
         if (xSemaphoreTake(g_ctrl_weather_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -721,7 +738,14 @@ static void ctrl_weather_task(void *) {
         g_ctrl_weather_pending.icon   = icon;
         // Release ordering: ensures temp_c/icon writes are visible before ready is seen true.
         g_ctrl_weather_pending.ready.store(true, std::memory_order_release);
+        ctrl_audit("weather: %.1fC, icon=%d", static_cast<double>(temp_c),
+                   static_cast<int>(icon));
+      } else {
+        ctrl_audit("weather: forecast fetch failed (%.4f,%.4f)",
+                   static_cast<double>(lat), static_cast<double>(lon));
       }
+    } else {
+      ctrl_audit("weather: geocode failed for zip '%s'", zip_raw.c_str());
     }
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kCtrlWeatherPollMs));
   }

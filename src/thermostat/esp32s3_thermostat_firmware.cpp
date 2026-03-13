@@ -669,13 +669,14 @@ bool json_extract_float(const String &json, const char *key, float *out, int fro
 }
 
 void poll_weather(uint32_t now_ms) {
-  if (g_runtime == nullptr || !g_runtime->has_controller_weather()) {
-    g_have_weather_data = false;
-    return;
+  if (g_runtime == nullptr) return;
+  // Mark weather available if delivered via ESP-NOW (has_controller_weather)
+  // or via MQTT (g_have_weather_data set in MQTT callback).
+  if (g_runtime->has_controller_weather()) {
+    if (g_runtime->last_controller_weather_ms() == 0)
+      g_runtime->set_last_controller_weather_ms(now_ms);
+    g_have_weather_data = true;
   }
-  if (g_runtime->last_controller_weather_ms() == 0)
-    g_runtime->set_last_controller_weather_ms(now_ms);
-  g_have_weather_data = true;
 }
 
 bool parse_mac(const char *text, uint8_t out[6]) {
