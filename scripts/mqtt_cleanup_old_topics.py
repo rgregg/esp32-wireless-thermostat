@@ -8,6 +8,7 @@ Clears retained messages from:
 
 Usage:
   python3 scripts/mqtt_cleanup_old_topics.py --host mqtt.lan
+  python3 scripts/mqtt_cleanup_old_topics.py --host mqtt.lan --prefix esp32-wireless-thermostat-test
 """
 
 from __future__ import annotations
@@ -39,7 +40,11 @@ def main() -> int:
                         help="Seconds to wait for retained messages (default: 5)")
     parser.add_argument("--dry-run", action="store_true",
                         help="List retained topics without clearing them")
+    parser.add_argument("--prefix", type=str, default=None,
+                        help="Custom topic prefix to clean (e.g. esp32-wireless-thermostat-test)")
     args = parser.parse_args()
+
+    prefixes = [f"{args.prefix}/#"] if args.prefix else OLD_PREFIXES
 
     retained_topics: set[str] = set()
 
@@ -47,7 +52,7 @@ def main() -> int:
         if rc != 0:
             print(f"connect failed rc={rc}", file=sys.stderr)
             return
-        for pattern in OLD_PREFIXES:
+        for pattern in prefixes:
             client.subscribe(pattern, qos=1)
             print(f"  subscribed: {pattern}")
 
