@@ -6,6 +6,8 @@
 #include <esp_system.h>
 #include <string.h>
 #include <stdio.h>
+#include "web/web_ui_escape.h"
+#include "web/web_ui_fields.h"
 
 /// Session-based web authentication for ESP32 HTTP server.
 ///
@@ -16,16 +18,18 @@
 ///   Register GET /login, POST /login, POST /logout routes.
 ///
 /// Auth is disabled entirely when no password has been configured (hash is empty).
+///
+/// State is defined in src/web_auth.cpp to ensure a single instance per
+/// firmware binary and avoid ODR violations from multiple includes.
 namespace web_auth {
 
 /// Session lifetime after creation: 24 hours.
 static constexpr uint32_t kSessionExpiryMs = 86400000UL;
 
-/// Module-level state — one instance per firmware binary.
-/// Only a single active session is tracked. A new login replaces the old one.
-static char s_pwd_hash[65] = {};       // SHA-256 hex (empty = auth disabled)
-static char s_session_token[65] = {};  // current valid session hex (empty = none)
-static uint32_t s_session_expiry_ms = 0;
+// State variables — defined in src/web_auth.cpp.
+extern char s_pwd_hash[65];       // SHA-256 hex (empty = auth disabled)
+extern char s_session_token[65];  // current valid session hex (empty = none)
+extern uint32_t s_session_expiry_ms;
 
 /// Compute SHA-256 of a null-terminated string; write 64-char lowercase hex + NUL.
 /// @param input   Null-terminated input string.
@@ -124,6 +128,7 @@ inline bool extract_cookie(const char *header, const char *name,
 
 /// Returns true if the request carries a valid session cookie,
 /// or if authentication is disabled.
+/// Does NOT send any HTTP response — safe to call from the OTA upload handler.
 inline bool is_authenticated(WebServer &server) {
   if (!is_enabled()) return true;
   if (s_session_token[0] == '\0') return false;
@@ -226,15 +231,15 @@ inline String login_page(const char *hostname, const char *error_msg = nullptr) 
             "border-radius:0.375rem;padding:0.5rem 0.75rem;margin-bottom:1rem;"
             "font-size:0.85rem;color:var(--er)}"
             "</style></head><body><div class=\"card\">"
-            "<h1>&#128274; Sign In</h1>");
+            "<h1>Sign In</h1>");
   if (hostname && hostname[0]) {
     html += F("<p class=\"sub\">");
-    html += hostname;
+    html += web_ui::html_escape(String(hostname));  // escape hostname (NVS) to prevent XSS
     html += F("</p>");
   }
   if (error_msg && error_msg[0]) {
     html += F("<div class=\"err\">");
-    html += error_msg;
+    html += web_ui::html_escape(String(error_msg));  // defensive escape
     html += F("</div>");
   }
   html += F("<form method=\"post\" action=\"/login\">"
@@ -244,6 +249,56 @@ inline String login_page(const char *hostname, const char *error_msg = nullptr) 
             "<button type=\"submit\" class=\"btn\">Sign In</button>"
             "</form></div></body></html>");
   return html;
+}
+
+// ── Shared request handlers ────────────────────────────────────────────────
+// Shared across controller and thermostat firmware to avoid duplication.
+
+/// Handle GET /login — render the login form.
+inline void handle_login_get(WebServer &server, const char *hostname) {
+  server.send(200, "text/html", login_page(hostname));
+}
+
+/// Handle POST /login — verify password and set session cookie, or re-render
+/// login page with error.
+inline void handle_login_post(WebServer &server, const char *hostname) {
+  const String password = server.arg("password");
+  if (login(password.c_str())) {
+    set_session_cookie(server);
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+  } else {
+    server.send(401, "text/html", login_page(hostname, "Invalid password."));
+  }
+}
+
+/// Handle POST /logout — invalidate session and redirect to /login.
+inline void handle_logout_post(WebServer &server) {
+  logout();
+  clear_session_cookie(server);
+  server.sendHeader("Location", "/login");
+  server.send(302, "text/plain", "");
+}
+
+/// Emit the Security tab card content (password change form).
+/// Call between tab_begin(html, "security") and tab_end(html).
+inline void security_tab_content(String &html) {
+  web_ui::card_begin(html, "Web Authentication");
+  html += F("<p style=\"font-size:0.85rem;margin-bottom:0.75rem\">"
+            "Set a password to require login before accessing this page. "
+            "Leave the password blank and save to disable authentication. "
+            "Sessions are held in memory and reset on device reboot.</p>");
+  html += F("<form onsubmit=\""
+            "var p=this.querySelector('[name=web_password]').value;"
+            "if(p.length>0&&p.length<8){"
+            "toast('Password must be at least 8 characters.','err');"
+            "return false;}"
+            "return submitForm(this)\">");
+  web_ui::password_field(html, "New Password", "web_password", is_enabled(),
+                         nullptr,
+                         "At least 8 characters. Leave empty to disable authentication.");
+  web_ui::form_end(html, "Save Password");
+  web_ui::card_end(html);
 }
 
 }  // namespace web_auth

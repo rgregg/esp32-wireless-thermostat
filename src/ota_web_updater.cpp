@@ -20,6 +20,7 @@
 static OtaAuditCallback s_ota_audit_cb = nullptr;
 static OtaPrepareCallback s_ota_prepare_cb = nullptr;
 static OtaAuthCallback s_ota_auth_cb = nullptr;
+static OtaCheckAuthCallback s_ota_check_auth_cb = nullptr;
 static uint32_t s_rollback_start_ms = 0;
 static bool s_rollback_confirmed = false;
 static constexpr uint32_t kRollbackTimeoutMs = 180000; // 3 minutes
@@ -57,6 +58,7 @@ static bool s_ota_aborted = false;  // true if we aborted mid-upload (e.g. bad c
 void ota_set_audit_callback(OtaAuditCallback cb) { s_ota_audit_cb = cb; }
 void ota_set_prepare_callback(OtaPrepareCallback cb) { s_ota_prepare_cb = cb; }
 void ota_set_auth_callback(OtaAuthCallback cb) { s_ota_auth_cb = cb; }
+void ota_set_check_auth_callback(OtaCheckAuthCallback cb) { s_ota_check_auth_cb = cb; }
 
 static void ota_audit(const char *fmt, ...) {
   if (!s_ota_audit_cb) return;
@@ -150,8 +152,19 @@ static void handle_update_upload(WebServer &server) {
 
   switch (upload.status) {
     case UPLOAD_FILE_START: {
-      s_ota_in_progress = true;
+      // Reset upload state for this new upload attempt.
       s_ota_aborted = false;
+      // Check authorization before accepting any firmware data.  Use the
+      // check-only callback (no response sent) so we don't send an HTTP
+      // response mid-upload.  handle_update_post() will send the 302 redirect
+      // after all chunks are processed.
+      if (s_ota_check_auth_cb && !s_ota_check_auth_cb(server)) {
+        s_ota_aborted = true;  // causes all subsequent WRITE/END chunks to be skipped
+        ota_audit("ota_web: upload rejected: unauthorized");
+        Serial.println("[ota] REJECT: upload unauthorized");
+        break;
+      }
+      s_ota_in_progress = true;
       s_ota_last_activity_ms = millis();
       s_ota_start_ms = millis();
       s_ota_bytes_written = 0;

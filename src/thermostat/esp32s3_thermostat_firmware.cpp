@@ -1015,27 +1015,15 @@ void web_handle_devices_get() {
 }
 
 void web_handle_login_get() {
-  g_web.send(200, "text/html",
-             web_auth::login_page(g_cfg_hostname.c_str()));
+  web_auth::handle_login_get(g_web, g_cfg_hostname.c_str());
 }
 
 void web_handle_login_post() {
-  const String password = g_web.arg("password");
-  if (web_auth::login(password.c_str())) {
-    web_auth::set_session_cookie(g_web);
-    g_web.sendHeader("Location", "/");
-    g_web.send(302, "text/plain", "");
-  } else {
-    g_web.send(401, "text/html",
-               web_auth::login_page(g_cfg_hostname.c_str(), "Invalid password."));
-  }
+  web_auth::handle_login_post(g_web, g_cfg_hostname.c_str());
 }
 
 void web_handle_logout_post() {
-  web_auth::logout();
-  web_auth::clear_session_cookie(g_web);
-  g_web.sendHeader("Location", "/login");
-  g_web.send(302, "text/plain", "");
+  web_auth::handle_logout_post(g_web);
 }
 
 void web_handle_root() {
@@ -1230,19 +1218,7 @@ void web_handle_root() {
 
   // ── Security tab ──
   tab_begin(html, "security");
-  card_begin(html, "Web Authentication");
-  html += F("<p style=\"font-size:0.85rem;margin-bottom:0.75rem\">"
-            "Set a password to require login before accessing this page. "
-            "Leave the password blank and save to disable authentication.</p>");
-  html += F("<form onsubmit=\""
-            "var p=this.querySelector('[name=web_password]').value;"
-            "if(p.length>0&&p.length<8){toast('Password must be at least 8 characters.','err');return false;}"
-            "return submitForm(this)\">");
-  password_field(html, "New Password", "web_password", web_auth_enabled,
-                 nullptr,
-                 "At least 8 characters. Leave empty to disable authentication.");
-  form_end(html, "Save Password");
-  card_end(html);
+  web_auth::security_tab_content(html);
   tab_end(html);
 
   // ── System tab ──
@@ -1312,6 +1288,9 @@ void ensure_web_ready() {
     });
     ota_set_auth_callback([](WebServer &server) -> bool {
       return web_auth::require_auth(server);
+    });
+    ota_set_check_auth_callback([](WebServer &server) -> bool {
+      return web_auth::is_authenticated(server);
     });
     // Enable collection of the Cookie header for session authentication.
     static const char *kCollectHeaders[] = {"Cookie"};
