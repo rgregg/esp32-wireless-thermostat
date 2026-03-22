@@ -1016,6 +1016,9 @@ void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv
   lv_obj_update_layout(time_label);
   lv_obj_update_layout(weather_label);
   lv_obj_update_layout(indoor_label);
+  if (status_label != nullptr) {
+    lv_obj_update_layout(status_label);
+  }
 
   const lv_coord_t time_w = lv_obj_get_width(time_label);
   const lv_coord_t time_h = lv_obj_get_height(time_label);
@@ -1023,6 +1026,13 @@ void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv
   const lv_coord_t weather_h = lv_obj_get_height(weather_label);
   const lv_coord_t indoor_w = lv_obj_get_width(indoor_label);
   const lv_coord_t indoor_h = lv_obj_get_height(indoor_label);
+
+  // Status label sits below weather with a 4px gap; include it in the
+  // weather block so bounds/intersection checks account for both.
+  const lv_coord_t status_h = (status_label != nullptr) ? lv_obj_get_height(status_label) : 0;
+  const lv_coord_t status_w = (status_label != nullptr) ? lv_obj_get_width(status_label) : 0;
+  const lv_coord_t weather_block_h = weather_h + (status_h > 0 ? 4 + status_h : 0);
+  const lv_coord_t weather_block_w = (weather_w > status_w) ? weather_w : status_w;
 
   const lv_coord_t page_w = kDisplayWidth;
   const lv_coord_t page_h = kDisplayHeight - 50;
@@ -1039,13 +1049,13 @@ void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv
 
   const LayoutPos candidates[] = {
       {margin, margin, margin, 120, page_w - margin - indoor_w, page_h - margin - indoor_h},
-      {page_w - margin - time_w, margin, margin, page_h - margin - weather_h, margin,
+      {page_w - margin - time_w, margin, margin, page_h - margin - weather_block_h, margin,
        page_h - margin - indoor_h},
-      {margin, page_h - margin - time_h, page_w - margin - weather_w, margin, margin, 126},
+      {margin, page_h - margin - time_h, page_w - margin - weather_block_w, margin, margin, 126},
       {page_w - margin - time_w, page_h - margin - time_h, margin, margin, page_w - margin - indoor_w, 126},
-      {margin, 96, page_w - margin - weather_w, page_h - margin - weather_h, margin,
+      {margin, 96, page_w - margin - weather_block_w, page_h - margin - weather_block_h, margin,
        page_h - margin - indoor_h},
-      {page_w - margin - time_w, 96, margin, page_h - margin - weather_h, page_w - margin - indoor_w,
+      {page_w - margin - time_w, 96, margin, page_h - margin - weather_block_h, page_w - margin - indoor_w,
        page_h - margin - indoor_h},
   };
 
@@ -1055,8 +1065,8 @@ void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv
   for (size_t i = 0; i < count; ++i) {
     const LayoutPos &c = candidates[(start + i) % count];
     const Rect time_r{static_cast<lv_coord_t>(c.time_x), static_cast<lv_coord_t>(c.time_y), time_w, time_h};
-    const Rect weather_r{static_cast<lv_coord_t>(c.weather_x), static_cast<lv_coord_t>(c.weather_y), weather_w,
-                         weather_h};
+    const Rect weather_r{static_cast<lv_coord_t>(c.weather_x), static_cast<lv_coord_t>(c.weather_y),
+                         weather_block_w, weather_block_h};
     const Rect indoor_r{static_cast<lv_coord_t>(c.indoor_x), static_cast<lv_coord_t>(c.indoor_y), indoor_w,
                         indoor_h};
 
@@ -1081,10 +1091,10 @@ void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv
 
   lv_obj_set_pos(time_label, margin, margin);
   lv_obj_set_pos(weather_label, margin, margin + time_h + 20);
-  lv_obj_set_pos(indoor_label, margin, margin + time_h + weather_h + 40);
   if (status_label != nullptr) {
-    lv_obj_set_pos(status_label, margin, margin + time_h + weather_h + 28);
+    lv_obj_set_pos(status_label, margin, margin + time_h + 20 + weather_h + 4);
   }
+  lv_obj_set_pos(indoor_label, margin, margin + time_h + 20 + weather_block_h + 20);
 }
 
 }  // namespace ui
