@@ -1091,10 +1091,10 @@ void update_screensaver_layout(lv_obj_t *time_label, lv_obj_t *weather_label, lv
 
   lv_obj_set_pos(time_label, margin, margin);
   lv_obj_set_pos(weather_label, margin, margin + time_h + 20);
-  lv_obj_set_pos(indoor_label, margin, margin + time_h + weather_h + 40);
   if (status_label != nullptr) {
-    lv_obj_set_pos(status_label, margin, margin + time_h + weather_h + 28);
+    lv_obj_set_pos(status_label, margin, margin + time_h + 20 + weather_h + 4);
   }
+  lv_obj_set_pos(indoor_label, margin, margin + time_h + 20 + weather_block_h + 20);
 }
 
 }  // namespace ui
