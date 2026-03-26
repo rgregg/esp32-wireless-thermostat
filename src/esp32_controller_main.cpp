@@ -1730,8 +1730,10 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
           char formatted_mac[18];
           uint8_t src_mac[6];
           const uint8_t *mac_ptr = nullptr;
-          if (format_mac_colons(peer_mac.c_str(), formatted_mac, sizeof(formatted_mac)) &&
-              ctrl_parse_mac(formatted_mac, src_mac)) {
+          // format_mac_colons copies even when it returns false (already
+          // colon-formatted), so ignore its return value.
+          format_mac_colons(peer_mac.c_str(), formatted_mac, sizeof(formatted_mac));
+          if (ctrl_parse_mac(formatted_mac, src_mac)) {
             mac_ptr = src_mac;
           }
           ctrl_apply_packed_command(packed, true, mac_ptr);
