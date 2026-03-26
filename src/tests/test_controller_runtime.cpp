@@ -507,4 +507,35 @@ TEST_CASE(controller_runtime_null_source_uses_default_sequence) {
   cmd.seq = 5;
   ASSERT_TRUE(rt.apply_remote_command(cmd, mac_a).accepted);
 }
+
+TEST_CASE(controller_runtime_display_mac_does_not_block_mqtt_commands) {
+  // Regression: display's packed_command (with MAC) advancing seq should not
+  // block direct MQTT cmd/* commands (nullptr source).
+  thermostat::ControllerRuntime rt;
+
+  const uint8_t display_mac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+
+  // Display sends many commands, advancing its sequence far ahead
+  CommandWord cmd;
+  for (uint8_t i = 1; i <= 50; ++i) {
+    cmd.seq = i;
+    cmd.mode = FurnaceMode::Heat;
+    cmd.setpoint_decic = 210;
+    ASSERT_TRUE(rt.apply_remote_command(cmd, display_mac).accepted);
+  }
+
+  // Direct MQTT command with low seq via nullptr — must still be accepted
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.setpoint_decic = 240;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, nullptr).accepted);
+
+  // Second direct MQTT command with seq=2 — also accepted
+  cmd.seq = 2;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, nullptr).accepted);
+
+  // But duplicate on nullptr is still rejected
+  cmd.seq = 2;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, nullptr).stale_or_duplicate);
+}
 #endif
