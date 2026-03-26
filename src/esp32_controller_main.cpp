@@ -1725,9 +1725,18 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
         if (!g_cfg_ctrl_allow_ha || !g_cfg_ctrl_mqtt_enabled) return;
         uint32_t packed = 0;
         if (ctrl_parse_u32_payload(value, &packed)) {
-          // Short MAC in topic path can't be parsed by ctrl_parse_mac;
-          // pass nullptr — MQTT auth is handled differently from ESP-NOW.
-          ctrl_apply_packed_command(packed, true, nullptr);
+          // Parse peer MAC so this source gets its own sequence tracker,
+          // separate from direct MQTT cmd/* commands.
+          char formatted_mac[18];
+          uint8_t src_mac[6];
+          const uint8_t *mac_ptr = nullptr;
+          // format_mac_colons copies even when it returns false (already
+          // colon-formatted), so ignore its return value.
+          format_mac_colons(peer_mac.c_str(), formatted_mac, sizeof(formatted_mac));
+          if (ctrl_parse_mac(formatted_mac, src_mac)) {
+            mac_ptr = src_mac;
+          }
+          ctrl_apply_packed_command(packed, true, mac_ptr);
         }
         return;
       }
@@ -1818,6 +1827,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     if (g_ctrl_temp_unit_f) sp = (sp - 32.0f) * 5.0f / 9.0f;
     if (sp < 0.0f) sp = 0.0f;
     if (sp > 40.0f) sp = 40.0f;
+    sp = roundf(sp * 2.0f) / 2.0f;  // snap to 0.5C step
     g_ctrl_shadow_setpoint_c = sp;
     g_ctrl_have_shadow = true;
     ctrl_apply_mqtt_shadow(false, false);
