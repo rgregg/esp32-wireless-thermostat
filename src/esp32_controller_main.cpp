@@ -373,6 +373,7 @@ void ctrl_schedule_reboot() {
 
 
 bool ctrl_parse_mac(const char *text, uint8_t out[6]);
+void ctrl_apply_mqtt_shadow(bool do_sync, bool do_filter_reset);  // forward declaration
 
 bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   if (!g_ctrl_cfg_ready || raw_value == nullptr) {
@@ -542,6 +543,23 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     if (g_controller != nullptr) {
       g_controller->app().runtime_mut().set_fan_circulate_duration_min(g_cfg_fan_circ_duration_min);
     }
+  } else if (key == "hvac_mode") {
+    g_ctrl_shadow_mode = mqtt_payload::str_to_mode(raw_value);
+    g_ctrl_have_shadow = true;
+    ctrl_apply_mqtt_shadow(false, false);
+  } else if (key == "hvac_fan") {
+    g_ctrl_shadow_fan = mqtt_payload::str_to_fan(raw_value);
+    g_ctrl_have_shadow = true;
+    ctrl_apply_mqtt_shadow(false, false);
+  } else if (key == "hvac_setpoint") {
+    float sp = static_cast<float>(atof(raw_value));
+    if (!isfinite(sp)) return false;
+    if (g_ctrl_temp_unit_f) sp = (sp - 32.0f) * 5.0f / 9.0f;
+    if (sp < 0.0f) sp = 0.0f;
+    if (sp > 40.0f) sp = 40.0f;
+    g_ctrl_shadow_setpoint_c = sp;
+    g_ctrl_have_shadow = true;
+    ctrl_apply_mqtt_shadow(false, false);
   } else {
     known = false;
   }
@@ -1270,6 +1288,39 @@ void ctrl_web_handle_root() {
   status_item(html, "ESP-NOW Enabled", "espnow_enabled");
   status_grid_end(html);
   card_end(html);
+
+  // ── Thermostat Controls card ──
+  card_begin(html, "Thermostat Controls");
+  form_begin(html);
+  {
+    static const SelectOption mode_opts[] = {
+        {"off", "Off"}, {"heat", "Heat"}, {"cool", "Cool"}};
+    select_field(html, "Mode", "hvac_mode", mode_opts, 3,
+                 String(mqtt_payload::mode_to_str(g_ctrl_shadow_mode)));
+  }
+  {
+    static const SelectOption fan_opts[] = {
+        {"auto", "Auto"}, {"on", "Always On"}, {"circulate", "Circulate"}};
+    select_field(html, "Fan", "hvac_fan", fan_opts, 3,
+                 String(mqtt_payload::fan_to_str(g_ctrl_shadow_fan)));
+  }
+  {
+    float display_sp = g_ctrl_shadow_setpoint_c;
+    if (g_ctrl_temp_unit_f) display_sp = display_sp * 9.0f / 5.0f + 32.0f;
+    char sp_buf[12];
+    const char *sp_fmt = g_ctrl_temp_unit_f ? "%.0f" : "%.1f";
+    const char *sp_label = g_ctrl_temp_unit_f ? "Setpoint (\xc2\xb0""F)" : "Setpoint (\xc2\xb0""C)";
+    snprintf(sp_buf, sizeof(sp_buf), sp_fmt, static_cast<double>(display_sp));
+    // UI range (5-35°C / 41-95°F) matches HA climate entity limits; backend
+    // accepts the wider hardware range (0-40°C) as a safety boundary.
+    number_field(html, sp_label, "hvac_setpoint", String(sp_buf),
+                 g_ctrl_temp_unit_f ? "41" : "5",
+                 g_ctrl_temp_unit_f ? "95" : "35",
+                 g_ctrl_temp_unit_f ? "1" : "0.5");
+  }
+  form_end(html, "Apply");
+  card_end(html);
+
   if (g_ctrl_cfg_reboot_required) {
     html += F("<div class=\"card\" style=\"border:1px solid var(--wn)\">"
               "<p style=\"color:var(--wn)\">Reboot required for pending changes.</p></div>");
