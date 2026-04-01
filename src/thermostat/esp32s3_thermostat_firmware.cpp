@@ -26,6 +26,7 @@
 #include "web/web_ui_escape.h"
 #include "web/web_ui_shell.h"
 #include "web/web_ui_fields.h"
+#include "web/web_auth.h"
 
 #include "thermostat/thermostat_device_runtime.h"
 #include "mqtt_payload.h"
@@ -285,6 +286,7 @@ String g_cfg_espnow_peer_mac = THERMOSTAT_ESPNOW_PEER_MAC;
 String g_cfg_espnow_lmk = THERMOSTAT_ESPNOW_LMK;
 bool g_cfg_mqtt_enabled = true;    // NVS "mqtt_en"
 bool g_cfg_espnow_enabled = true;  // NVS "espnow_en"
+String g_cfg_web_pwd_hash = "";    // NVS "web_pwd_hash": SHA-256 hex (empty = auth off)
 
 // Derived from g_cfg_espnow_peer_mac (colons stripped) — single controller MAC for both transports
 String controller_mac_compact() {
@@ -398,6 +400,8 @@ void load_runtime_config() {
       clamp_percent(g_cfg.getUChar("bl_dim", g_cfg_backlight_screensaver_pct));
   g_cfg_temp_comp_c = g_cfg.getFloat("temp_comp", 0.0f);
   g_cfg_temp_unit_f = g_cfg.getBool("temp_u_f", false);
+  g_cfg_web_pwd_hash = g_cfg.getString("web_pwd_hash", "");
+  web_auth::set_password_hash(g_cfg_web_pwd_hash.c_str());
 }
 
 String device_topic_for(const char *mac, const char *suffix) {
@@ -546,6 +550,19 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_controller_timeout_ms = static_cast<uint32_t>(parsed);
     NVS_PUT_UINT("ctrl_to", g_cfg_controller_timeout_ms);
     g_cfg_reboot_required = true;
+  } else if (key == "web_password") {
+    // Empty value clears the password (disables auth).
+    // Non-empty value sets a new hashed password; enforce minimum length server-side.
+    if (value.length() > 0 && value.length() < 8) {
+      return false;
+    }
+    web_auth::set_password(value.c_str());
+    g_cfg_web_pwd_hash = String(web_auth::get_password_hash());
+    if (g_cfg_web_pwd_hash.length() > 0) {
+      NVS_PUT_STR("web_pwd_hash", g_cfg_web_pwd_hash);
+    } else {
+      g_cfg.remove("web_pwd_hash");
+    }
   } else {
     known = false;
   }
@@ -733,6 +750,7 @@ const char *reset_reason_text(esp_reset_reason_t reason) {
 // web_ui::html_escape() and web_ui::json_escape() are now in web_ui namespace via web_ui_escape.h
 
 void web_handle_config_get() {
+  if (!web_auth::require_auth(g_web)) return;
   xSemaphoreTake(g_api_mutex, portMAX_DELAY);
   String body = "{";
   body += "\"wifi_ssid\":\"" + web_ui::json_escape(g_cfg_wifi_ssid) + "\",";
@@ -755,6 +773,7 @@ void web_handle_config_get() {
   body += "\"espnow_lmk\":\"" + String(g_cfg_espnow_lmk.length() > 0 ? "set" : "unset") + "\",";
   body += "\"paired_controller_mac\":\"" + web_ui::json_escape(controller_mac_compact()) + "\",";
   body += "\"controller_timeout_ms\":" + String(g_cfg_controller_timeout_ms) + ",";
+  body += "\"web_password\":\"" + String(web_auth::is_enabled() ? "set" : "unset") + "\",";
   body += "\"reboot_required\":" + String(g_cfg_reboot_required ? "true" : "false");
   body += "}";
   xSemaphoreGive(g_api_mutex);
@@ -762,6 +781,7 @@ void web_handle_config_get() {
 }
 
 void web_handle_config_post() {
+  if (!web_auth::require_auth(g_web)) return;
   int updated = 0;
   xSemaphoreTake(g_api_mutex, portMAX_DELAY);
   for (int i = 0; i < g_web.args(); ++i) {
@@ -774,11 +794,13 @@ void web_handle_config_post() {
 }
 
 void web_handle_reboot_post() {
+  if (!web_auth::require_auth(g_web)) return;
   schedule_reboot();
   g_web.send(200, "text/plain", "rebooting\n");
 }
 
 void web_handle_status_get() {
+  if (!web_auth::require_auth(g_web)) return;
   const uint32_t now = millis();
 
   // Snapshot shared state under mutex before building response
@@ -896,6 +918,7 @@ void write_u32_le(uint8_t *out, uint32_t value) {
 }
 
 void web_handle_screenshot() {
+  if (!web_auth::require_auth(g_web)) return;
   if (g_buf_1 == nullptr || g_buf_2 == nullptr) {
     g_web.send(503, "text/plain", "display not initialized");
     return;
@@ -965,6 +988,7 @@ void web_handle_screenshot() {
 }
 
 void web_handle_devices_get() {
+  if (!web_auth::require_auth(g_web)) return;
   xSemaphoreTake(g_api_mutex, portMAX_DELAY);
   DeviceRegistry snapshot = g_device_registry;
   xSemaphoreGive(g_api_mutex);
@@ -990,7 +1014,20 @@ void web_handle_devices_get() {
   g_web.send(200, "application/json", json);
 }
 
+void web_handle_login_get() {
+  web_auth::handle_login_get(g_web, g_cfg_hostname.c_str());
+}
+
+void web_handle_login_post() {
+  web_auth::handle_login_post(g_web, g_cfg_hostname.c_str());
+}
+
+void web_handle_logout_post() {
+  web_auth::handle_logout_post(g_web);
+}
+
 void web_handle_root() {
+  if (!web_auth::require_auth(g_web)) return;
   using namespace web_ui;
 
   // Snapshot config globals under mutex (brief hold), then build HTML outside
@@ -1018,6 +1055,7 @@ void web_handle_root() {
   const uint32_t ctrl_timeout = g_cfg_controller_timeout_ms;
   const bool mqtt_enabled = g_cfg_mqtt_enabled;
   const bool espnow_enabled = g_cfg_espnow_enabled;
+  const bool web_auth_enabled = web_auth::is_enabled();
   xSemaphoreGive(g_api_mutex);
 
   String html;
@@ -1029,10 +1067,12 @@ void web_handle_root() {
     {"mqtt", "MQTT"},
     {"display", "Display"},
     {"hw", "Hardware"},
+    {"security", "Security"},
     {"system", "System"},
   };
   page_begin(html, "Thermostat Display", ota_hostname.c_str(),
-             tabs, sizeof(tabs) / sizeof(tabs[0]));
+             tabs, sizeof(tabs) / sizeof(tabs[0]),
+             web_auth_enabled);
 
   // ── Status tab ──
   tab_begin(html, "status", true);
@@ -1176,6 +1216,11 @@ void web_handle_root() {
 
   tab_end(html);
 
+  // ── Security tab ──
+  tab_begin(html, "security");
+  web_auth::security_tab_content(html);
+  tab_end(html);
+
   // ── System tab ──
   tab_begin(html, "system");
   card_begin(html, "Firmware Update");
@@ -1227,6 +1272,9 @@ void ensure_web_ready() {
     g_web.on("/config", HTTP_POST, web_handle_config_post);
     g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
     g_web.on("/screenshot", HTTP_GET, web_handle_screenshot);
+    g_web.on("/login", HTTP_GET, web_handle_login_get);
+    g_web.on("/login", HTTP_POST, web_handle_login_post);
+    g_web.on("/logout", HTTP_POST, web_handle_logout_post);
     ota_web_setup(g_web);
     ota_set_prepare_callback([]() {
       // Close the MQTT TCP socket immediately to free ~5-6KB of internal SRAM
@@ -1238,6 +1286,15 @@ void ensure_web_ready() {
                     ESP.getFreeHeap(),
                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     });
+    ota_set_auth_callback([](WebServer &server) -> bool {
+      return web_auth::require_auth(server);
+    });
+    ota_set_check_auth_callback([](WebServer &server) -> bool {
+      return web_auth::is_authenticated(server);
+    });
+    // Enable collection of the Cookie header for session authentication.
+    static const char *kCollectHeaders[] = {"Cookie"};
+    g_web.collectHeaders(kCollectHeaders, 1);
     g_web.begin();
     g_web_started = true;
   }

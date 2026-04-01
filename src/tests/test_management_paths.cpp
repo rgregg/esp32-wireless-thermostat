@@ -60,6 +60,7 @@ TEST_CASE(management_paths_secret_key_classification) {
   ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("mqtt_password"));
   ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("espnow_lmk"));
   ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("pirateweather_api_key"));
+  ASSERT_TRUE(thermostat::management_paths::is_secret_cfg_key("web_password"));
 
   ASSERT_TRUE(!thermostat::management_paths::is_secret_cfg_key("wifi_ssid"));
   ASSERT_TRUE(!thermostat::management_paths::is_secret_cfg_key("espnow_peer_mac"));
