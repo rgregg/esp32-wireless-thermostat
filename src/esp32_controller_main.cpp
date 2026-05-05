@@ -1925,6 +1925,12 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     if (sp < 0.0f) sp = 0.0f;
     if (sp > 40.0f) sp = 40.0f;
     sp = roundf(sp * 2.0f) / 2.0f;  // snap to 0.5C step
+    // When mode is Off, apply_remote_command's bin-routing skips both bins
+    // by design. Mirror the display's Off→heat-bin fallback so a setpoint
+    // adjusted via HA (or API) while Off still lands somewhere persistent.
+    if (g_ctrl_shadow_mode == FurnaceMode::Off) {
+      g_controller->app().runtime_mut().set_heat_setpoint_c(sp);
+    }
     g_ctrl_shadow_setpoint_c = sp;
     g_ctrl_have_shadow = true;
     CtrlShadowSendOptions opts;
