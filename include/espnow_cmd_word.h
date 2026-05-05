@@ -11,6 +11,14 @@ struct CommandWord {
   uint16_t seq = 0;             // 9 bits, 0..511
   bool filter_reset = false;
   bool sync_request = false;
+  // "Preserve" flags let a sender update only the fields the user touched,
+  // keeping the controller authoritative for the rest. The mode/fan/setpoint
+  // payload bits are still populated with the sender's current view (so older
+  // controllers that don't understand these flags still behave as before),
+  // but a controller that honors the flag will leave its stored value alone.
+  bool preserve_mode = false;
+  bool preserve_fan = false;
+  bool preserve_setpoint = false;
 };
 
 namespace espnow_cmd {

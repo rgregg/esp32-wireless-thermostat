@@ -120,11 +120,27 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
 
   const FurnaceMode old_mode = mode_;
   const FanMode old_fan = fan_mode_;
-  const float old_setpoint = target_temperature_c_;
+  const float old_setpoint = target_temperature_c();
 
-  mode_ = cmd.mode;
-  fan_mode_ = cmd.fan;
-  target_temperature_c_ = static_cast<float>(cmd.setpoint_decic) / 10.0f;
+  if (!cmd.preserve_mode) {
+    mode_ = cmd.mode;
+  }
+  if (!cmd.preserve_fan) {
+    fan_mode_ = cmd.fan;
+  }
+  // Route the incoming setpoint into the bin matching the resolved mode (the
+  // mode we'll be in after applying this command). For Off, leave both bins
+  // unchanged so a mode-only switch doesn't clobber the stored targets.
+  // preserve_setpoint suppresses any bin update entirely.
+  if (!cmd.preserve_setpoint) {
+    const float incoming_sp = static_cast<float>(cmd.setpoint_decic) / 10.0f;
+    const FurnaceMode bin_mode = cmd.preserve_mode ? mode_ : cmd.mode;
+    if (bin_mode == FurnaceMode::Heat) {
+      heat_setpoint_c_ = incoming_sp;
+    } else if (bin_mode == FurnaceMode::Cool) {
+      cool_setpoint_c_ = incoming_sp;
+    }
+  }
 
   // Audit changes with source MAC when available
   char src_str[32];
@@ -150,10 +166,11 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
           mqtt_payload::fan_to_str(old_fan),
           mqtt_payload::fan_to_str(fan_mode_), src_str);
   }
-  if (target_temperature_c_ != old_setpoint) {
+  const float new_setpoint = target_temperature_c();
+  if (new_setpoint != old_setpoint) {
     audit("setpoint: %.1f->%.1f [%s]",
           static_cast<double>(old_setpoint),
-          static_cast<double>(target_temperature_c_), src_str);
+          static_cast<double>(new_setpoint), src_str);
   }
 
   if (cmd.filter_reset) {
@@ -170,6 +187,13 @@ void ControllerRuntime::tick(const ControllerTickInput &in) {
   apply_hvac_calls(in.now_ms, in.heat_call, in.cool_call);
   run_minute_tasks(in.now_ms);
   enforce_safety_interlocks(in.now_ms);
+}
+
+float ControllerRuntime::target_temperature_c() const {
+  // Cool mode reports cool bin; Heat and Off both report heat bin.
+  // Off's value is informational only — HVAC logic is gated on mode anyway.
+  if (mode_ == FurnaceMode::Cool) return cool_setpoint_c_;
+  return heat_setpoint_c_;
 }
 
 FurnaceStateCode ControllerRuntime::furnace_state() const {

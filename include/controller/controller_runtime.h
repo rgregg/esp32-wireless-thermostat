@@ -59,7 +59,13 @@ class ControllerRuntime {
 
   FurnaceMode mode() const { return mode_; }
   FanMode fan_mode() const { return fan_mode_; }
-  float target_temperature_c() const { return target_temperature_c_; }
+  float target_temperature_c() const;
+
+  // Per-mode setpoints. Heat default 20.0°C, cool default 24.0°C.
+  float heat_setpoint_c() const { return heat_setpoint_c_; }
+  float cool_setpoint_c() const { return cool_setpoint_c_; }
+  void set_heat_setpoint_c(float v) { heat_setpoint_c_ = v; }
+  void set_cool_setpoint_c(float v) { cool_setpoint_c_ = v; }
 
   bool failsafe_active() const { return failsafe_active_; }
   bool hvac_lockout() const { return hvac_lockout_; }
@@ -102,7 +108,8 @@ class ControllerRuntime {
 
   FurnaceMode mode_ = FurnaceMode::Off;
   FanMode fan_mode_ = FanMode::Automatic;
-  float target_temperature_c_ = 20.0f;
+  float heat_setpoint_c_ = 20.0f;
+  float cool_setpoint_c_ = 24.0f;
 
   bool hvac_lockout_ = false;
   bool failsafe_active_ = false;

@@ -16,6 +16,7 @@
 #include "mqtt_payload.h"
 #include "mqtt_topics.h"
 #include "device_registry.h"
+#include "discovery_topics.h"
 #include "wifi_watchdog.h"
 
 #if defined(ARDUINO)
@@ -65,7 +66,8 @@ float g_ctrl_shadow_setpoint_c = 20.0f;
 // Track last-persisted values to skip NVS writes when nothing changed
 FurnaceMode g_ctrl_persisted_mode = FurnaceMode::Off;
 FanMode g_ctrl_persisted_fan = FanMode::Automatic;
-float g_ctrl_persisted_setpoint_c = -999.0f;  // sentinel: force write on first call
+float g_ctrl_persisted_heat_sp_c = -999.0f;  // sentinel: force write on first call
+float g_ctrl_persisted_cool_sp_c = -999.0f;
 bool g_ctrl_web_started = false;
 DeviceRegistry g_device_registry;
 bool g_ctrl_mdns_started = false;
@@ -1030,6 +1032,62 @@ void ctrl_publish_discovery() {
   g_ctrl_mqtt_discovery_sent = true;
 }
 
+// 7 days in milliseconds — devices not seen for this long are considered stale.
+static constexpr uint32_t kStaleDeviceMaxAgeMs = 7UL * 24 * 60 * 60 * 1000;
+// Check for stale devices once per hour.
+static constexpr uint32_t kStaleCheckIntervalMs = 60UL * 60 * 1000;
+
+void ctrl_check_stale_devices(uint32_t now) {
+  if (!g_ctrl_mqtt.connected() || !g_cfg_ha_discovery_enabled) return;
+
+  for (size_t i = 0; i < kMaxRegistryEntries; ++i) {
+    if (!g_device_registry.is_stale(i, now, kStaleDeviceMaxAgeMs)) continue;
+
+    const auto &e = g_device_registry.entries[i];
+
+    // Build compact MAC and dev_id for topic construction
+    char mac_compact[13];
+    mac_strip_colons(e.mac, mac_compact, sizeof(mac_compact));
+
+    // Determine role suffix: registry stores role in `type` field
+    const char *role_suffix = e.type;  // "controller" or "display"
+    char dev_id[96];
+    snprintf(dev_id, sizeof(dev_id), "%s_%s_%s",
+             g_cfg_base_topic.c_str(), mac_compact, role_suffix);
+
+    // Look up discovery entities for this role
+    size_t entity_count = 0;
+    const DiscoveryEntity *entities = discovery_entities_for_role(role_suffix, &entity_count);
+
+    ctrl_audit("stale_cleanup: %s (%s) role=%s entities=%u age=%lus",
+               e.name, e.mac, role_suffix,
+               static_cast<unsigned>(entity_count),
+               static_cast<unsigned long>((now - e.last_seen_ms) / 1000));
+
+    // Publish empty retained payload to each discovery topic to remove from HA
+    char topic[192];
+    for (size_t j = 0; j < entity_count; ++j) {
+      format_discovery_topic(topic, sizeof(topic),
+                             g_cfg_ctrl_discovery_prefix.c_str(),
+                             entities[j].component,
+                             dev_id, entities[j].suffix);
+      g_ctrl_mqtt.publish(topic, "", true);
+    }
+
+    // Clear retained announce and availability topics
+    String peer_base = g_cfg_base_topic + "/devices/" + mac_compact;
+    g_ctrl_mqtt.publish((peer_base + "/announce").c_str(), "", true);
+    g_ctrl_mqtt.publish((peer_base + "/state/availability").c_str(), "", true);
+
+    // Remove from registry
+    // Copy mac before remove zeroes the entry
+    char removed_mac[18];
+    strncpy(removed_mac, e.mac, sizeof(removed_mac));
+    removed_mac[sizeof(removed_mac) - 1] = '\0';
+    g_device_registry.remove(removed_mac);
+  }
+}
+
 // html_escape() and json_escape() are now in web_ui namespace via web_ui_escape.h
 
 // Audit log: MQTT publish callback and helpers
@@ -1638,30 +1696,47 @@ bool ctrl_apply_packed_command(uint32_t packed_word, bool from_mqtt,
   return true;
 }
 
-void ctrl_apply_mqtt_shadow(bool do_sync, bool do_filter_reset) {
+struct CtrlShadowSendOptions {
+  bool sync_request = false;
+  bool filter_reset = false;
+  bool preserve_mode = false;
+  bool preserve_fan = false;
+  bool preserve_setpoint = false;
+};
+
+void ctrl_apply_mqtt_shadow(const CtrlShadowSendOptions &opts) {
   if (g_controller == nullptr || !g_ctrl_have_shadow) {
     return;
   }
   g_ctrl_mqtt_seq = static_cast<uint16_t>((g_ctrl_mqtt_seq + 1) & 0x1FFu);
   if (g_ctrl_mqtt_seq == 0) g_ctrl_mqtt_seq = 1;
-  const CommandWord cmd = thermostat::build_command_word(
-      g_ctrl_shadow_mode, g_ctrl_shadow_fan, g_ctrl_shadow_setpoint_c, g_ctrl_mqtt_seq, do_sync,
-      do_filter_reset);
+  CommandWord cmd = thermostat::build_command_word(
+      g_ctrl_shadow_mode, g_ctrl_shadow_fan, g_ctrl_shadow_setpoint_c, g_ctrl_mqtt_seq,
+      opts.sync_request, opts.filter_reset);
+  cmd.preserve_mode = opts.preserve_mode;
+  cmd.preserve_fan = opts.preserve_fan;
+  cmd.preserve_setpoint = opts.preserve_setpoint;
   ctrl_apply_packed_command(espnow_cmd::encode(cmd), true);
 }
 
 void ctrl_persist_hvac_state() {
-  if (!g_ctrl_cfg_ready || !g_ctrl_have_shadow) return;
+  if (!g_ctrl_cfg_ready || !g_ctrl_have_shadow || g_controller == nullptr) return;
+  const auto &rt = g_controller->app().runtime();
+  const float heat_sp = rt.heat_setpoint_c();
+  const float cool_sp = rt.cool_setpoint_c();
   // Skip NVS write if nothing has changed
   if (g_ctrl_shadow_mode == g_ctrl_persisted_mode &&
       g_ctrl_shadow_fan == g_ctrl_persisted_fan &&
-      g_ctrl_shadow_setpoint_c == g_ctrl_persisted_setpoint_c) return;
+      heat_sp == g_ctrl_persisted_heat_sp_c &&
+      cool_sp == g_ctrl_persisted_cool_sp_c) return;
   g_ctrl_cfg.putUChar("hvac_mode", static_cast<uint8_t>(g_ctrl_shadow_mode));
   g_ctrl_cfg.putUChar("hvac_fan", static_cast<uint8_t>(g_ctrl_shadow_fan));
-  g_ctrl_cfg.putFloat("hvac_sp_c", g_ctrl_shadow_setpoint_c);
+  g_ctrl_cfg.putFloat("hvac_heat_sp_c", heat_sp);
+  g_ctrl_cfg.putFloat("hvac_cool_sp_c", cool_sp);
   g_ctrl_persisted_mode = g_ctrl_shadow_mode;
   g_ctrl_persisted_fan = g_ctrl_shadow_fan;
-  g_ctrl_persisted_setpoint_c = g_ctrl_shadow_setpoint_c;
+  g_ctrl_persisted_heat_sp_c = heat_sp;
+  g_ctrl_persisted_cool_sp_c = cool_sp;
 }
 
 void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
@@ -1694,6 +1769,15 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
                          (peer_mac == WiFi.macAddress());
     if (!is_self) {
       // ── Peer device messages ──
+      // Touch the registry timestamp for every peer message so that
+      // periodic state messages (sensor/temp_c, state/packed_command, etc.)
+      // keep the device marked as alive.
+      {
+        char touch_mac[18];
+        format_mac_colons(peer_mac.c_str(), touch_mac, sizeof(touch_mac));
+        g_device_registry.touch(touch_mac, millis());
+      }
+
       if (suffix == "announce") {
         char name[48] = "", role[16] = "", ip[16] = "";
         json_extract_string(value, "name", name, sizeof(name));
@@ -1701,7 +1785,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
         json_extract_string(value, "ip", ip, sizeof(ip));
         char formatted_mac[18];
         format_mac_colons(peer_mac.c_str(), formatted_mac, sizeof(formatted_mac));
-        g_device_registry.upsert(formatted_mac, name, role, ip);
+        g_device_registry.upsert(formatted_mac, name, role, ip, millis());
         return;
       }
 
@@ -1745,8 +1829,15 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
         if (g_controller != nullptr) {
           float fval = static_cast<float>(atof(value));
           if (isfinite(fval) && fval >= -40.0f && fval <= 85.0f) {
-            ctrl_audit("indoor_temp: %.1fC [mqtt/sensor %s]",
-                       static_cast<double>(fval), peer_mac.c_str());
+            // Only audit on change (to 0.1C precision) — sensor publishes
+            // multiple times per second, which would otherwise flood the log.
+            static int16_t last_logged_decic = INT16_MIN;
+            const int16_t decic = static_cast<int16_t>(lroundf(fval * 10.0f));
+            if (decic != last_logged_decic) {
+              last_logged_decic = decic;
+              ctrl_audit("indoor_temp: %.1fC [mqtt/sensor %s]",
+                         static_cast<double>(fval), peer_mac.c_str());
+            }
             g_controller->app().on_indoor_temperature_c(fval, nullptr);
             g_controller->app().on_heartbeat(millis());
           }
@@ -1812,13 +1903,19 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   if (topic_str == self_topic_for("cmd/mode")) {
     g_ctrl_shadow_mode = mqtt_payload::str_to_mode(value);
     g_ctrl_have_shadow = true;
-    ctrl_apply_mqtt_shadow(false, false);
+    CtrlShadowSendOptions opts;
+    opts.preserve_fan = true;
+    opts.preserve_setpoint = true;
+    ctrl_apply_mqtt_shadow(opts);
     return;
   }
   if (topic_str == self_topic_for("cmd/fan_mode")) {
     g_ctrl_shadow_fan = mqtt_payload::str_to_fan(value);
     g_ctrl_have_shadow = true;
-    ctrl_apply_mqtt_shadow(false, false);
+    CtrlShadowSendOptions opts;
+    opts.preserve_mode = true;
+    opts.preserve_setpoint = true;
+    ctrl_apply_mqtt_shadow(opts);
     return;
   }
   if (topic_str == self_topic_for("cmd/target_temp_c")) {
@@ -1830,11 +1927,16 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     sp = roundf(sp * 2.0f) / 2.0f;  // snap to 0.5C step
     g_ctrl_shadow_setpoint_c = sp;
     g_ctrl_have_shadow = true;
-    ctrl_apply_mqtt_shadow(false, false);
+    CtrlShadowSendOptions opts;
+    opts.preserve_mode = true;
+    opts.preserve_fan = true;
+    ctrl_apply_mqtt_shadow(opts);
     return;
   }
   if (topic_str == self_topic_for("cmd/sync") && mqtt_payload::parse_bool(value)) {
-    ctrl_apply_mqtt_shadow(true, false);
+    CtrlShadowSendOptions opts;
+    opts.sync_request = true;
+    ctrl_apply_mqtt_shadow(opts);
     return;
   }
   if (topic_str == self_topic_for("cmd/reboot") && mqtt_payload::parse_bool(value)) {
@@ -1854,7 +1956,12 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
   if (topic_str == self_topic_for("cmd/filter_reset") && mqtt_payload::parse_bool(value)) {
-    ctrl_apply_mqtt_shadow(false, true);
+    CtrlShadowSendOptions opts;
+    opts.filter_reset = true;
+    opts.preserve_mode = true;
+    opts.preserve_fan = true;
+    opts.preserve_setpoint = true;
+    ctrl_apply_mqtt_shadow(opts);
     return;
   }
   if (topic_str == self_topic_for("cfg/fan_circulate_period/set")) {
@@ -2066,12 +2173,26 @@ void setup() {
   if (g_ctrl_cfg_ready && g_ctrl_cfg.isKey("hvac_mode")) {
     g_ctrl_shadow_mode = static_cast<FurnaceMode>(g_ctrl_cfg.getUChar("hvac_mode", 0));
     g_ctrl_shadow_fan = static_cast<FanMode>(g_ctrl_cfg.getUChar("hvac_fan", 0));
-    g_ctrl_shadow_setpoint_c = g_ctrl_cfg.getFloat("hvac_sp_c", 20.0f);
+    // Restore per-mode setpoints. Migrate from legacy single-key `hvac_sp_c`
+    // (used as seed for both bins) when the new keys are absent.
+    const bool has_new_keys = g_ctrl_cfg.isKey("hvac_heat_sp_c") ||
+                              g_ctrl_cfg.isKey("hvac_cool_sp_c");
+    const float legacy_sp = g_ctrl_cfg.getFloat("hvac_sp_c", 20.0f);
+    const float heat_sp = has_new_keys
+                              ? g_ctrl_cfg.getFloat("hvac_heat_sp_c", 20.0f)
+                              : legacy_sp;
+    const float cool_sp = has_new_keys
+                              ? g_ctrl_cfg.getFloat("hvac_cool_sp_c", 24.0f)
+                              : legacy_sp;
+    g_controller->app().runtime_mut().set_heat_setpoint_c(heat_sp);
+    g_controller->app().runtime_mut().set_cool_setpoint_c(cool_sp);
+    g_ctrl_shadow_setpoint_c =
+        (g_ctrl_shadow_mode == FurnaceMode::Cool) ? cool_sp : heat_sp;
     g_ctrl_have_shadow = true;
     // Start MQTT seq high so NVS-restored state wins over any stale retained
     // packed_command from the display (which shares the default seq tracker).
     g_ctrl_mqtt_seq = 0x100;
-    ctrl_apply_mqtt_shadow(false, false);
+    ctrl_apply_mqtt_shadow(CtrlShadowSendOptions{});
   }
 
   // Wire audit log
@@ -2174,6 +2295,15 @@ void loop() {
           (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
         g_ctrl_last_mqtt_publish_ms = now;
         ctrl_publish_runtime_state();
+      }
+
+      // Periodically check for and clean up stale peer device discovery topics
+      {
+        static uint32_t last_stale_check_ms = 0;
+        if (static_cast<uint32_t>(now - last_stale_check_ms) >= kStaleCheckIntervalMs) {
+          last_stale_check_ms = now;
+          ctrl_check_stale_devices(now);
+        }
       }
     }
   }

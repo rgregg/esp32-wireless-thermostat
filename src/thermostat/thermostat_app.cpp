@@ -8,6 +8,22 @@ ThermostatApp::ThermostatApp(IThermostatTransport &transport,
                              const ThermostatAppConfig &config)
     : transport_(transport), config_(config) {}
 
+float ThermostatApp::local_setpoint_c() const {
+  // Cool mode shows cool bin; Heat and Off show heat bin.
+  if (local_mode_ == FurnaceMode::Cool) return local_cool_setpoint_c_;
+  return local_heat_setpoint_c_;
+}
+
+namespace {
+// Sync incoming setpoint into the bin matching the given mode.
+// For Off, leave both bins unchanged.
+void sync_setpoint_into_bin(FurnaceMode mode, float setpoint_c,
+                            float &heat_bin, float &cool_bin) {
+  if (mode == FurnaceMode::Heat) heat_bin = setpoint_c;
+  else if (mode == FurnaceMode::Cool) cool_bin = setpoint_c;
+}
+}  // namespace
+
 bool ThermostatApp::is_newer_u16(uint16_t previous, uint16_t incoming) {
   const uint16_t diff = static_cast<uint16_t>(incoming - previous);
   return diff != 0 && diff < 0x8000;
@@ -45,9 +61,11 @@ void ThermostatApp::on_controller_telemetry(
        config_.local_interaction_debounce_ms);
 
   if (!within_debounce) {
-    local_mode_ = mode_from_code(telemetry.mode_code);
+    const FurnaceMode tmode = mode_from_code(telemetry.mode_code);
+    local_mode_ = tmode;
     local_fan_mode_ = fan_from_code(telemetry.fan_code);
-    local_setpoint_c_ = telemetry.setpoint_c;
+    sync_setpoint_into_bin(tmode, telemetry.setpoint_c,
+                           local_heat_setpoint_c_, local_cool_setpoint_c_);
   }
 
   ack_controller_seq(last_controller_seq_);
@@ -72,20 +90,28 @@ void ThermostatApp::on_controller_state_update(
   if (!within_debounce) {
     local_mode_ = mode;
     local_fan_mode_ = fan;
-    local_setpoint_c_ = setpoint_c;
+    sync_setpoint_into_bin(mode, setpoint_c,
+                           local_heat_setpoint_c_, local_cool_setpoint_c_);
   }
 }
 
 void ThermostatApp::set_local_mode(FurnaceMode mode, uint32_t now_ms) {
   local_mode_ = mode;
   mark_local_interaction(now_ms);
-  send_command(false, false);
+  // Mode-only change: keep controller's stored fan and setpoint authoritative.
+  SendOptions opts;
+  opts.preserve_fan = true;
+  opts.preserve_setpoint = true;
+  send_command(opts);
 }
 
 void ThermostatApp::set_local_fan_mode(FanMode mode, uint32_t now_ms) {
   local_fan_mode_ = mode;
   mark_local_interaction(now_ms);
-  send_command(false, false);
+  SendOptions opts;
+  opts.preserve_mode = true;
+  opts.preserve_setpoint = true;
+  send_command(opts);
 }
 
 void ThermostatApp::set_local_setpoint_c(float setpoint_c, uint32_t now_ms) {
@@ -95,19 +121,35 @@ void ThermostatApp::set_local_setpoint_c(float setpoint_c, uint32_t now_ms) {
   if (setpoint_c > 40.0f) {
     setpoint_c = 40.0f;
   }
-  local_setpoint_c_ = setpoint_c;
+  // Adjust the bin for the active mode. Off → heat bin (matches local_setpoint_c()).
+  if (local_mode_ == FurnaceMode::Cool) {
+    local_cool_setpoint_c_ = setpoint_c;
+  } else {
+    local_heat_setpoint_c_ = setpoint_c;
+  }
   mark_local_interaction(now_ms);
-  send_command(false, false);
+  SendOptions opts;
+  opts.preserve_mode = true;
+  opts.preserve_fan = true;
+  send_command(opts);
 }
 
 void ThermostatApp::request_sync(uint32_t now_ms) {
   mark_local_interaction(now_ms);
-  send_command(true, false);
+  SendOptions opts;
+  opts.sync_request = true;
+  send_command(opts);
 }
 
 void ThermostatApp::request_filter_reset(uint32_t now_ms) {
   mark_local_interaction(now_ms);
-  send_command(false, true);
+  SendOptions opts;
+  opts.filter_reset = true;
+  // Filter reset is independent of HVAC settings — preserve everything.
+  opts.preserve_mode = true;
+  opts.preserve_fan = true;
+  opts.preserve_setpoint = true;
+  send_command(opts);
 }
 
 void ThermostatApp::reset_local_command_sequence() {
@@ -164,10 +206,13 @@ void ThermostatApp::ack_controller_seq(uint16_t seq) {
   transport_.publish_controller_ack(seq);
 }
 
-void ThermostatApp::send_command(bool do_sync, bool do_filter_reset) {
+void ThermostatApp::send_command(const SendOptions &opts) {
   seq_local_ = espnow_cmd::next_seq(seq_local_);
-  const CommandWord cmd = build_command_word(local_mode_, local_fan_mode_, local_setpoint_c_,
-                                             seq_local_, do_sync, do_filter_reset);
+  CommandWord cmd = build_command_word(local_mode_, local_fan_mode_, local_setpoint_c(),
+                                       seq_local_, opts.sync_request, opts.filter_reset);
+  cmd.preserve_mode = opts.preserve_mode;
+  cmd.preserve_fan = opts.preserve_fan;
+  cmd.preserve_setpoint = opts.preserve_setpoint;
 
   last_packed_command_ = espnow_cmd::encode(cmd);
   last_command_seq_ = cmd.seq;

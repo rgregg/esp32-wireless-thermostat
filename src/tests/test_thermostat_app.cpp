@@ -36,8 +36,14 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   ASSERT_TRUE(app.has_last_packed_command());
   ASSERT_EQ(app.last_packed_command(), tx.last_cmd);
   ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(1));
-  ASSERT_EQ(tx.last_cmd, thermostat::build_packed_command(FurnaceMode::Off, FanMode::Automatic,
-                                                          22.5f, 1, false, false));
+  {
+    CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+    ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Off));
+    ASSERT_EQ(decoded.setpoint_decic, static_cast<uint16_t>(225));
+    ASSERT_TRUE(decoded.preserve_mode);
+    ASSERT_TRUE(decoded.preserve_fan);
+    ASSERT_TRUE(!decoded.preserve_setpoint);
+  }
 
   thermostat::ThermostatControllerTelemetry telem;
   telem.seq = 1;
@@ -59,8 +65,13 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   app.request_sync(7100);
   ASSERT_TRUE(app.last_packed_command() == tx.last_cmd);
   ASSERT_EQ(app.last_command_seq(), static_cast<uint16_t>(2));
-  ASSERT_EQ(tx.last_cmd, thermostat::build_packed_command(FurnaceMode::Cool, FanMode::AlwaysOn,
-                                                          18.0f, 2, true, false));
+  {
+    CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+    ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Cool));
+    ASSERT_EQ(static_cast<int>(decoded.fan), static_cast<int>(FanMode::AlwaysOn));
+    ASSERT_EQ(decoded.setpoint_decic, static_cast<uint16_t>(180));
+    ASSERT_TRUE(decoded.sync_request);
+  }
 
   app.publish_indoor_temperature_c(21.2f);
   app.publish_indoor_humidity(44.0f);
@@ -173,5 +184,61 @@ TEST_CASE(thermostat_app_controller_state_update_respects_debounce) {
   ASSERT_EQ(static_cast<int>(app.local_fan_mode()),
             static_cast<int>(FanMode::Circulate));
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
+}
+
+TEST_CASE(thermostat_app_per_mode_setpoints_independent) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  // Switch to heat at 21.0°C
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  app.set_local_setpoint_c(21.0f, 1100);
+  ASSERT_NEAR(app.local_heat_setpoint_c(), 21.0f, 0.01f);
+  ASSERT_NEAR(app.local_setpoint_c(), 21.0f, 0.01f);
+
+  // Switch to cool at 23.5°C — heat bin must be preserved
+  app.set_local_mode(FurnaceMode::Cool, 2000);
+  // Switching mode itself sends a command using the current cool bin (default 24.0)
+  ASSERT_NEAR(app.local_setpoint_c(), 24.0f, 0.01f);
+  app.set_local_setpoint_c(23.5f, 2100);
+  ASSERT_NEAR(app.local_cool_setpoint_c(), 23.5f, 0.01f);
+  ASSERT_NEAR(app.local_heat_setpoint_c(), 21.0f, 0.01f);
+
+  // Back to heat — cool bin preserved, heat bin restored
+  app.set_local_mode(FurnaceMode::Heat, 3000);
+  ASSERT_NEAR(app.local_setpoint_c(), 21.0f, 0.01f);
+  ASSERT_NEAR(app.local_cool_setpoint_c(), 23.5f, 0.01f);
+
+  // Sent command after final mode switch carries the heat bin (21.0), not 23.5,
+  // and is flagged as a mode-only change so the controller preserves its bins.
+  {
+    CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+    ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Heat));
+    ASSERT_EQ(decoded.setpoint_decic, static_cast<uint16_t>(210));
+    ASSERT_TRUE(decoded.preserve_setpoint);
+    ASSERT_TRUE(decoded.preserve_fan);
+  }
+}
+
+TEST_CASE(thermostat_app_telemetry_routes_setpoint_into_mode_bin) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  // Heat-mode telemetry → heat bin updated, cool bin untouched
+  thermostat::ThermostatControllerTelemetry t;
+  t.seq = 1;
+  t.mode_code = 1;  // heat
+  t.setpoint_c = 21.5f;
+  app.on_controller_telemetry(1000, t);
+  ASSERT_NEAR(app.local_heat_setpoint_c(), 21.5f, 0.01f);
+  ASSERT_NEAR(app.local_cool_setpoint_c(), 24.0f, 0.01f);
+
+  // Cool-mode telemetry → cool bin updated, heat bin preserved
+  t.seq = 2;
+  t.mode_code = 2;  // cool
+  t.setpoint_c = 22.5f;
+  app.on_controller_telemetry(8000, t);
+  ASSERT_NEAR(app.local_cool_setpoint_c(), 22.5f, 0.01f);
+  ASSERT_NEAR(app.local_heat_setpoint_c(), 21.5f, 0.01f);
 }
 #endif
