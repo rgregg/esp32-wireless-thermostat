@@ -50,6 +50,7 @@ class ControllerRuntime {
 
   void note_heartbeat(uint32_t now_ms);
   void set_hvac_lockout(bool locked_out);
+  void set_windows_open(bool open);
   void reset_remote_command_sequence();
 
   CommandApplyResult apply_remote_command(const CommandWord &cmd,
@@ -69,6 +70,7 @@ class ControllerRuntime {
 
   bool failsafe_active() const { return failsafe_active_; }
   bool hvac_lockout() const { return hvac_lockout_; }
+  bool windows_open() const { return windows_open_; }
   bool max_runtime_exceeded() const { return max_runtime_exceeded_; }
 
   bool heat_demand() const { return relay_.heat; }
@@ -113,6 +115,7 @@ class ControllerRuntime {
 
   bool hvac_lockout_ = false;
   bool failsafe_active_ = false;
+  bool windows_open_ = false;
   bool max_runtime_exceeded_ = false;
   bool spare_relay_4_ = false;
 

@@ -41,4 +41,5 @@ struct ThermostatSnapshot {
   RelayDemand relay{};
   bool hvac_lockout = false;
   bool failsafe_active = false;
+  bool windows_open = false;
 };

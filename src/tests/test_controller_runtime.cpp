@@ -639,4 +639,106 @@ TEST_CASE(controller_runtime_off_mode_does_not_overwrite_setpoints) {
   ASSERT_TRUE(rt.heat_setpoint_c() == 21.5f);
   ASSERT_TRUE(rt.cool_setpoint_c() == 24.0f);
 }
+
+TEST_CASE(controller_runtime_windows_open_suppresses_cooling) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  thermostat::ControllerRuntime rt(cfg);
+  rt.note_heartbeat(1);
+
+  CommandWord cmd;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.cool_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.cool_demand());
+
+  ASSERT_TRUE(!rt.snapshot().windows_open);
+
+  rt.set_windows_open(true);
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 2000;
+  t2.cool_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.windows_open());
+  ASSERT_TRUE(rt.snapshot().windows_open);
+  ASSERT_TRUE(!rt.cool_demand());
+
+  rt.set_windows_open(false);
+  thermostat::ControllerTickInput t3;
+  t3.now_ms = 3000;
+  t3.cool_call = true;
+  t3.has_indoor_temp = true;
+  rt.tick(t3);
+  ASSERT_TRUE(rt.cool_demand());
+}
+
+TEST_CASE(controller_runtime_windows_open_does_not_block_heat) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_heating_off_time_ms = 0;
+  cfg.min_heating_run_time_ms = 0;
+  thermostat::ControllerRuntime rt(cfg);
+  rt.note_heartbeat(1);
+
+  CommandWord cmd;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+
+  rt.set_windows_open(true);
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.heat_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.heat_demand());
+}
+
+TEST_CASE(controller_runtime_windows_open_honors_cool_min_run_time) {
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 60000;
+  thermostat::ControllerRuntime rt(cfg);
+  rt.note_heartbeat(1);
+
+  CommandWord cmd;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.cool_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.cool_demand());
+
+  rt.set_windows_open(true);
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 30000;
+  t2.cool_call = true;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(rt.cool_demand());
+
+  thermostat::ControllerTickInput t3;
+  t3.now_ms = 70000;
+  t3.cool_call = true;
+  t3.has_indoor_temp = true;
+  rt.tick(t3);
+  ASSERT_TRUE(!rt.cool_demand());
+}
 #endif
