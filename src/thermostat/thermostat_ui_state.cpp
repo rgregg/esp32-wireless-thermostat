@@ -5,7 +5,9 @@ namespace thermostat {
 std::string furnace_state_text(FurnaceStateCode state,
                                bool connected,
                                bool lockout,
-                               bool failsafe_active) {
+                               bool failsafe_active,
+                               bool windows_open,
+                               FurnaceMode mode) {
   if (failsafe_active) {
     return "Failsafe";
   }
@@ -14,6 +16,9 @@ std::string furnace_state_text(FurnaceStateCode state,
   }
   if (!connected) {
     return "Not Connected";
+  }
+  if (windows_open && mode == FurnaceMode::Cool) {
+    return "Windows Open";
   }
 
   switch (state) {
