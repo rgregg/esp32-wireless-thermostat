@@ -18,6 +18,7 @@ struct ThermostatControllerTelemetry {
   uint8_t fan_code = 0;
   float setpoint_c = 0.0f;
   uint32_t filter_runtime_seconds = 0;
+  bool windows_open = false;
 };
 
 struct EspNowThermostatConfig {
