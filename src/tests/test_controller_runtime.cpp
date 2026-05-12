@@ -741,4 +741,88 @@ TEST_CASE(controller_runtime_windows_open_honors_cool_min_run_time) {
   rt.tick(t3);
   ASSERT_TRUE(!rt.cool_demand());
 }
+
+TEST_CASE(controller_runtime_windows_open_blocks_cooling_re_entry_after_min_off) {
+  // After cooling idles, windows_open must prevent re-entry regardless of elapsed time.
+  thermostat::ControllerConfig cfg;
+  cfg.failsafe_timeout_ms = 1000000;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;  // zero so only windows_open gates re-entry
+  cfg.min_cooling_run_time_ms = 0;
+  thermostat::ControllerRuntime rt(cfg);
+  rt.note_heartbeat(1);
+
+  CommandWord cmd;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+
+  // Start cooling
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.cool_call = true;
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+  ASSERT_TRUE(rt.cool_demand());
+
+  // Set windows open — cooling stops on the next tick
+  rt.set_windows_open(true);
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 2000;
+  t2.cool_call = false;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+  ASSERT_TRUE(!rt.cool_demand());
+
+  // Plenty of time has passed (min-off-time is 0), but windows are still open
+  // — re-entry must be refused
+  thermostat::ControllerTickInput t3;
+  t3.now_ms = 999000;
+  t3.cool_call = true;
+  t3.has_indoor_temp = true;
+  rt.tick(t3);
+  ASSERT_TRUE(rt.windows_open());
+  ASSERT_TRUE(!rt.cool_demand());
+}
+
+TEST_CASE(controller_runtime_windows_open_fan_circulate_continues_in_cool_mode) {
+  // Fan-circulate must still trigger on schedule even when windows_open=true
+  // in Cool mode (windows_open only suppresses the compressor, not the fan).
+  thermostat::ControllerConfig cfg;
+  cfg.fan_circulate_period_min = 5;
+  cfg.fan_circulate_duration_min = 2;
+  cfg.min_idle_time_ms = 0;
+  cfg.min_cooling_off_time_ms = 0;
+  cfg.min_cooling_run_time_ms = 0;
+  thermostat::ControllerRuntime rt(cfg);
+
+  // Set Cool mode with Circulate fan
+  CommandWord cmd;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.fan = FanMode::Circulate;
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+
+  rt.set_windows_open(true);
+  rt.note_heartbeat(1);
+
+  // First tick — circulate period not reached yet
+  thermostat::ControllerTickInput t1;
+  t1.now_ms = 1000;
+  t1.cool_call = false;  // no cool demand (windows open)
+  t1.has_indoor_temp = true;
+  rt.tick(t1);
+
+  // Advance past circulate period (5 min = 300 s, period starts from first tick)
+  thermostat::ControllerTickInput t2;
+  t2.now_ms = 61000;  // matches the existing circulate test timing
+  t2.cool_call = false;
+  t2.has_indoor_temp = true;
+  rt.tick(t2);
+
+  // Fan should be circulating despite windows_open and despite no cool_demand
+  ASSERT_TRUE(rt.fan_demand());
+  // Cool demand must remain suppressed
+  ASSERT_TRUE(!rt.cool_demand());
+}
 #endif
