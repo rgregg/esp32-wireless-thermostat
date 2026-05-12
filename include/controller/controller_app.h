@@ -16,6 +16,7 @@ struct ControllerTelemetry {
   uint8_t mode_code = 0;  // off=0, heat=1, cool=2
   uint8_t fan_code = 0;   // auto=0, on=1, circulate=2
   float setpoint_c = 0.0f;
+  bool windows_open = false;
 };
 
 class IControllerTransport {
@@ -39,6 +40,7 @@ class ControllerApp {
                                     const uint8_t *source_mac = nullptr);
   void on_thermostat_ack(uint16_t seq);
   void set_hvac_lockout(bool locked);
+  void set_windows_open(bool open);
   void reset_remote_command_sequence();
 
   // Weather state: controller stores latest weather for MQTT publishing
