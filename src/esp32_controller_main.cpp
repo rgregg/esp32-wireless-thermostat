@@ -806,6 +806,7 @@ void ctrl_publish_discovery() {
   const String dev_id = g_cfg_base_topic + "_" + g_cfg_device_mac_compact + "_controller";
   const String dp = g_cfg_ctrl_discovery_prefix + "/";
   const String switch_topic = dp + "switch/" + dev_id + "_lockout/config";
+  const String windows_open_topic = dp + "switch/" + dev_id + "_windows_open/config";
   const String filter_topic = dp + "sensor/" + dev_id + "_filter_runtime/config";
   const String state_topic = dp + "sensor/" + dev_id + "_furnace_state/config";
   const String fw_topic = dp + "sensor/" + dev_id + "_controller_firmware/config";
@@ -868,6 +869,14 @@ void ctrl_publish_discovery() {
            "\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(switch_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Windows Open\",\"uniq_id\":\"%s_windows_open\","
+           "\"cmd_t\":\"%s/cmd/windows_open\","
+           "\"stat_t\":\"%s/state/windows_open\",\"pl_on\":\"1\",\"pl_off\":\"0\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(windows_open_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Filter Runtime\",\"uniq_id\":\"%s_filter_runtime\","
@@ -1205,6 +1214,7 @@ void ctrl_web_handle_status_get() {
     "\"fan_mode\":\"%s\","
     "\"target_temp_c\":%.1f,"
     "\"hvac_lockout\":%s,"
+    "\"windows_open\":%s,"
     "\"failsafe_active\":%s,"
     "\"espnow_connected\":%s,"
     "\"heartbeat_last_seen_ms\":%lu,"
@@ -1235,6 +1245,7 @@ void ctrl_web_handle_status_get() {
     mqtt_payload::fan_to_str(rt.fan_mode()),
     static_cast<double>(rt.target_temperature_c()),
     rt.hvac_lockout() ? "true" : "false",
+    rt.windows_open() ? "true" : "false",
     rt.failsafe_active() ? "true" : "false",
     (rt.heartbeat_last_seen_ms() > 0 && (now - rt.heartbeat_last_seen_ms()) < 30000UL) ? "true" : "false",
     static_cast<unsigned long>(rt.heartbeat_last_seen_ms()),
@@ -1312,6 +1323,7 @@ void ctrl_web_handle_root() {
   status_item(html, "Mode", "mode");
   status_item(html, "Fan", "fan_mode");
   status_item(html, "HVAC Lockout", "hvac_lockout");
+  status_item(html, "Windows Open", "windows_open");
   status_item(html, "Failsafe", "failsafe_active");
   status_item(html, "Filter Hours", "filter_runtime_hours");
   status_item(html, "Heat Relay", "relay_heat");
@@ -1584,6 +1596,8 @@ void ctrl_publish_runtime_state() {
   char buf[32];
   g_ctrl_mqtt.publish(self_topic_for("state/availability").c_str(), "online", true);
   g_ctrl_mqtt.publish(self_topic_for("state/lockout").c_str(), lockout ? "1" : "0", true);
+  g_ctrl_mqtt.publish(self_topic_for("state/windows_open").c_str(),
+                      rt.windows_open() ? "1" : "0", true);
   g_ctrl_mqtt.publish(self_topic_for("state/mode").c_str(), mode, true);
   g_ctrl_mqtt.publish(self_topic_for("state/fan_mode").c_str(), fan, true);
   {
@@ -1873,6 +1887,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   // Block lockout and HVAC commands when HA is not allowed
   if (!ha_allowed) {
     if (topic_str == self_topic_for("cmd/lockout") ||
+        topic_str == self_topic_for("cmd/windows_open") ||
         topic_str == self_topic_for("cmd/mode") ||
         topic_str == self_topic_for("cmd/fan_mode") ||
         topic_str == self_topic_for("cmd/target_temp_c") ||
@@ -1887,6 +1902,14 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     const bool new_lockout = mqtt_payload::parse_bool(value);
     ctrl_audit("lockout: %s [mqtt]", new_lockout ? "on" : "off");
     g_controller->app().set_hvac_lockout(new_lockout);
+    ctrl_publish_runtime_state();
+    return;
+  }
+
+  if (topic_str == self_topic_for("cmd/windows_open")) {
+    const bool new_value = mqtt_payload::parse_bool(value);
+    ctrl_audit("windows_open: %s [mqtt]", new_value ? "on" : "off");
+    g_controller->app().set_windows_open(new_value);
     ctrl_publish_runtime_state();
     return;
   }
@@ -2034,6 +2057,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
 
   const bool subs_ok =
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/lockout").c_str()) &&
+      g_ctrl_mqtt.subscribe(self_topic_for("cmd/windows_open").c_str()) &&
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/mode").c_str()) &&
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/fan_mode").c_str()) &&
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/target_temp_c").c_str()) &&
