@@ -48,7 +48,9 @@ class ThermostatApp {
 
   FurnaceMode local_mode() const { return local_mode_; }
   FanMode local_fan_mode() const { return local_fan_mode_; }
-  float local_setpoint_c() const { return local_setpoint_c_; }
+  float local_setpoint_c() const;
+  float local_heat_setpoint_c() const { return local_heat_setpoint_c_; }
+  float local_cool_setpoint_c() const { return local_cool_setpoint_c_; }
   bool has_controller_telemetry() const { return has_controller_telemetry_; }
   FurnaceStateCode controller_state() const { return controller_state_; }
   bool controller_lockout() const { return controller_lockout_; }
@@ -62,8 +64,16 @@ class ThermostatApp {
   static FanMode fan_from_code(uint8_t fan_code);
   static bool is_newer_u16(uint16_t previous, uint16_t incoming);
 
+  struct SendOptions {
+    bool sync_request = false;
+    bool filter_reset = false;
+    bool preserve_mode = false;
+    bool preserve_fan = false;
+    bool preserve_setpoint = false;
+  };
+
   void mark_local_interaction(uint32_t now_ms);
-  void send_command(bool do_sync, bool do_filter_reset);
+  void send_command(const SendOptions &opts);
   void ack_controller_seq(uint16_t seq);
 
   IThermostatTransport &transport_;
@@ -75,7 +85,8 @@ class ThermostatApp {
   uint16_t last_command_seq_ = 0;
   FurnaceMode local_mode_ = FurnaceMode::Off;
   FanMode local_fan_mode_ = FanMode::Automatic;
-  float local_setpoint_c_ = 20.0f;
+  float local_heat_setpoint_c_ = 20.0f;
+  float local_cool_setpoint_c_ = 24.0f;
 
   bool has_controller_telemetry_ = false;
   FurnaceStateCode controller_state_ = FurnaceStateCode::Error;

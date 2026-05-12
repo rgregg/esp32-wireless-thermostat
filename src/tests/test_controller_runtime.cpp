@@ -538,4 +538,105 @@ TEST_CASE(controller_runtime_display_mac_does_not_block_mqtt_commands) {
   cmd.seq = 2;
   ASSERT_TRUE(rt.apply_remote_command(cmd, nullptr).stale_or_duplicate);
 }
+
+TEST_CASE(controller_runtime_per_mode_setpoints_preserved_across_mode_switch) {
+  thermostat::ControllerRuntime rt;
+
+  // Heat mode at 21.0°C
+  CommandWord cmd;
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 210;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+  ASSERT_TRUE(rt.target_temperature_c() == 21.0f);
+  ASSERT_TRUE(rt.heat_setpoint_c() == 21.0f);
+
+  // Switch to cool at 23.5°C — heat bin must be preserved
+  cmd.seq = 2;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.setpoint_decic = 235;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+  ASSERT_TRUE(rt.target_temperature_c() == 23.5f);
+  ASSERT_TRUE(rt.cool_setpoint_c() == 23.5f);
+  ASSERT_TRUE(rt.heat_setpoint_c() == 21.0f);
+
+  // Switch back to heat with a stale-bin payload (e.g. 21.0) — cool bin preserved
+  cmd.seq = 3;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 210;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+  ASSERT_TRUE(rt.target_temperature_c() == 21.0f);
+  ASSERT_TRUE(rt.cool_setpoint_c() == 23.5f);
+}
+
+TEST_CASE(controller_runtime_preserve_setpoint_keeps_bins_intact) {
+  thermostat::ControllerRuntime rt;
+
+  // Seed both bins via two normal commands.
+  CommandWord cmd;
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 215;
+  rt.apply_remote_command(cmd);
+  cmd.seq = 2;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.setpoint_decic = 240;
+  rt.apply_remote_command(cmd);
+
+  // A "mode-only" command from a smart sender carries an arbitrary setpoint
+  // payload but flags preserve_setpoint=true. Bins must not change.
+  cmd.seq = 3;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 999;
+  cmd.preserve_setpoint = true;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+  ASSERT_TRUE(rt.heat_setpoint_c() == 21.5f);
+  ASSERT_TRUE(rt.cool_setpoint_c() == 24.0f);
+  ASSERT_EQ(static_cast<int>(rt.mode()), static_cast<int>(FurnaceMode::Heat));
+}
+
+TEST_CASE(controller_runtime_preserve_mode_keeps_mode_intact) {
+  thermostat::ControllerRuntime rt;
+
+  CommandWord cmd;
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 210;
+  rt.apply_remote_command(cmd);
+
+  // Setpoint-only update: preserve_mode=true keeps Heat. Setpoint routes by
+  // resolved mode (Heat), so heat_bin updates and cool_bin is untouched.
+  cmd.seq = 2;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 215;
+  cmd.preserve_mode = true;
+  cmd.preserve_setpoint = false;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+  ASSERT_EQ(static_cast<int>(rt.mode()), static_cast<int>(FurnaceMode::Heat));
+  ASSERT_TRUE(rt.heat_setpoint_c() == 21.5f);
+  ASSERT_TRUE(rt.cool_setpoint_c() == 24.0f);
+}
+
+TEST_CASE(controller_runtime_off_mode_does_not_overwrite_setpoints) {
+  thermostat::ControllerRuntime rt;
+
+  CommandWord cmd;
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 215;
+  rt.apply_remote_command(cmd);
+
+  cmd.seq = 2;
+  cmd.mode = FurnaceMode::Cool;
+  cmd.setpoint_decic = 240;
+  rt.apply_remote_command(cmd);
+
+  // Mode=Off with arbitrary setpoint payload must leave both bins intact.
+  cmd.seq = 3;
+  cmd.mode = FurnaceMode::Off;
+  cmd.setpoint_decic = 100;
+  ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+  ASSERT_TRUE(rt.heat_setpoint_c() == 21.5f);
+  ASSERT_TRUE(rt.cool_setpoint_c() == 24.0f);
+}
 #endif

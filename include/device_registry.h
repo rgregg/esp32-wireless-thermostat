@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 // Simple device registry populated from MQTT device announcements.
@@ -13,6 +14,7 @@ struct DeviceRegistryEntry {
   char type[16];  // "controller", "thermostat", etc.
   char ip[16];    // "xxx.xxx.xxx.xxx\0"
   bool occupied;
+  uint32_t last_seen_ms;  // millis() timestamp of last activity
 };
 
 static constexpr size_t kMaxRegistryEntries = 10;
@@ -21,7 +23,8 @@ struct DeviceRegistry {
   DeviceRegistryEntry entries[kMaxRegistryEntries] = {};
 
   // Add or update an entry by MAC address.  Returns true if stored.
-  bool upsert(const char *mac, const char *name, const char *type, const char *ip) {
+  bool upsert(const char *mac, const char *name, const char *type,
+              const char *ip, uint32_t now_ms = 0) {
     if (mac == nullptr || mac[0] == '\0') return false;
 
     // Look for existing entry with this MAC
@@ -30,6 +33,7 @@ struct DeviceRegistry {
         copy_field(entries[i].name, name, sizeof(entries[i].name));
         copy_field(entries[i].type, type, sizeof(entries[i].type));
         copy_field(entries[i].ip, ip, sizeof(entries[i].ip));
+        entries[i].last_seen_ms = now_ms;
         return true;
       }
     }
@@ -41,10 +45,43 @@ struct DeviceRegistry {
         copy_field(entries[i].type, type, sizeof(entries[i].type));
         copy_field(entries[i].ip, ip, sizeof(entries[i].ip));
         entries[i].occupied = true;
+        entries[i].last_seen_ms = now_ms;
         return true;
       }
     }
     return false;  // Registry full
+  }
+
+  // Update last_seen_ms for an existing entry without changing other fields.
+  // Returns true if the entry was found and updated.
+  bool touch(const char *mac, uint32_t now_ms) {
+    if (mac == nullptr || mac[0] == '\0') return false;
+    for (size_t i = 0; i < kMaxRegistryEntries; ++i) {
+      if (entries[i].occupied && strcmp(entries[i].mac, mac) == 0) {
+        entries[i].last_seen_ms = now_ms;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Remove an entry by MAC address.  Returns true if found and removed.
+  bool remove(const char *mac) {
+    if (mac == nullptr || mac[0] == '\0') return false;
+    for (size_t i = 0; i < kMaxRegistryEntries; ++i) {
+      if (entries[i].occupied && strcmp(entries[i].mac, mac) == 0) {
+        memset(&entries[i], 0, sizeof(entries[i]));
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Returns true if the entry at index is occupied and stale.
+  bool is_stale(size_t index, uint32_t now_ms, uint32_t max_age_ms) const {
+    if (index >= kMaxRegistryEntries) return false;
+    const auto &e = entries[index];
+    return e.occupied && (static_cast<uint32_t>(now_ms - e.last_seen_ms) >= max_age_ms);
   }
 
   size_t count() const {
@@ -86,6 +123,22 @@ inline bool format_mac_colons(const char *compact, char *out, size_t out_size) {
            compact[4], compact[5], compact[6], compact[7],
            compact[8], compact[9], compact[10], compact[11]);
   return true;
+}
+
+// Strip colons from a MAC address: "AA:BB:CC:DD:EE:FF" -> "AABBCCDDEEFF".
+// If the input has no colons, it is copied as-is.
+inline void mac_strip_colons(const char *mac, char *out, size_t out_size) {
+  if (mac == nullptr || out == nullptr || out_size == 0) {
+    if (out && out_size > 0) out[0] = '\0';
+    return;
+  }
+  size_t j = 0;
+  for (size_t i = 0; mac[i] != '\0' && j < out_size - 1; ++i) {
+    if (mac[i] != ':') {
+      out[j++] = mac[i];
+    }
+  }
+  out[j] = '\0';
 }
 
 // Simple JSON value extractor using strstr.

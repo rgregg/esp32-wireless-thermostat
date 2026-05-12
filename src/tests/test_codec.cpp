@@ -55,4 +55,27 @@ TEST_CASE(codec_encode_decode_clamps_and_masks_fields) {
   ASSERT_TRUE(out.filter_reset);
   ASSERT_TRUE(out.sync_request);
 }
+
+TEST_CASE(codec_preserve_flags_round_trip) {
+  CommandWord cmd;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.fan = FanMode::Automatic;
+  cmd.setpoint_decic = 210;
+  cmd.seq = 42;
+  cmd.preserve_mode = true;
+  cmd.preserve_fan = false;
+  cmd.preserve_setpoint = true;
+
+  const CommandWord out = espnow_cmd::decode(espnow_cmd::encode(cmd));
+  ASSERT_TRUE(out.preserve_mode);
+  ASSERT_TRUE(!out.preserve_fan);
+  ASSERT_TRUE(out.preserve_setpoint);
+
+  // Default-constructed CommandWord has all preserve flags false.
+  CommandWord def;
+  const CommandWord def_out = espnow_cmd::decode(espnow_cmd::encode(def));
+  ASSERT_TRUE(!def_out.preserve_mode);
+  ASSERT_TRUE(!def_out.preserve_fan);
+  ASSERT_TRUE(!def_out.preserve_setpoint);
+}
 #endif
