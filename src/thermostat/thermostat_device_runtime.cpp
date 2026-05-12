@@ -37,9 +37,11 @@ void ThermostatDeviceRuntime::on_outdoor_weather_update(float outdoor_temp_c,
 
 void ThermostatDeviceRuntime::on_controller_state_update(
     uint32_t now_ms, FurnaceStateCode state, bool lockout, FurnaceMode mode,
-    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds) {
+    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds,
+    bool windows_open) {
   display_.on_controller_state_update(now_ms, state, lockout, mode, fan,
-                                      setpoint_c, filter_runtime_seconds);
+                                      setpoint_c, filter_runtime_seconds,
+                                      windows_open);
 }
 
 void ThermostatDeviceRuntime::on_user_set_setpoint(float user_value, uint32_t now_ms) {

@@ -32,9 +32,10 @@ void ThermostatDisplayApp::on_outdoor_weather_update(float outdoor_temp_c,
 
 void ThermostatDisplayApp::on_controller_state_update(
     uint32_t now_ms, FurnaceStateCode state, bool lockout, FurnaceMode mode,
-    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds) {
+    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds,
+    bool windows_open) {
   app_.on_controller_state_update(now_ms, state, lockout, mode, fan, setpoint_c,
-                                  filter_runtime_seconds);
+                                  filter_runtime_seconds, windows_open);
   sync_from_app();
 }
 

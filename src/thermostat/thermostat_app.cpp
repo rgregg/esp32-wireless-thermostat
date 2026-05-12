@@ -52,6 +52,7 @@ void ThermostatApp::on_controller_telemetry(
   has_controller_telemetry_ = true;
   controller_state_ = telemetry.state;
   controller_lockout_ = telemetry.lockout;
+  controller_windows_open_ = telemetry.windows_open;
   controller_setpoint_c_ = telemetry.setpoint_c;
   controller_filter_runtime_seconds_ = telemetry.filter_runtime_seconds;
 
@@ -73,12 +74,14 @@ void ThermostatApp::on_controller_telemetry(
 
 void ThermostatApp::on_controller_state_update(
     uint32_t now_ms, FurnaceStateCode state, bool lockout, FurnaceMode mode,
-    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds) {
+    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds,
+    bool windows_open) {
   on_controller_heartbeat(now_ms);
 
   has_controller_telemetry_ = true;
   controller_state_ = state;
   controller_lockout_ = lockout;
+  controller_windows_open_ = windows_open;
   controller_setpoint_c_ = setpoint_c;
   controller_filter_runtime_seconds_ = filter_runtime_seconds;
 

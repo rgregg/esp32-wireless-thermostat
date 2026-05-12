@@ -76,7 +76,7 @@ TEST_CASE(thermostat_display_app_controller_state_update_pass_through) {
 
   display.on_controller_state_update(
       1000, FurnaceStateCode::CoolOn, false,
-      FurnaceMode::Cool, FanMode::Circulate, 24.0f, 3600);
+      FurnaceMode::Cool, FanMode::Circulate, 24.0f, 3600, false);
 
   // Verify state propagated through to app
   ASSERT_TRUE(app.has_controller_telemetry());

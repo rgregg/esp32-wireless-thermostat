@@ -310,6 +310,7 @@ uint32_t g_isolation_start_ms = 0;   // when both MQTT+ESP-NOW went down (0=not 
 // Shadow state for controller telemetry received via MQTT
 FurnaceStateCode g_mqtt_ctrl_state = FurnaceStateCode::Error;
 bool g_mqtt_ctrl_lockout = false;
+bool g_mqtt_ctrl_windows_open = false;
 FurnaceMode g_mqtt_ctrl_mode = FurnaceMode::Off;
 FanMode g_mqtt_ctrl_fan = FanMode::Automatic;
 float g_mqtt_ctrl_setpoint_c = 20.0f;
@@ -1741,6 +1742,9 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     } else if (topic_str == controller_topic_for("state/lockout")) {
       g_mqtt_ctrl_lockout = mqtt_payload::parse_bool(value);
       g_mqtt_ctrl_last_update_ms = now;
+    } else if (topic_str == controller_topic_for("state/windows_open")) {
+      g_mqtt_ctrl_windows_open = mqtt_payload::parse_bool(value);
+      g_mqtt_ctrl_last_update_ms = now;
     } else if (topic_str == controller_topic_for("state/filter_runtime_hours")) {
       float hours = static_cast<float>(atof(value));
       if (std::isfinite(hours) && hours >= 0.0f) {
@@ -1859,6 +1863,7 @@ void ensure_mqtt_connected(uint32_t now_ms) {
     g_mqtt.subscribe(controller_topic_for("state/target_temp_c").c_str());
     g_mqtt.subscribe(controller_topic_for("state/furnace_state").c_str());
     g_mqtt.subscribe(controller_topic_for("state/lockout").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/windows_open").c_str());
     g_mqtt.subscribe(controller_topic_for("state/filter_runtime_hours").c_str());
     g_mqtt.subscribe(controller_topic_for("state/outdoor_temp_c").c_str());
     g_mqtt.subscribe(controller_topic_for("state/weather_condition").c_str());
@@ -2907,7 +2912,8 @@ void thermostat_firmware_loop() {
     g_runtime->on_controller_state_update(
         now, g_mqtt_ctrl_state, g_mqtt_ctrl_lockout,
         g_mqtt_ctrl_mode, g_mqtt_ctrl_fan,
-        g_mqtt_ctrl_setpoint_c, g_mqtt_ctrl_filter_runtime_s);
+        g_mqtt_ctrl_setpoint_c, g_mqtt_ctrl_filter_runtime_s,
+        g_mqtt_ctrl_windows_open);
     g_mqtt_ctrl_last_applied_ms = g_mqtt_ctrl_last_update_ms;
     xSemaphoreGive(g_api_mutex);
   }
