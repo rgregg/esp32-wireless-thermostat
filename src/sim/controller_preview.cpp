@@ -313,6 +313,12 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     return;
   }
 
+  if (topic == self_topic("cmd/windows_open")) {
+    g_app->set_windows_open(mqtt_payload::parse_bool(payload.c_str()));
+    publish_controller_extras();
+    return;
+  }
+
   if (topic == self_topic("cmd/mode")) {
     FurnaceMode mode = mqtt_payload::str_to_mode(payload.c_str());
 
@@ -568,6 +574,11 @@ void draw_diagnostics_panel(int x, int y, int w, int h) {
   snprintf(buf, sizeof(buf), "Lockout: %s", g_app->runtime().hvac_lockout() ? "ACTIVE" : "OK");
   draw_text(g_font_small, x + 10, ly, buf,
             g_app->runtime().hvac_lockout() ? kColorRed : kColorGreen);
+  ly += line_height;
+
+  snprintf(buf, sizeof(buf), "Windows: %s", g_app->runtime().windows_open() ? "OPEN" : "OK");
+  draw_text(g_font_small, x + 10, ly, buf,
+            g_app->runtime().windows_open() ? kColorRed : kColorGreen);
   ly += line_height;
 
   // Filter runtime
@@ -826,6 +837,11 @@ void handle_keypress(SDL_Keycode key) {
 
     case SDLK_l:
       g_app->set_hvac_lockout(!g_app->runtime().hvac_lockout());
+      publish_controller_extras();
+      break;
+
+    case SDLK_i:
+      g_app->set_windows_open(!g_app->runtime().windows_open());
       publish_controller_extras();
       break;
 

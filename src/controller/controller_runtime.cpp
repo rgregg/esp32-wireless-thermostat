@@ -60,6 +60,13 @@ void ControllerRuntime::set_hvac_lockout(bool locked_out) {
   }
 }
 
+void ControllerRuntime::set_windows_open(bool open) {
+  if (open != windows_open_) {
+    audit("windows_open: %s [internal]", open ? "on" : "off");
+  }
+  windows_open_ = open;
+}
+
 void ControllerRuntime::reset_remote_command_sequence() {
   last_seq_default_ = 0;
   for (int i = 0; i < kMaxCommandSources; ++i) {
@@ -212,6 +219,7 @@ ThermostatSnapshot ControllerRuntime::snapshot() const {
   s.relay = relay_;
   s.hvac_lockout = hvac_lockout_;
   s.failsafe_active = failsafe_active_;
+  s.windows_open = windows_open_;
   return s;
 }
 
@@ -251,6 +259,10 @@ void ControllerRuntime::apply_hvac_calls(uint32_t now_ms, bool heat_call, bool c
     relay_.fan = false;
     equipment_delay_ = false;
     return;
+  }
+
+  if (windows_open_) {
+    cool_call = false;
   }
 
   switch (hvac_state_) {

@@ -132,7 +132,7 @@ TEST_CASE(thermostat_app_controller_state_update_sets_fields) {
   // Apply MQTT-sourced controller state
   app.on_controller_state_update(
       1000, FurnaceStateCode::HeatOn, true,
-      FurnaceMode::Heat, FanMode::AlwaysOn, 23.5f, 7200);
+      FurnaceMode::Heat, FanMode::AlwaysOn, 23.5f, 7200, false);
 
   ASSERT_TRUE(app.has_controller_telemetry());
   ASSERT_TRUE(app.controller_connected(1000, 30000));
@@ -163,7 +163,7 @@ TEST_CASE(thermostat_app_controller_state_update_respects_debounce) {
   // Controller state update within debounce window (default 5000ms)
   app.on_controller_state_update(
       3000, FurnaceStateCode::HeatOn, false,
-      FurnaceMode::Heat, FanMode::Automatic, 25.0f, 0);
+      FurnaceMode::Heat, FanMode::Automatic, 25.0f, 0, false);
 
   // Controller fields should update
   ASSERT_TRUE(app.has_controller_telemetry());
@@ -177,7 +177,7 @@ TEST_CASE(thermostat_app_controller_state_update_respects_debounce) {
   // After debounce expires, should sync
   app.on_controller_state_update(
       7000, FurnaceStateCode::Idle, false,
-      FurnaceMode::Off, FanMode::Circulate, 20.0f, 3600);
+      FurnaceMode::Off, FanMode::Circulate, 20.0f, 3600, false);
 
   ASSERT_EQ(static_cast<int>(app.local_mode()),
             static_cast<int>(FurnaceMode::Off));

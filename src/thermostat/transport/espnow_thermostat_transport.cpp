@@ -217,7 +217,8 @@ void EspNowThermostatTransport::on_recv(const uint8_t *src_mac,
         ThermostatControllerTelemetry telemetry;
         telemetry.seq = pkt->seq;
         telemetry.state = static_cast<FurnaceStateCode>(pkt->state);
-        telemetry.lockout = pkt->lockout != 0;
+        telemetry.lockout = (pkt->lockout & 0x01) != 0;
+        telemetry.windows_open = (pkt->lockout & 0x02) != 0;
         telemetry.mode_code = pkt->mode;
         telemetry.fan_code = pkt->fan;
         telemetry.setpoint_c = static_cast<float>(pkt->setpoint_decic) / 10.0f;

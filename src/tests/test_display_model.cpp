@@ -36,9 +36,11 @@ TEST_CASE(display_model_indoor_temperature_includes_degree_symbol) {
 
 TEST_CASE(ui_state_text_mapping) {
   ASSERT_TRUE(thermostat::furnace_state_text(FurnaceStateCode::Idle, true,
-                                             false, false) == "Idle");
+                                             false, false, false,
+                                             FurnaceMode::Off) == "Idle");
   ASSERT_TRUE(thermostat::furnace_state_text(FurnaceStateCode::Idle, false,
-                                             false, false) == "Not Connected");
+                                             false, false, false,
+                                             FurnaceMode::Off) == "Not Connected");
   ASSERT_TRUE(thermostat::furnace_mode_text(FurnaceMode::Cool) == "Cool");
   ASSERT_TRUE(thermostat::fan_mode_text(FanMode::Circulate) == "Circulate");
 }

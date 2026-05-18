@@ -27,7 +27,8 @@ class ThermostatApp {
                                   FurnaceMode mode,
                                   FanMode fan,
                                   float setpoint_c,
-                                  uint32_t filter_runtime_seconds);
+                                  uint32_t filter_runtime_seconds,
+                                  bool windows_open);
 
   void set_local_mode(FurnaceMode mode, uint32_t now_ms);
   void set_local_fan_mode(FanMode mode, uint32_t now_ms);
@@ -54,6 +55,7 @@ class ThermostatApp {
   bool has_controller_telemetry() const { return has_controller_telemetry_; }
   FurnaceStateCode controller_state() const { return controller_state_; }
   bool controller_lockout() const { return controller_lockout_; }
+  bool controller_windows_open() const { return controller_windows_open_; }
   float controller_setpoint_c() const { return controller_setpoint_c_; }
   uint32_t controller_filter_runtime_seconds() const {
     return controller_filter_runtime_seconds_;
@@ -91,6 +93,7 @@ class ThermostatApp {
   bool has_controller_telemetry_ = false;
   FurnaceStateCode controller_state_ = FurnaceStateCode::Error;
   bool controller_lockout_ = false;
+  bool controller_windows_open_ = false;
   float controller_setpoint_c_ = 20.0f;
   uint32_t controller_filter_runtime_seconds_ = 0;
 

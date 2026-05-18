@@ -32,9 +32,10 @@ void ThermostatDisplayApp::on_outdoor_weather_update(float outdoor_temp_c,
 
 void ThermostatDisplayApp::on_controller_state_update(
     uint32_t now_ms, FurnaceStateCode state, bool lockout, FurnaceMode mode,
-    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds) {
+    FanMode fan, float setpoint_c, uint32_t filter_runtime_seconds,
+    bool windows_open) {
   app_.on_controller_state_update(now_ms, state, lockout, mode, fan, setpoint_c,
-                                  filter_runtime_seconds);
+                                  filter_runtime_seconds, windows_open);
   sync_from_app();
 }
 
@@ -60,10 +61,14 @@ void ThermostatDisplayApp::on_user_set_fan_mode(FanMode mode, uint32_t now_ms) {
 std::string ThermostatDisplayApp::status_text(uint32_t now_ms,
                                               uint32_t connection_timeout_ms) const {
   const bool connected = app_.controller_connected(now_ms, connection_timeout_ms);
-  const bool lockout = app_.has_controller_telemetry() ? app_.controller_lockout() : false;
+  const bool has_tel = app_.has_controller_telemetry();
+  const bool lockout = has_tel ? app_.controller_lockout() : false;
+  const bool windows_open = has_tel ? app_.controller_windows_open() : false;
   const auto state =
-      app_.has_controller_telemetry() ? app_.controller_state() : FurnaceStateCode::Error;
-  return furnace_state_text(state, connected, lockout, false);
+      has_tel ? app_.controller_state() : FurnaceStateCode::Error;
+  const FurnaceMode mode = app_.local_mode();
+  return furnace_state_text(state, connected, lockout, /*failsafe_active=*/false,
+                            windows_open, mode);
 }
 
 }  // namespace thermostat

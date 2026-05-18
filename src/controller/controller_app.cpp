@@ -41,7 +41,8 @@ bool ControllerApp::telemetry_payload_changed(const ControllerTelemetry &next) c
   return next.state != last_published_.state ||
          next.filter_runtime_hours != last_published_.filter_runtime_hours ||
          next.lockout != last_published_.lockout || next.mode_code != last_published_.mode_code ||
-         next.fan_code != last_published_.fan_code || next.setpoint_c != last_published_.setpoint_c;
+         next.fan_code != last_published_.fan_code || next.setpoint_c != last_published_.setpoint_c ||
+         next.windows_open != last_published_.windows_open;
 }
 
 void ControllerApp::on_heartbeat(uint32_t now_ms) {
@@ -72,6 +73,11 @@ void ControllerApp::on_thermostat_ack(uint16_t seq) {
 
 void ControllerApp::set_hvac_lockout(bool locked) {
   runtime_.set_hvac_lockout(locked);
+  publish();
+}
+
+void ControllerApp::set_windows_open(bool open) {
+  runtime_.set_windows_open(open);
   publish();
 }
 
@@ -207,6 +213,7 @@ void ControllerApp::publish() {
   t.mode_code = mode_to_code(runtime_.mode());
   t.fan_code = fan_to_code(runtime_.fan_mode());
   t.setpoint_c = runtime_.target_temperature_c();
+  t.windows_open = runtime_.windows_open();
 
   if (!telemetry_payload_changed(t)) {
     return;  // Nothing changed — skip the send

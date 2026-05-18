@@ -150,7 +150,8 @@ void EspNowControllerTransport::publish_telemetry(
   pkt.header.version = kEspNowProtocolVersion;
   pkt.seq = telemetry.seq;
   pkt.state = static_cast<uint8_t>(telemetry.state);
-  pkt.lockout = telemetry.lockout ? 1 : 0;
+  pkt.lockout = static_cast<uint8_t>((telemetry.lockout ? 0x01 : 0x00) |
+                                   (telemetry.windows_open ? 0x02 : 0x00));
   pkt.mode = telemetry.mode_code;
   pkt.fan = telemetry.fan_code;
 

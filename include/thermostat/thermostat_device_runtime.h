@@ -30,7 +30,8 @@ class ThermostatDeviceRuntime {
                                   FurnaceMode mode,
                                   FanMode fan,
                                   float setpoint_c,
-                                  uint32_t filter_runtime_seconds);
+                                  uint32_t filter_runtime_seconds,
+                                  bool windows_open);
 
   void on_user_set_setpoint(float user_value, uint32_t now_ms);
   void on_user_set_setpoint_c(float setpoint_c, uint32_t now_ms);
