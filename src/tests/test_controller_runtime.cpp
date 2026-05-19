@@ -171,6 +171,36 @@ TEST_CASE(controller_runtime_reset_remote_command_sequence_allows_reseed) {
   ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
 }
 
+TEST_CASE(controller_runtime_sync_request_bypasses_stale_seq_check) {
+  thermostat::ControllerRuntime rt;
+  const uint8_t mac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x42};
+
+  // Establish a seq on the source
+  CommandWord cmd;
+  cmd.seq = 100;
+  cmd.mode = FurnaceMode::Heat;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).accepted);
+
+  // Send a seq well outside the 256-step "newer" window — stale.
+  CommandWord stale;
+  stale.seq = 400;
+  ASSERT_TRUE(rt.apply_remote_command(stale, mac).stale_or_duplicate);
+
+  // A sync_request at the same stale seq is accepted and reseeds the counter
+  CommandWord sync;
+  sync.seq = 400;
+  sync.sync_request = true;
+  const auto sync_result = rt.apply_remote_command(sync, mac);
+  ASSERT_TRUE(sync_result.accepted);
+  ASSERT_TRUE(sync_result.sync_requested);
+
+  // Subsequent normal commands at increasing seq from the reseeded base flow
+  CommandWord next;
+  next.seq = 401;
+  next.mode = FurnaceMode::Cool;
+  ASSERT_TRUE(rt.apply_remote_command(next, mac).accepted);
+}
+
 TEST_CASE(controller_runtime_per_source_sequence_tracking) {
   thermostat::ControllerRuntime rt;
 
