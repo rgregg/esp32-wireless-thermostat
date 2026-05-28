@@ -73,6 +73,10 @@ DeviceRegistry g_device_registry;
 bool g_ctrl_mdns_started = false;
 uint32_t g_ctrl_boot_count = 0;
 String g_ctrl_reset_reason = "unknown";
+// Cause of the firmware-initiated reboot that immediately preceded this boot,
+// recovered from NVS at startup. "none" means the last reset was not one of the
+// instrumented esp_restart() paths (power-on, panic, brownout, OTA, etc.).
+String g_ctrl_reboot_reason = "none";
 bool g_ctrl_reboot_requested = false;
 uint32_t g_ctrl_reboot_at_ms = 0;
 uint32_t g_ctrl_isolation_start_ms = 0;  // 0 = not isolated
@@ -368,7 +372,21 @@ static String get_first_display_mac() {
 }
 
 
-void ctrl_schedule_reboot() {
+// Record the cause of an imminent firmware-initiated reboot to NVS so it can be
+// read back and published after the device comes up again. Appends uptime,
+// which distinguishes a boot-loop (low uptime) from a long-running drift.
+void ctrl_persist_reboot_reason(const char *reason) {
+  if (!g_ctrl_cfg_ready || reason == nullptr) {
+    return;
+  }
+  char buf[96];
+  snprintf(buf, sizeof(buf), "%s uptime=%lus", reason,
+           static_cast<unsigned long>(millis() / 1000UL));
+  g_ctrl_cfg.putString("reboot_why", buf);
+}
+
+void ctrl_schedule_reboot(const char *reason) {
+  ctrl_persist_reboot_reason(reason);
   g_ctrl_reboot_requested = true;
   g_ctrl_reboot_at_ms = millis() + 250;
 }
@@ -776,6 +794,7 @@ void ctrl_poll_weather(uint32_t now_ms) {
     // (HTTPClient, WiFiClientSecure) since their destructors won't run.
     // Rebooting is the only safe recovery from a hung TLS call.
     ctrl_audit("ctrl_weather: task wedged, rebooting to recover");
+    ctrl_persist_reboot_reason("weather_wedge: weather task heartbeat stale");
     esp_restart();
   }
   if (!g_ctrl_weather_pending.ready.load(std::memory_order_acquire) ||
@@ -812,6 +831,12 @@ void ctrl_publish_discovery() {
   const String fw_topic = dp + "sensor/" + dev_id + "_controller_firmware/config";
   const String rssi_topic = dp + "sensor/" + dev_id + "_controller_wifi_rssi/config";
   const String heap_topic = dp + "sensor/" + dev_id + "_controller_free_heap/config";
+  const String reset_reason_topic =
+      dp + "sensor/" + dev_id + "_controller_reset_reason/config";
+  const String reboot_reason_topic =
+      dp + "sensor/" + dev_id + "_controller_reboot_reason/config";
+  const String boot_count_topic =
+      dp + "sensor/" + dev_id + "_controller_boot_count/config";
   const String last_mqtt_cmd_topic =
       dp + "sensor/" + dev_id + "_controller_last_mqtt_command/config";
   const String last_espnow_rx_topic =
@@ -914,6 +939,28 @@ void ctrl_publish_discovery() {
            "\"entity_category\":\"diagnostic\",\"en\":false,\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(heap_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Reset Reason\",\"uniq_id\":\"%s_controller_reset_reason\","
+           "\"stat_t\":\"%s/state/reset_reason\",\"entity_category\":\"diagnostic\","
+           "\"icon\":\"mdi:restart\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(reset_reason_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Reboot Cause\",\"uniq_id\":\"%s_controller_reboot_reason\","
+           "\"stat_t\":\"%s/state/reboot_reason\",\"entity_category\":\"diagnostic\","
+           "\"icon\":\"mdi:alert-circle-outline\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(reboot_reason_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Boot Count\",\"uniq_id\":\"%s_controller_boot_count\","
+           "\"stat_t\":\"%s/state/boot_count\",\"stat_cla\":\"total_increasing\","
+           "\"entity_category\":\"diagnostic\",\"icon\":\"mdi:counter\","
+           "\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(boot_count_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Last MQTT Command\",\"uniq_id\":\"%s_controller_last_mqtt_command\","
@@ -1173,7 +1220,7 @@ void ctrl_web_handle_config_post() {
 }
 
 void ctrl_web_handle_reboot_post() {
-  ctrl_schedule_reboot();
+  ctrl_schedule_reboot("scheduled: web /reboot");
   g_ctrl_web.send(200, "text/plain", "rebooting\n");
 }
 
@@ -1631,6 +1678,8 @@ void ctrl_publish_runtime_state() {
   g_ctrl_mqtt.publish(self_topic_for("state/boot_count").c_str(), buf, true);
   g_ctrl_mqtt.publish(self_topic_for("state/reset_reason").c_str(), g_ctrl_reset_reason.c_str(),
                       true);
+  g_ctrl_mqtt.publish(self_topic_for("state/reboot_reason").c_str(),
+                      g_ctrl_reboot_reason.c_str(), true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
   g_ctrl_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
@@ -1969,7 +2018,7 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     return;
   }
   if (topic_str == self_topic_for("cmd/reboot") && mqtt_payload::parse_bool(value)) {
-    ctrl_schedule_reboot();
+    ctrl_schedule_reboot("scheduled: mqtt cmd/reboot");
     return;
   }
   if (topic_str == self_topic_for("cmd/reset_sequence") && mqtt_payload::parse_bool(value)) {
@@ -2125,6 +2174,19 @@ void setup() {
     g_ctrl_cfg.putUInt("boot_cnt", g_ctrl_boot_count);
   }
   g_ctrl_reset_reason = ctrl_reset_reason_text(esp_reset_reason());
+  // Recover and clear the persisted cause of the preceding firmware reboot.
+  // Cleared after reading so an uninstrumented reset (panic/brownout/power-on)
+  // is reported as "none" rather than the stale prior cause.
+  if (g_ctrl_cfg_ready) {
+    g_ctrl_reboot_reason = g_ctrl_cfg.getString("reboot_why", "none");
+    if (g_ctrl_reboot_reason.isEmpty()) {
+      g_ctrl_reboot_reason = "none";
+    }
+    g_ctrl_cfg.remove("reboot_why");
+  }
+  Serial.printf("Reset reason: %s | last reboot cause: %s\n",
+                g_ctrl_reset_reason.c_str(), g_ctrl_reboot_reason.c_str());
+  wifi_watchdog_set_reboot_hook(&ctrl_persist_reboot_reason);
 
   thermostat::ControllerConfig controller_cfg;
   controller_cfg.failsafe_timeout_ms = 300000;
@@ -2316,6 +2378,14 @@ void loop() {
                    static_cast<unsigned long>((now - g_ctrl_isolation_start_ms) / 1000),
                    g_ctrl_mqtt.connected() ? 1 : 0,
                    static_cast<unsigned long>(hb_ms));
+        {
+          char reason[80];
+          snprintf(reason, sizeof(reason),
+                   "isolation: mqtt+espnow down %lus",
+                   static_cast<unsigned long>(
+                       (now - g_ctrl_isolation_start_ms) / 1000));
+          ctrl_persist_reboot_reason(reason);
+        }
         ESP.restart();
       }
     }

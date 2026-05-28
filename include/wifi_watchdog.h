@@ -37,6 +37,11 @@ struct State {
 
 static State g_state;
 
+// Optional hook invoked with a human-readable reason immediately before the
+// watchdog forces a reboot. Lets the application persist the cause (e.g. to
+// NVS) so it survives the reboot. No-op if unset.
+static void (*g_reboot_hook)(const char *reason) = nullptr;
+
 static void on_ping_success(esp_ping_handle_t hdl, void *args) {
     static_cast<State *>(args)->ping_got_reply = true;
 }
@@ -153,6 +158,14 @@ static void handle_ping_result(uint32_t now_ms) {
         Serial.printf("[watchdog]   reason: failure_duration=%lus reconnects=%lu\n",
                       (unsigned long)(failure_duration / 1000),
                       (unsigned long)g_state.reconnect_count);
+        if (g_reboot_hook) {
+            char reason[64];
+            snprintf(reason, sizeof(reason),
+                     "wifi_watchdog: gateway unreachable %lus reconnects=%lu",
+                     (unsigned long)(failure_duration / 1000),
+                     (unsigned long)g_state.reconnect_count);
+            g_reboot_hook(reason);
+        }
         Serial.flush();
         delay(100);
         ESP.restart();
@@ -169,6 +182,12 @@ static void handle_ping_result(uint32_t now_ms) {
 }
 
 } // namespace wifi_watchdog
+
+// Register a callback invoked with the reboot reason just before the watchdog
+// forces a reboot. Pass nullptr to disable.
+inline void wifi_watchdog_set_reboot_hook(void (*hook)(const char *reason)) {
+    wifi_watchdog::g_reboot_hook = hook;
+}
 
 // connectivity_proven: pass true when the application layer (e.g. MQTT) is
 // confirmed working — this proves WiFi is healthy, so skip the gateway ping
