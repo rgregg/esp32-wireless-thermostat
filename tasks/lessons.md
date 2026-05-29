@@ -30,3 +30,8 @@
 
 ### PubSubClient default buffer
 - Default `MQTT_MAX_PACKET_SIZE` is 256 bytes — must call `setBufferSize(1024)` for HA discovery payloads
+
+### Firmware version stamp reflects the build-time git state
+- `firmware_version` is generated from `git describe --tags --dirty` at build time.
+- If you build before committing, the binary is stamped with the *previous* commit + `-dirty`, even though it contains your uncommitted edits. The flashed code is correct but the version label is misleading.
+- **Before flashing: commit first, then (re)build, then flash** — so the embedded version matches the deployed commit. Verify with `strings firmware.bin | grep 'v[0-9]'`.
