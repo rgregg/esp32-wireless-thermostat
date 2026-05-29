@@ -246,9 +246,13 @@ static void handle_update_upload(WebServer &server) {
         ota_audit("ota_web: end failed after %u bytes", upload.totalSize);
       }
       {
+        // Restore the steady-state Task Watchdog config (keep in sync with
+        // kCtrlTaskWdtTimeoutMs / setup() in esp32_controller_main.cpp): 15s,
+        // watching both cores' idle tasks. Previously left at mask=0, which
+        // disabled the watchdog until the next reboot.
         esp_task_wdt_config_t wdt_cfg = {
-            .timeout_ms = 5000,
-            .idle_core_mask = 0,
+            .timeout_ms = 15000,
+            .idle_core_mask = 0x3,
             .trigger_panic = true,
         };
         esp_task_wdt_reconfigure(&wdt_cfg);

@@ -2812,6 +2812,21 @@ void thermostat_firmware_setup() {
     Serial.println("[web] FATAL: failed to allocate web task stack");
   }
   esp_task_wdt_add(NULL);  // register main task with TWDT
+  // Raise the Task Watchdog timeout to 15s so a bounded MQTT-connect spin (see
+  // setSocketTimeout below) can't starve the main task's esp_task_wdt_reset().
+  // idle_core_mask=0: the display's explicit main+web task registration remains
+  // the watchdog coverage (esp_task_wdt_add calls are unaffected by reconfigure).
+  {
+    esp_task_wdt_config_t wdt_cfg = {
+        .timeout_ms = 15000,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    esp_task_wdt_reconfigure(&wdt_cfg);
+  }
+  // Bound PubSubClient's connect/read busy-wait (PubSubClient.cpp:257 spins with
+  // no yield for up to socketTimeout) to 5s, well under the 15s watchdog.
+  g_mqtt.setSocketTimeout(5);
 }
 
 void thermostat_firmware_loop() {
