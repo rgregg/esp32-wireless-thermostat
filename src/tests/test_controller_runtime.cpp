@@ -1,6 +1,8 @@
 #if defined(THERMOSTAT_RUN_TESTS)
 #include "controller/controller_runtime.h"
+#include "espnow_cmd_word.h"
 #include "test_harness.h"
+#include "thermostat/thermostat_app.h"
 
 TEST_CASE(controller_runtime_failsafe_lockout) {
   thermostat::ControllerConfig cfg;
@@ -169,6 +171,91 @@ TEST_CASE(controller_runtime_reset_remote_command_sequence_allows_reseed) {
 
   rt.reset_remote_command_sequence();
   ASSERT_TRUE(rt.apply_remote_command(cmd).accepted);
+}
+
+namespace {
+// Captures packed command words emitted by ThermostatApp so a test can
+// replay them into a ControllerRuntime, exercising the full display→controller
+// command path.
+class CaptureTransport : public thermostat::IThermostatTransport {
+ public:
+  void publish_command_word(uint32_t packed_word) override { last_cmd = packed_word; }
+  void publish_controller_ack(uint16_t) override {}
+  void publish_indoor_temperature_c(float) override {}
+  void publish_indoor_humidity(float) override {}
+  uint32_t last_cmd = 0;
+};
+}  // namespace
+
+TEST_CASE(sync_button_recovers_controller_after_thermostat_reseed_regression) {
+  // End-to-end regression for the display Sync button: if the thermostat's
+  // local seq counter resets (e.g. after a task_wdt panic) while the
+  // controller's per-source last_seq stays high, normal commands look stale
+  // and are silently dropped. The Sync button must restore command flow.
+  CaptureTransport tx;
+  thermostat::ThermostatApp app(tx);
+  thermostat::ControllerRuntime rt;
+  const uint8_t mac[6] = {0x10, 0x20, 0xBA, 0x55, 0xD0, 0xE8};
+
+  // Drive the display's seq into a range where a fresh restart from seq=1
+  // falls outside the 256-step "newer" window on the controller (9-bit ring).
+  for (int i = 0; i < 200; ++i) {
+    app.set_local_mode(FurnaceMode::Heat, 1000 + i);
+    ASSERT_TRUE(rt.apply_remote_command(espnow_cmd::decode(tx.last_cmd), mac).accepted);
+  }
+
+  // Simulate display reboot: seq counter resets, controller keeps last_seq.
+  app.reset_local_command_sequence();
+
+  // First post-reboot command from the display is rejected as stale — this is
+  // the bug we're guarding against.
+  app.set_local_mode(FurnaceMode::Cool, 10000);
+  ASSERT_TRUE(rt.apply_remote_command(espnow_cmd::decode(tx.last_cmd), mac)
+                  .stale_or_duplicate);
+
+  // User taps Sync on the display. The controller must accept it and reseed
+  // its per-source counter from the incoming seq.
+  app.request_sync(10100);
+  const auto sync_result =
+      rt.apply_remote_command(espnow_cmd::decode(tx.last_cmd), mac);
+  ASSERT_TRUE(sync_result.accepted);
+  ASSERT_TRUE(sync_result.sync_requested);
+
+  // The next normal command from the display now flows through.
+  app.set_local_mode(FurnaceMode::Cool, 10200);
+  const auto post_sync = rt.apply_remote_command(espnow_cmd::decode(tx.last_cmd), mac);
+  ASSERT_TRUE(post_sync.accepted);
+  ASSERT_EQ(static_cast<int>(rt.mode()), static_cast<int>(FurnaceMode::Cool));
+}
+
+TEST_CASE(controller_runtime_sync_request_bypasses_stale_seq_check) {
+  thermostat::ControllerRuntime rt;
+  const uint8_t mac[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x42};
+
+  // Establish a seq on the source
+  CommandWord cmd;
+  cmd.seq = 100;
+  cmd.mode = FurnaceMode::Heat;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).accepted);
+
+  // Send a seq well outside the 256-step "newer" window — stale.
+  CommandWord stale;
+  stale.seq = 400;
+  ASSERT_TRUE(rt.apply_remote_command(stale, mac).stale_or_duplicate);
+
+  // A sync_request at the same stale seq is accepted and reseeds the counter
+  CommandWord sync;
+  sync.seq = 400;
+  sync.sync_request = true;
+  const auto sync_result = rt.apply_remote_command(sync, mac);
+  ASSERT_TRUE(sync_result.accepted);
+  ASSERT_TRUE(sync_result.sync_requested);
+
+  // Subsequent normal commands at increasing seq from the reseeded base flow
+  CommandWord next;
+  next.seq = 401;
+  next.mode = FurnaceMode::Cool;
+  ASSERT_TRUE(rt.apply_remote_command(next, mac).accepted);
 }
 
 TEST_CASE(controller_runtime_per_source_sequence_tracking) {
