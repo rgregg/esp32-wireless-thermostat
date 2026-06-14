@@ -33,6 +33,7 @@
 #include <WebServer.h>
 #include <esp_mac.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include "ota_web_updater.h"
 #include "controller/audit_log.h"
 #include "web/web_ui_escape.h"
@@ -81,11 +82,79 @@ bool g_ctrl_reboot_requested = false;
 uint32_t g_ctrl_reboot_at_ms = 0;
 uint32_t g_ctrl_isolation_start_ms = 0;  // 0 = not isolated
 
+// --- Task Watchdog breadcrumb -----------------------------------------------
+// A hard Task-WDT panic doesn't run our reboot hook, so reboot_reason stays
+// "none". To learn *which* blocking network call was running when the watchdog
+// fired, stamp a breadcrumb into RTC_NOINIT memory (survives a watchdog/panic/SW
+// reset, but not power-on/brownout) before each blocking call and clear it
+// after. On the next boot we recover and publish it alongside reset_reason.
+enum CtrlBlockingSection : uint32_t {
+  kCtrlSectionNone = 0,
+  kCtrlSectionWeatherGeocode = 1,
+  kCtrlSectionWeatherForecast = 2,
+  kCtrlSectionMqttConnect = 3,
+  kCtrlSectionMdns = 4,
+};
+constexpr uint32_t kCtrlBreadcrumbMagic = 0x57445443u;  // 'WDTC'
+constexpr size_t kCtrlCoreCount = 2;  // dual-core ESP32
+RTC_NOINIT_ATTR static uint32_t g_ctrl_breadcrumb_magic;
+// One slot per core (indexed by xPortGetCoreID) so the weather task (core 0) and
+// the main loop / MQTT path (core 1) never race on a shared word. Each core only
+// writes its own slot, so the recovered breadcrumb is unambiguous.
+RTC_NOINIT_ATTR static volatile uint32_t g_ctrl_breadcrumb_section[kCtrlCoreCount];
+// Per-core section active at the prior boot's reset, captured once at boot.
+// "none" if the reset happened outside any instrumented blocking call (or power-on).
+String g_ctrl_wdt_section = "none";
+
+static inline void ctrl_breadcrumb_set(CtrlBlockingSection s) {
+  g_ctrl_breadcrumb_section[xPortGetCoreID()] = static_cast<uint32_t>(s);
+}
+static inline void ctrl_breadcrumb_clear() {
+  g_ctrl_breadcrumb_section[xPortGetCoreID()] = static_cast<uint32_t>(kCtrlSectionNone);
+}
+static const char *ctrl_breadcrumb_text(uint32_t s) {
+  switch (s) {
+    case kCtrlSectionWeatherGeocode: return "weather_geocode";
+    case kCtrlSectionWeatherForecast: return "weather_forecast";
+    case kCtrlSectionMqttConnect: return "mqtt_connect";
+    case kCtrlSectionMdns: return "mdns";
+    default: return "none";
+  }
+}
+// Recover the breadcrumb left by a prior boot. Call once in setup(). On power-on
+// the RTC magic is invalid (garbage), so we initialize instead of reading.
+static void ctrl_breadcrumb_recover_on_boot() {
+  if (g_ctrl_breadcrumb_magic != kCtrlBreadcrumbMagic) {
+    g_ctrl_breadcrumb_magic = kCtrlBreadcrumbMagic;
+    g_ctrl_wdt_section = "none";
+  } else if (g_ctrl_breadcrumb_section[0] == kCtrlSectionNone &&
+             g_ctrl_breadcrumb_section[1] == kCtrlSectionNone) {
+    g_ctrl_wdt_section = "none";
+  } else {
+    g_ctrl_wdt_section = String("core0=") +
+                         ctrl_breadcrumb_text(g_ctrl_breadcrumb_section[0]) +
+                         " core1=" + ctrl_breadcrumb_text(g_ctrl_breadcrumb_section[1]);
+  }
+  for (size_t i = 0; i < kCtrlCoreCount; ++i) {
+    g_ctrl_breadcrumb_section[i] = static_cast<uint32_t>(kCtrlSectionNone);
+  }
+}
+
 constexpr uint32_t kCtrlNetworkRetryMs = 5000;
 constexpr uint32_t kCtrlMqttPublishMs = 10000;
 constexpr uint32_t kCtrlMqttPrimaryHoldMs = 30000;
 constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
-constexpr uint32_t kCtrlHttpTimeoutMs = 8000;
+// Per-phase HTTP timeout (connect+handshake and read). Kept well below the Task
+// Watchdog timeout (kCtrlTaskWdtTimeoutMs) so a stalled fetch aborts long before
+// the watchdog would panic.
+constexpr uint32_t kCtrlHttpTimeoutMs = 4000;
+// Steady-state Task Watchdog timeout. Set explicitly in setup() (and mirrored in
+// ota_web_updater.cpp's post-OTA restore) so behavior is deterministic regardless
+// of the Arduino default. Must exceed every synchronous network timeout above.
+constexpr uint32_t kCtrlTaskWdtTimeoutMs = 15000;
+// PubSubClient socket timeout (seconds). Below the watchdog so a stuck MQTT
+// connect/read aborts before a panic.
+constexpr uint8_t kCtrlMqttSocketTimeoutS = 5;
 // Reboot if both MQTT and ESP-NOW have been silent for this long.
 // Covers wedged network-stack states that the WiFi watchdog ping doesn't catch.
 constexpr uint32_t kCtrlIsolationRebootMs = 15UL * 60UL * 1000UL;
@@ -660,13 +729,17 @@ bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out)
     return false;
   }
   http.setTimeout(kCtrlHttpTimeoutMs);
+  http.setConnectTimeout(kCtrlHttpTimeoutMs);
+  ctrl_breadcrumb_set(kCtrlSectionWeatherGeocode);
   const int status = http.GET();
   if (status != 200) {
+    ctrl_breadcrumb_clear();
     ctrl_audit("weather: geocode HTTP %d for zip %s", status, zip);
     http.end();
     return false;
   }
   const String body = http.getString();
+  ctrl_breadcrumb_clear();
   http.end();
   return pirateweather::parse_geocode_response(body.c_str(), lat_out, lon_out);
 }
@@ -687,13 +760,17 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, const char *api_key,
     return false;
   }
   http.setTimeout(kCtrlHttpTimeoutMs);
+  http.setConnectTimeout(kCtrlHttpTimeoutMs);
+  ctrl_breadcrumb_set(kCtrlSectionWeatherForecast);
   const int status = http.GET();
   if (status != 200) {
+    ctrl_breadcrumb_clear();
     ctrl_audit("weather: forecast HTTP %d", status);
     http.end();
     return false;
   }
   const String body = http.getString();
+  ctrl_breadcrumb_clear();
   http.end();
   return pirateweather::parse_forecast_response(body.c_str(), temp_c_out,
                                                 icon_out);
@@ -835,6 +912,8 @@ void ctrl_publish_discovery() {
       dp + "sensor/" + dev_id + "_controller_reset_reason/config";
   const String reboot_reason_topic =
       dp + "sensor/" + dev_id + "_controller_reboot_reason/config";
+  const String wdt_section_topic =
+      dp + "sensor/" + dev_id + "_controller_wdt_section/config";
   const String boot_count_topic =
       dp + "sensor/" + dev_id + "_controller_boot_count/config";
   const String last_mqtt_cmd_topic =
@@ -953,6 +1032,13 @@ void ctrl_publish_discovery() {
            "\"icon\":\"mdi:alert-circle-outline\",\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(reboot_reason_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller WDT Section\",\"uniq_id\":\"%s_controller_wdt_section\","
+           "\"stat_t\":\"%s/state/wdt_section\",\"entity_category\":\"diagnostic\","
+           "\"icon\":\"mdi:map-marker-path\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(wdt_section_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Boot Count\",\"uniq_id\":\"%s_controller_boot_count\","
@@ -1680,6 +1766,8 @@ void ctrl_publish_runtime_state() {
                       true);
   g_ctrl_mqtt.publish(self_topic_for("state/reboot_reason").c_str(),
                       g_ctrl_reboot_reason.c_str(), true);
+  g_ctrl_mqtt.publish(self_topic_for("state/wdt_section").c_str(),
+                      g_ctrl_wdt_section.c_str(), true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
   g_ctrl_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
@@ -2090,6 +2178,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
 
   bool ok = false;
   String will_topic = self_topic_for("state/availability");
+  ctrl_breadcrumb_set(kCtrlSectionMqttConnect);
   if (g_cfg_ctrl_mqtt_user.length() == 0) {
     ok = g_ctrl_mqtt.connect(g_cfg_ctrl_mqtt_client_id.c_str(),
                              will_topic.c_str(), 1, true, "offline");
@@ -2098,6 +2187,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
                              g_cfg_ctrl_mqtt_user.c_str(), g_cfg_ctrl_mqtt_password.c_str(),
                              will_topic.c_str(), 1, true, "offline");
   }
+  ctrl_breadcrumb_clear();
   if (!ok) {
     g_ctrl_last_mqtt_error = String("connect_state_") + String(g_ctrl_mqtt.state());
     return;
@@ -2154,7 +2244,10 @@ void ctrl_ensure_mdns_ready() {
   }
   const char *host = g_cfg_ctrl_hostname.length() > 0 ? g_cfg_ctrl_hostname.c_str()
                                                            : "furnace-controller";
-  if (MDNS.begin(host)) {
+  ctrl_breadcrumb_set(kCtrlSectionMdns);
+  const bool mdns_ok = MDNS.begin(host);
+  ctrl_breadcrumb_clear();
+  if (mdns_ok) {
     MDNS.addService("http", "tcp", 80);
     g_ctrl_mdns_started = true;
   }
@@ -2174,6 +2267,10 @@ void setup() {
     g_ctrl_cfg.putUInt("boot_cnt", g_ctrl_boot_count);
   }
   g_ctrl_reset_reason = ctrl_reset_reason_text(esp_reset_reason());
+  // Recover which instrumented blocking call (if any) was running when the
+  // preceding reset occurred. Surfaced via state/wdt_section to diagnose
+  // task_wdt panics that leave reboot_reason="none".
+  ctrl_breadcrumb_recover_on_boot();
   // Recover and clear the persisted cause of the preceding firmware reboot.
   // Cleared after reading so an uninstrumented reset (panic/brownout/power-on)
   // is reported as "none" rather than the stale prior cause.
@@ -2187,6 +2284,20 @@ void setup() {
   Serial.printf("Reset reason: %s | last reboot cause: %s\n",
                 g_ctrl_reset_reason.c_str(), g_ctrl_reboot_reason.c_str());
   wifi_watchdog_set_reboot_hook(&ctrl_persist_reboot_reason);
+
+  // Make the Task Watchdog config deterministic regardless of the Arduino
+  // default: 15s timeout, watch both cores' idle tasks, panic on timeout. Every
+  // synchronous network timeout (HTTP, MQTT) is kept below this. Mirrored by
+  // ota_web_updater.cpp's post-OTA restore.
+  {
+    esp_task_wdt_config_t wdt_cfg = {
+        .timeout_ms = kCtrlTaskWdtTimeoutMs,
+        .idle_core_mask = 0x3,  // both cores (dual-core ESP32)
+        .trigger_panic = true,
+    };
+    esp_task_wdt_reconfigure(&wdt_cfg);
+  }
+  g_ctrl_mqtt.setSocketTimeout(kCtrlMqttSocketTimeoutS);
 
   thermostat::ControllerConfig controller_cfg;
   controller_cfg.failsafe_timeout_ms = 300000;
@@ -2295,6 +2406,10 @@ void setup() {
   g_relay_io.begin();
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
+  if (g_ctrl_wdt_section != "none") {
+    ctrl_audit("prev reset in blocking section: %s (reset=%s)",
+               g_ctrl_wdt_section.c_str(), g_ctrl_reset_reason.c_str());
+  }
   ota_rollback_begin();
 
   // Web server task on Core 0: handles HTTP requests without blocking the
