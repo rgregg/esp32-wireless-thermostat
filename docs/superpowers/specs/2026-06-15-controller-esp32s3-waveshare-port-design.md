@@ -70,7 +70,8 @@ else is shared. Selected via PlatformIO env + build flag (e.g. `-D CONTROLLER_BO
 | IP link | `WiFiStation` backend (associates to AP) | `Ethernet` (W5500) backend |
 | ESP-NOW | WiFi radio, AP-driven channel | WiFi radio, no association, pinned channel |
 | Partitions | `partitions_no_spiffs.csv` (4 MB) | custom 16 MB + coredump |
-| Coredump | unavailable (no partition) | enabled |
+| Panic-PC breadcrumb (RTC) | available | available |
+| Full coredump (flash) | unavailable (no partition) | enabled |
 | **Shared** | control loop, thermostat logic, resilience refactor, ESP-NOW protocol, MQTT/HA discovery, weather, relay interlock logic (`ControllerRelayIo`) | same |
 
 Note: the networking *model* (Ethernet-for-IP + WiFi-for-ESP-NOW-only) applies to
@@ -127,12 +128,23 @@ weather layers board-agnostic.
   (it doesn't reset when the ESP32 does) — deliberately chosen so a watchdog
   reboot doesn't drop an active heat/cool call. Document and make explicit.
 
-### 4. Coredump
-- Custom **16 MB partition table** with a dedicated **coredump partition**
-  (plus app/OTA/NVS). Enable `esp_core_dump` to flash, panic-triggered.
-- On boot, read the coredump **summary** (faulting PC + backtrace), **publish it
-  over MQTT** alongside `wdt_section` (new `state/coredump` topic + HA diagnostic
-  sensor), then clear the partition. This finally surfaces the panic backtrace.
+### 4. Crash diagnostics (unified — three layers)
+A single crash-visibility story, layered by what each board can hold:
+
+1. **`wdt_section` breadcrumb (existing, both boards):** names the instrumented
+   blocking section (weather geocode/forecast, mqtt connect, mdns) active at a
+   watchdog reset. RTC_NOINIT memory.
+2. **Panic-PC breadcrumb (new, both boards):** a custom panic-handler hook stashes
+   the **faulting PC + a few backtrace addresses** into RTC_NOINIT memory (survives
+   panic/reset, same mechanism as the existing breadcrumb), published on next boot
+   via a new `state/panic_pc` topic + HA diagnostic sensor, then cleared. Resolve
+   offline with `addr2line` against the matching build `.elf` (rebuildable from the
+   firmware_version git sha). Gives the **old 4 MB board** crash *localization*
+   without needing a coredump partition.
+3. **Full coredump (new board only):** custom 16 MB partition table with a
+   dedicated coredump partition; `esp_core_dump` to flash, panic-triggered. On boot
+   read the summary (PC + backtrace + registers/stack), publish over MQTT
+   (`state/coredump`), then clear. The complete dump the 4 MB board can't hold.
 
 ### 5. Identity & migration
 - **Override the discovery device id / base** so HA continues to see the same
@@ -146,7 +158,7 @@ weather layers board-agnostic.
 ### 6. Testing
 - **Native unit tests:** relay bit-logic; resilience state machines (link up/down,
   network-task restart, degradation tiers); IP-link selection; coredump-record
-  parsing.
+  parsing; panic-PC breadcrumb encode/decode/format.
 - **Hardware validation checklist (Phase 2):** relay **safe state at power-on**
   (multimeter COM→NO before wiring to HVAC), Ethernet link + DHCP, ESP-NOW channel
   match with display, coredump capture→publish→clear round-trip, OTA on the new
