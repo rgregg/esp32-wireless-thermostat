@@ -10,6 +10,7 @@
 #include "controller/controller_node.h"
 #include "controller/pirateweather.h"
 #include "controller/gpio_relay_backend.h"
+#include "controller/panic_breadcrumb_hook.h"
 #include "weather_icon.h"
 #include "command_builder.h"
 #include "espnow_cmd_word.h"
@@ -107,6 +108,7 @@ RTC_NOINIT_ATTR static volatile uint32_t g_ctrl_breadcrumb_section[kCtrlCoreCoun
 // Per-core section active at the prior boot's reset, captured once at boot.
 // "none" if the reset happened outside any instrumented blocking call (or power-on).
 String g_ctrl_wdt_section = "none";
+String g_ctrl_panic_pc = "none";
 
 static inline void ctrl_breadcrumb_set(CtrlBlockingSection s) {
   g_ctrl_breadcrumb_section[xPortGetCoreID()] = static_cast<uint32_t>(s);
@@ -916,6 +918,8 @@ void ctrl_publish_discovery() {
       dp + "sensor/" + dev_id + "_controller_reboot_reason/config";
   const String wdt_section_topic =
       dp + "sensor/" + dev_id + "_controller_wdt_section/config";
+  const String panic_pc_topic =
+      dp + "sensor/" + dev_id + "_controller_panic_pc/config";
   const String boot_count_topic =
       dp + "sensor/" + dev_id + "_controller_boot_count/config";
   const String last_mqtt_cmd_topic =
@@ -1041,6 +1045,13 @@ void ctrl_publish_discovery() {
            "\"icon\":\"mdi:map-marker-path\",\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(wdt_section_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Panic PC\",\"uniq_id\":\"%s_controller_panic_pc\","
+           "\"stat_t\":\"%s/state/panic_pc\",\"entity_category\":\"diagnostic\","
+           "\"icon\":\"mdi:bug\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(panic_pc_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Boot Count\",\"uniq_id\":\"%s_controller_boot_count\","
@@ -1770,6 +1781,8 @@ void ctrl_publish_runtime_state() {
                       g_ctrl_reboot_reason.c_str(), true);
   g_ctrl_mqtt.publish(self_topic_for("state/wdt_section").c_str(),
                       g_ctrl_wdt_section.c_str(), true);
+  g_ctrl_mqtt.publish(self_topic_for("state/panic_pc").c_str(),
+                      g_ctrl_panic_pc.c_str(), true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
   g_ctrl_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
@@ -2273,6 +2286,11 @@ void setup() {
   // preceding reset occurred. Surfaced via state/wdt_section to diagnose
   // task_wdt panics that leave reboot_reason="none".
   ctrl_breadcrumb_recover_on_boot();
+  {
+    char panic_buf[160];
+    thermostat::panic_breadcrumb_recover_on_boot(panic_buf, sizeof(panic_buf));
+    g_ctrl_panic_pc = panic_buf;
+  }
   // Recover and clear the persisted cause of the preceding firmware reboot.
   // Cleared after reading so an uninstrumented reset (panic/brownout/power-on)
   // is reported as "none" rather than the stale prior cause.
