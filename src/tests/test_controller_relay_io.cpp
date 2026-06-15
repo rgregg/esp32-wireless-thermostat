@@ -1,12 +1,44 @@
 #if defined(THERMOSTAT_RUN_TESTS)
 #include "controller/controller_relay_io.h"
+#include "controller/relay_backend.h"
 #include "test_harness.h"
+
+namespace {
+class FakeRelayBackend : public thermostat::RelayBackend {
+ public:
+  void begin() override { begin_calls++; }
+  void write(const RelayDemand &out) override { last = out; writes++; }
+  RelayDemand last{};
+  int writes = 0;
+  int begin_calls = 0;
+};
+}  // namespace
+
+TEST_CASE(controller_relay_io_delegates_writes_to_backend) {
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend);
+  io.begin();
+  ASSERT_EQ(backend.begin_calls, 1);
+
+  RelayDemand heat;
+  heat.heat = true;
+  io.apply(0, heat, false);
+  ASSERT_TRUE(backend.last.heat);
+  ASSERT_TRUE(!backend.last.cool);
+
+  io.apply(1, heat, true);
+  ASSERT_TRUE(!backend.last.heat);
+  ASSERT_TRUE(!backend.last.cool);
+  ASSERT_TRUE(!backend.last.fan);
+  ASSERT_TRUE(!backend.last.spare);
+}
 
 TEST_CASE(controller_relay_io_interlock_waits_before_switch) {
   thermostat::ControllerRelayIoConfig cfg;
   cfg.heat_interlock_wait_ms = 500;
   cfg.default_interlock_wait_ms = 1000;
-  thermostat::ControllerRelayIo io(cfg);
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend, cfg);
   io.begin();
 
   RelayDemand heat;
@@ -25,7 +57,8 @@ TEST_CASE(controller_relay_io_interlock_waits_before_switch) {
 }
 
 TEST_CASE(controller_relay_io_force_off_clears_immediately) {
-  thermostat::ControllerRelayIo io;
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend);
   io.begin();
 
   RelayDemand fan;
@@ -45,7 +78,8 @@ TEST_CASE(controller_relay_io_pending_accessors_during_interlock) {
   thermostat::ControllerRelayIoConfig cfg;
   cfg.heat_interlock_wait_ms = 500;
   cfg.default_interlock_wait_ms = 1000;
-  thermostat::ControllerRelayIo io(cfg);
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend, cfg);
   io.begin();
 
   // Initially no pending state
@@ -85,7 +119,8 @@ TEST_CASE(controller_relay_io_pending_accessors_during_interlock) {
 TEST_CASE(controller_relay_io_force_off_cancels_pending) {
   thermostat::ControllerRelayIoConfig cfg;
   cfg.default_interlock_wait_ms = 1000;
-  thermostat::ControllerRelayIo io(cfg);
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend, cfg);
   io.begin();
 
   // Activate heat, then request cool to start interlock
@@ -109,7 +144,8 @@ TEST_CASE(controller_relay_io_force_off_cancels_pending) {
 TEST_CASE(controller_relay_io_same_relay_no_interlock) {
   thermostat::ControllerRelayIoConfig cfg;
   cfg.default_interlock_wait_ms = 1000;
-  thermostat::ControllerRelayIo io(cfg);
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend, cfg);
   io.begin();
 
   // Activate heat
@@ -128,7 +164,8 @@ TEST_CASE(controller_relay_io_demand_change_mid_interlock) {
   thermostat::ControllerRelayIoConfig cfg;
   cfg.heat_interlock_wait_ms = 500;
   cfg.default_interlock_wait_ms = 1000;
-  thermostat::ControllerRelayIo io(cfg);
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend, cfg);
   io.begin();
 
   // Start with heat active
@@ -165,7 +202,8 @@ TEST_CASE(controller_relay_io_heat_uses_shorter_interlock) {
   thermostat::ControllerRelayIoConfig cfg;
   cfg.heat_interlock_wait_ms = 500;
   cfg.default_interlock_wait_ms = 1000;
-  thermostat::ControllerRelayIo io(cfg);
+  FakeRelayBackend backend;
+  thermostat::ControllerRelayIo io(backend, cfg);
   io.begin();
 
   // Start with cool active

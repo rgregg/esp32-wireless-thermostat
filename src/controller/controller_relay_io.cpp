@@ -1,25 +1,9 @@
 #include "controller/controller_relay_io.h"
 
-#if defined(ARDUINO)
-#include <Arduino.h>
-#endif
-
 namespace thermostat {
 
-namespace {
-
-bool relay_on_level(bool inverted) { return !inverted; }
-bool relay_off_level(bool inverted) { return inverted; }
-
-}  // namespace
-
 void ControllerRelayIo::begin() {
-#if defined(ARDUINO)
-  pinMode(config_.heat_pin, OUTPUT);
-  pinMode(config_.cool_pin, OUTPUT);
-  pinMode(config_.fan_pin, OUTPUT);
-  pinMode(config_.spare_pin, OUTPUT);
-#endif
+  backend_.begin();
   write_outputs(RelayDemand{});
   initialized_ = true;
   active_ = RelaySelect::None;
@@ -69,14 +53,7 @@ RelayDemand ControllerRelayIo::to_demand(RelaySelect relay) const {
 
 void ControllerRelayIo::write_outputs(const RelayDemand &out) {
   output_ = out;
-#if defined(ARDUINO)
-  const bool on = relay_on_level(config_.inverted);
-  const bool off = relay_off_level(config_.inverted);
-  digitalWrite(config_.heat_pin, out.heat ? on : off);
-  digitalWrite(config_.cool_pin, out.cool ? on : off);
-  digitalWrite(config_.fan_pin, out.fan ? on : off);
-  digitalWrite(config_.spare_pin, out.spare ? on : off);
-#endif
+  backend_.write(out);
 }
 
 void ControllerRelayIo::apply(uint32_t now_ms, const RelayDemand &desired, bool force_off) {
