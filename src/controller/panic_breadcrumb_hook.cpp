@@ -1,8 +1,6 @@
 #include "controller/panic_breadcrumb_hook.h"
 
 #if defined(ARDUINO)
-#include <Arduino.h>
-
 #include "controller/panic_breadcrumb.h"
 #include "esp_attr.h"
 #include "esp32-hal.h"  // set_arduino_panic_handler, arduino_panic_info_t
@@ -31,8 +29,16 @@ void on_panic(arduino_panic_info_t *info, void * /*arg*/) {
   }
 }
 
-// Register the handler at static-init time so panics during early setup()
-// are captured even before panic_breadcrumb_recover_on_boot() is called.
+// Why set_arduino_panic_handler() instead of -Wl,--wrap=esp_panic_handler:
+// Arduino-ESP32 already defines __wrap_esp_panic_handler internally and
+// exposes set_arduino_panic_handler() as the official single-callback
+// extension point.  Adding our own --wrap would cause a multiple-definition
+// link error.  Caveat: set_arduino_panic_handler keeps only ONE callback, so
+// a later registration by any library would silently replace ours.  That is
+// acceptable here — no other panic-hooking components exist in this project.
+//
+// Register at static-init time so panics during early setup() are captured
+// even before panic_breadcrumb_recover_on_boot() is called.
 __attribute__((constructor)) void register_panic_hook() {
   set_arduino_panic_handler(on_panic, nullptr);
 }
