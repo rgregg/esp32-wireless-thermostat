@@ -47,5 +47,26 @@ TEST_CASE(panic_breadcrumb_depth_is_clamped) {
   int commas = 0;
   for (const char *p = out; *p; ++p) if (*p == ',') commas++;
   ASSERT_EQ(commas, static_cast<int>(thermostat::kPanicBacktraceDepth) - 1);
+  ASSERT_TRUE(strncmp(out, "core0 pc=0x00000001 bt=", 23) == 0);
+}
+
+TEST_CASE(panic_breadcrumb_format_tiny_buffer_is_safe) {
+  // out_len == 1 must never write past the buffer; result is a valid empty C-string.
+  PanicBreadcrumb present{};
+  present.magic = thermostat::kPanicBreadcrumbMagic;
+  present.pc = 0x400d1234;
+  char one[1] = {'X'};
+  thermostat::panic_breadcrumb_format(present, one, sizeof(one));
+  ASSERT_EQ(one[0], '\0');
+
+  // A mid-format truncation must still leave a null-terminated string.
+  char small[8] = {0};
+  thermostat::panic_breadcrumb_format(present, small, sizeof(small));
+  ASSERT_EQ(small[sizeof(small) - 1], '\0');
+
+  // out_len == 0 must not touch the buffer at all.
+  char guard[2] = {'A', 'B'};
+  thermostat::panic_breadcrumb_format(present, guard, 0);
+  ASSERT_EQ(guard[0], 'A');
 }
 #endif  // THERMOSTAT_RUN_TESTS
