@@ -9,6 +9,7 @@
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
 #include "controller/pirateweather.h"
+#include "controller/gpio_relay_backend.h"
 #include "weather_icon.h"
 #include "command_builder.h"
 #include "espnow_cmd_word.h"
@@ -42,7 +43,8 @@
 #include "mac_address_utils.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
-thermostat::ControllerRelayIo g_relay_io;
+thermostat::GpioRelayBackend g_relay_backend;          // defaults: pins 32/33/25/26, non-inverted
+thermostat::ControllerRelayIo g_relay_io(g_relay_backend);
 thermostat::AuditLog g_audit_log;
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
