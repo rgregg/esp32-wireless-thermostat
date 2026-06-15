@@ -59,6 +59,26 @@ Rejected: S3-only hard switch (no fallback, can't land resilience on the current
 board now); separate branch per subsystem (resilience and Ethernet both touch the
 network layer → merge friction).
 
+## Build configuration (one codebase, two boards)
+
+Board differences are isolated behind compile-time-selected backends; everything
+else is shared. Selected via PlatformIO env + build flag (e.g. `-D CONTROLLER_BOARD_S3`).
+
+| Concern | `esp32-furnace-controller` (old, esp32dev / 4 MB) | `esp32-furnace-controller-s3` (new, S3 / 16 MB) |
+|---|---|---|
+| Relay backend | `GpioRelayBackend` (direct GPIO) | `Pca9554RelayBackend` (I²C @0x20) |
+| IP link | `WiFiStation` backend (associates to AP) | `Ethernet` (W5500) backend |
+| ESP-NOW | WiFi radio, AP-driven channel | WiFi radio, no association, pinned channel |
+| Partitions | `partitions_no_spiffs.csv` (4 MB) | custom 16 MB + coredump |
+| Coredump | unavailable (no partition) | enabled |
+| **Shared** | control loop, thermostat logic, resilience refactor, ESP-NOW protocol, MQTT/HA discovery, weather, relay interlock logic (`ControllerRelayIo`) | same |
+
+Note: the networking *model* (Ethernet-for-IP + WiFi-for-ESP-NOW-only) applies to
+the **new** board only; the old board has no Ethernet and necessarily keeps
+WiFi-station association for IP. The `IP-link` abstraction (§2) resolves to
+`WiFiStation` on the old board and `Ethernet` on the new one, keeping the MQTT/
+weather layers board-agnostic.
+
 ## Design
 
 ### 1. Hardware abstraction — relays
