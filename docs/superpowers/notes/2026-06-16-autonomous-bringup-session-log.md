@@ -79,3 +79,14 @@ scheduling feature autonomously. Flagging for review.
   network path substantially — I'll bring up Ethernet standalone first (validating now),
   then propose the integration rather than rewrite the live network path unsupervised.
 - **Coredump (16MB partition) + identity override + cutover** — later.
+
+### F6 — W5500 wired Ethernet VALIDATED on real hardware ✅  (the core value prop)
+`ETH.begin(ETH_PHY_W5500, phy_addr=1, CS=16, IRQ=12, RST=-1, SPI2_HOST, SCK=15, MISO=14,
+MOSI=13)` returns ok; link comes up and **DHCP gets an IP**: serial trace showed
+`linkUp=1 IP=10.0.2.43 speed=100Mbps FD mac=3A:0F:02:CC:EE:2D` (took ~6s from boot to
+lease). RST pin = **-1 works** (no dedicated reset needed; W5500 self-resets). This is
+the whole reason for the port — a wired link to end the marginal-WiFi reboots — and it
+works on the real board. Bench sketch `src/bench/waveshare_eth_validate.cpp`, env
+`waveshare-eth-validate` (hybrid build — the ETH/Network stack needs the IDF source
+rebuild, same as the panic-wrap path). Note: bench LAN handed out 10.0.2.x; production
+will be on the user's normal LAN. MAC is chip-MAC+derived (locally administered).
