@@ -32,13 +32,14 @@ channel, see §6).
 
 ## Target hardware
 
-**Waveshare ESP32-S3-ETH-8DI-8RO-C** — ESP32-S3-WROOM-1U **N16R8** (16 MB flash,
-8 MB PSRAM). Pin map (from vendor/community docs; **re-verify against the exact
-SKU when hardware arrives** — the CAN variant may differ on the RS485/CAN bus,
-but relay/Ethernet/DI pins are the shared base):
+**Waveshare ESP32-S3-ETH-8DI-8RO-C** — ESP32-S3-WROOM-1U **N16R8** (CONFIRMED on
+hardware: 16 MB flash, 8 MB PSRAM, MAC 3c:0f:02:cc:ee:2c).
 
-- **Relays (8):** PCA9554 I²C expander @ `0x20`, pins 0–7, **active-high**. I²C `SDA=42, SCL=41`.
-- **Ethernet:** W5500 over SPI — `CLK=15, MOSI=13, MISO=14, CS=16, INT=12` (RST: verify).
+- **Relays (8):** PCA9554 I²C expander @ `0x20`, **active-high** — **VERIFIED on
+  hardware** (bring-up: relay N = bit `1<<N`; boot-safe state confirmed off). I²C `SDA=42, SCL=41`.
+- **RTC:** **PCF85063** @ I²C `0x51` (same bus) — **found on hardware.** Battery/supercap
+  backed timekeeping; see §7.
+- **Ethernet:** W5500 over SPI — `CLK=15, MOSI=13, MISO=14, CS=16, INT=12` (RST: verify on hardware).
 - **Digital inputs (8):** GPIO 4–11, `INPUT_PULLUP`, inverted, debounced (reserved, unused).
 - **Misc:** RGB LED (WS2812) GPIO38, buzzer GPIO46, boot button GPIO0.
 - **Power:** 7–36 V DC screw terminal, USB-C (power/flash/debug), PoE (this SKU).
@@ -158,11 +159,37 @@ A single crash-visibility story, layered by what each board can hold:
 ### 6. Testing
 - **Native unit tests:** relay bit-logic; resilience state machines (link up/down,
   network-task restart, degradation tiers); IP-link selection; coredump-record
-  parsing; panic-PC breadcrumb encode/decode/format.
+  parsing; panic-PC breadcrumb encode/decode/format; **RTC time encode/decode (BCD)**.
 - **Hardware validation checklist (Phase 2):** relay **safe state at power-on**
   (multimeter COM→NO before wiring to HVAC), Ethernet link + DHCP, ESP-NOW channel
   match with display, coredump capture→publish→clear round-trip, OTA on the new
-  partition layout, full HVAC cycle (heat/cool/fan) with interlocks.
+  partition layout, full HVAC cycle (heat/cool/fan) with interlocks, **RTC read/set +
+  survives a power-cycle (if battery-backed)**.
+
+### 7. RTC — network-independent time (PCF85063 @ I²C 0x51)
+The board has a **PCF85063A** RTC on the relay I²C bus. This is a genuine resilience
+win: **the controller keeps accurate wall-clock time even with the network down**, so
+time-dependent behavior doesn't depend on NTP/SNTP reachability.
+
+- **Driver:** a small PCF85063 driver — read/set time over I²C. The **BCD ↔ struct
+  encode/decode is platform-agnostic and unit-tested** (like the relay bit-logic);
+  only the `Wire` transport is firmware. Also read the **oscillator-stop / low-voltage
+  flag** (RTC reg) to know whether the held time is trustworthy (battery was lost).
+- **Sync strategy — RTC is the local source of truth, NTP corrects it:**
+  - On boot, read the RTC immediately → the controller has a valid time before any
+    network comes up (no "1970" window, no waiting on SNTP).
+  - When network time is available (SNTP sync), **write it back to the RTC** so the RTC
+    stays accurate and survives the next reboot/outage.
+  - System time (`settimeofday`) is seeded from the RTC at boot and re-disciplined by
+    SNTP; the RTC is re-written on each successful SNTP sync (and periodically).
+- **Uses:** time-of-day HVAC scheduling without NTP; accurate **log/diagnostic
+  timestamps from boot** (incl. reboot-cause/breadcrumb timing); runtime accounting
+  anchored to real time. Optionally publish `state/rtc_time` + an `rtc_ok` diagnostic.
+- **Battery/backup:** the RTC only retains time across a full power-off if the board's
+  RTC backup (coin cell / supercap) is populated — **verify/populate it** for cold-boot
+  benefit; without it the RTC still helps across brownouts/resets and gets corrected by
+  SNTP. The osc-stop flag tells us at boot whether to trust the held time.
+- **Display-agnostic:** controller-only (the display gets time over ESP-NOW/MQTT as today).
 
 ## Out of scope
 - Digital-input features (reserved, unused).
