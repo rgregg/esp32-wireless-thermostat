@@ -162,3 +162,30 @@ coredump API usage. Two "important" items + dispositions:
 Nits (not actioned): build_flag duplication across s3/waveshare envs (hoist to a common
 section only if edited often); W5500 RST=-1 is bench-only (wire a real RST for production
 warm-reboot link recovery); buzzer-silence snippet duplicated across 3 bench sketches.
+
+## Wrap-up — what's DONE vs. what needs Ryan
+
+### DONE autonomously this session (all committed + pushed to PR #33)
+- ✅ Relays (Pca9554RelayBackend control path), RTC (PCF85063), W5500 Ethernet (DHCP),
+  buzzer silence — all validated on the REAL board.
+- ✅ `CONTROLLER_BOARD_WAVESHARE` firmware profile + env; full controller firmware boots
+  clean + stable on the real board (relays safe, silent, no reboot).
+- ✅ Coredump capture validated end-to-end (panic → coredump in flash → readable) +
+  addr2line symbolication. Closes the open "no coredump" panic-diagnostics gap.
+- ✅ Regression-checked: native tests 176/0; classic esp32dev controller still builds clean.
+- ✅ Code-reviewed (esp-idf-engineer), no critical issues.
+
+### NEEDS RYAN (recorded, not done — by design)
+1. **🔵 D1 — relay→HVAC wiring:** confirm which relay terminal (0–7) is heat/cool/fan before
+   cutover (one-line config if different from default 0/1/2).
+2. **🔵 F3 — RTC battery:** consider populating the RTC backup cell for cold-boot time.
+3. **🔵 F5 — RTC scheduling:** product decision (what to DO with wall-clock time). Plumbing
+   I'll do; scheduling I won't invent.
+4. **Ethernet-primary networking plan** — written:
+   `docs/superpowers/plans/2026-06-16-ethernet-primary-networking.md`. Has 4 OPEN DECISIONS
+   (WiFi fallback? watchdog reboot policy? keep BLE provisioning? static IP/DHCP reservation?)
+   that need your answer before I execute it. Good news: the refactor is smaller than feared
+   (lwIP already makes the MQTT/web/OTA clients link-agnostic).
+5. **Resilience inc 1–2 on-device validation** — needs a controllable MQTT-unreachable bench
+   (and, for the Ethernet plan, a broker reachable on the Ethernet LAN).
+6. **Identity override + production cutover.**
