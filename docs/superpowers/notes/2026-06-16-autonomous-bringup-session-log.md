@@ -90,3 +90,24 @@ works on the real board. Bench sketch `src/bench/waveshare_eth_validate.cpp`, en
 `waveshare-eth-validate` (hybrid build — the ETH/Network stack needs the IDF source
 rebuild, same as the panic-wrap path). Note: bench LAN handed out 10.0.2.x; production
 will be on the user's normal LAN. MAC is chip-MAC+derived (locally administered).
+
+## Board-config integration (Plan 4) — full controller firmware targets the real board
+
+### What I did (committed, building/validating)
+Added a **`CONTROLLER_BOARD_WAVESHARE`** board profile to the real controller firmware
+(`src/esp32_controller_main.cpp`), distinct from the generic-S3 bench profile:
+- Relay backend: `Pca9554RelayBackend` (verified mapping heat0/cool1/fan2/spare3) instead
+  of the Feather `GpioRelayBackend` stand-in. Mutually exclusive via `#elif`.
+- Buzzer: `pinMode(46,OUTPUT); digitalWrite(46,LOW);` as the **first** statement in
+  setup() (before Serial), gated to the Waveshare board.
+- New env `[env:esp32-furnace-controller-waveshare]` — extends the s3 hybrid env, 16MB
+  flash + `default_16MB.csv` (which already carries a coredump partition), `-DCONTROLLER_BOARD_WAVESHARE`.
+
+### Scope boundary (deliberate — NOT done autonomously)
+This makes the firmware **build for + boot on** the real board with correct relay + buzzer
+hardware. It does **NOT** yet rewire the network path to Ethernet — main still uses WiFi
+for IP today (the Ethernet-for-IP refactor is the large §2 piece flagged for review). So
+on the bench this firmware boots, drives the real relays safe-off, stays silent, and (with
+no WiFi creds) sits in provisioning — exactly the boot/hardware checkpoint intended. Kept
+the **isolated TEST identity** (test base topic + ESP-NOW ch11/test-LMK) so it can never
+touch production until the cutover step.

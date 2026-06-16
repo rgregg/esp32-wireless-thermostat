@@ -11,6 +11,7 @@
 #include "controller/network_recovery_policy.h"
 #include "controller/pirateweather.h"
 #include "controller/gpio_relay_backend.h"
+#include "controller/pca9554_relay_backend.h"
 #include "controller/panic_breadcrumb_hook.h"
 #include "weather_icon.h"
 #include "command_builder.h"
@@ -45,10 +46,16 @@
 #include "mac_address_utils.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
-#if defined(CONTROLLER_BOARD_S3)
-// ESP32-S3 bench board has no relay hardware (no PCA9554). GPIO 32/33/25 don't
-// exist on the S3, so drive safe spare S3 GPIOs (nothing wired) to keep pinMode
-// valid. The real S3 board will use Pca9554RelayBackend instead.
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+// Real production board: Waveshare ESP32-S3-ETH-8DI-8RO. Relays are driven through a
+// PCA9554 I2C GPIO expander @0x20 (SDA=42/SCL=41), relay N = bit 1<<N, active-high.
+// Defaults verified on hardware (2026-06-16): heat=relay0, cool=relay1, fan=relay2,
+// spare=relay3 — see session log D1 (confirm furnace wiring before cutover).
+thermostat::Pca9554RelayBackend g_relay_backend;       // defaults: 0x20, sda42/scl41, heat0/cool1/fan2/spare3
+#elif defined(CONTROLLER_BOARD_S3)
+// ESP32-S3 bench board (devkit/Feather) has no relay hardware (no PCA9554). GPIO
+// 32/33/25 don't exist on the S3, so drive safe spare S3 GPIOs (nothing wired) to
+// keep pinMode valid. The real Waveshare board uses Pca9554RelayBackend above.
 thermostat::GpioRelayBackend g_relay_backend(
     thermostat::GpioRelayBackendConfig{4, 5, 6, 7});   // heat/cool/fan/spare, non-inverted
 #else
@@ -2303,6 +2310,14 @@ void ctrl_ensure_mdns_ready() {
 }
 
 void setup() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // Silence the on-board buzzer (GPIO46) FIRST. It is uncontrolled/floating at boot
+  // and can sound an "alarm" until driven to its off level. Do this before anything
+  // else so the board is silent from the earliest possible moment. (Validated on
+  // hardware 2026-06-16: LOW silences it — see session log F2.)
+  pinMode(46, OUTPUT);
+  digitalWrite(46, LOW);
+#endif
   Serial.begin(115200);
   delay(500);
   Serial.println("\n\n============================");
