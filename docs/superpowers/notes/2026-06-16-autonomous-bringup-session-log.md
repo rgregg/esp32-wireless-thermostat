@@ -145,3 +145,20 @@ Built `waveshare-coredump-validate` (sketch deliberately crashes, reboots, then 
   captured in flash for offline `esp-coredump`/gdb analysis whenever needed.
 **Impact:** directly closes the open "controller panics on new firmware, no coredump/backtrace
 available" issue — once the Waveshare firmware is deployed, that panic WILL be captured.
+
+## Code review of this session's firmware changes (esp-idf-engineer subagent)
+Reviewed the board-config integration + bench sketches + envs. **No critical issues.**
+Verified correct: macro mutual-exclusion (WAVESHARE/S3/classic — the only two
+CONTROLLER_BOARD_S3 sites are both WAVESHARE-aware), buzzer placement, `extends`+override
+semantics with all parent build_flags correctly re-listed, isolated test identity, and the
+coredump API usage. Two "important" items + dispositions:
+- **(a) PSRAM not enabled** despite N16R8's 8MB. **Disposition: intentional** — firmware fits
+  in internal SRAM (~21%); enabling octal PSRAM needs pin-collision verification (W5500
+  SPI/PCA9554 I2C/relays). Clarified the env comment to say so explicitly.
+- **(b) Verify PCA9554 begin() doesn't briefly energize relays at boot** (highest-consequence
+  for a furnace). **Disposition: already hardware-validated** — F1 showed `begin()` → PCA
+  input 0x00 (all off); the backend writes the output register all-OFF *before* switching
+  pins to outputs (POR default is outputs-high), and F7's clean boot confirmed no glitch.
+Nits (not actioned): build_flag duplication across s3/waveshare envs (hoist to a common
+section only if edited often); W5500 RST=-1 is bench-only (wire a real RST for production
+warm-reboot link recovery); buzzer-silence snippet duplicated across 3 bench sketches.
