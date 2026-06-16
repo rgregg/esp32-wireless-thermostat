@@ -28,4 +28,18 @@ cutover** — if the furnace's W/Y/G land on different relay terminals, change t
 (one line) to match; no code change.
 
 ## Findings
-(appended as the session progresses)
+
+### F1 — Relay control path VALIDATED on real hardware ✅
+`ControllerRelayIo` (interlock) + `Pca9554RelayBackend` drive the real relays correctly
+(serial trace via piserial5): HEAT→relay0 (PCA 0x01), switch to COOL→interlock forces
+all-off + ~1s wait→relay1 (0x02), switch to FAN→off+wait→relay2 (0x04), OFF→0x00. The
+Plan-1 abstraction + Plan-4 PCA9554 backend + the interlock all work end-to-end on the
+Waveshare board. Default mapping heat=0/cool=1/fan=2 confirmed (see D1 for wiring review).
+
+### F2 — On-board BUZZER (GPIO46) is uncontrolled at boot — must be silenced  🔵 IMPORTANT FOR REAL FIRMWARE
+The board has a buzzer on GPIO46. With the pin left uninitialized at boot it can sound
+(the user heard an "alarm"). **The real controller firmware MUST drive GPIO46 to its
+off level (LOW) early in setup()** so the board is silent on boot. Added to the bench
+sketches; needs to be in the production controller-s3 board init. (If LOW doesn't
+silence it, the buzzer is active-low and needs HIGH — confirm on hardware.)
+Possible future use: deliberate audible alerts (e.g. failsafe), but default = silent.
