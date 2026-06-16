@@ -53,3 +53,29 @@ handles this (trust RTC only when osc_ok, else NTP), but **populating the RTC ba
 would give instant correct time on cold boot** — recommend adding it for the cutover unit.
 
 ### F4 — Pca9554RelayBackend + PCF85063 RTC drivers: native-tested (176) + on-board validated.
+
+## Remaining integration analysis (for the full controller firmware on the Waveshare)
+
+### F5 — Controller has NO wall-clock time today  🔵 NEEDS USER INPUT (scheduling)
+Grep confirms the controller never calls configTime/SNTP/getLocalTime — it has no
+wall-clock time at all currently (only the thermostat `runtime()`). So the RTC is a
+NEW capability. I'll wire the modest plumbing autonomously (read RTC on boot ->
+settimeofday; SNTP sync -> write back to RTC; accurate log timestamps + an `rtc_ok`
+diagnostic). But **what to DO with the time (time-of-day HVAC scheduling) is a product
+decision** — what schedule, configured how (HA? on-device?) — so I'm NOT inventing a
+scheduling feature autonomously. Flagging for review.
+
+### Remaining Plan-4 integration increments (sized; doing the safe ones autonomously)
+- **Board config (small, safe — doing it):** `CONTROLLER_BOARD_S3` currently uses the
+  Feather stand-in `GpioRelayBackend{4,5,6,7}`. Switch it to `Pca9554RelayBackend`
+  (verified mapping) + silence GPIO46 buzzer in setup() + Waveshare I2C pins. This makes
+  the controller-s3 firmware target the real board's relays. Validate it builds + drives
+  relays on the board.
+- **RTC plumbing (medium — doing the plumbing, not scheduling):** read RTC on boot ->
+  seed system time; SNTP -> RTC writeback; log timestamps. (Scheduling deferred, see F5.)
+- **Ethernet-for-IP + WiFi-for-ESP-NOW-only (large — spec §2, needs care + likely user
+  review):** the networking-model refactor (IP-link abstraction: Ethernet primary, WiFi
+  radio only for ESP-NOW). This is the biggest remaining piece and changes the live
+  network path substantially — I'll bring up Ethernet standalone first (validating now),
+  then propose the integration rather than rewrite the live network path unsupervised.
+- **Coredump (16MB partition) + identity override + cutover** — later.
