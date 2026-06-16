@@ -29,13 +29,20 @@ void on_panic(arduino_panic_info_t *info, void * /*arg*/) {
   }
 }
 
-// Why set_arduino_panic_handler() instead of -Wl,--wrap=esp_panic_handler:
-// Arduino-ESP32 already defines __wrap_esp_panic_handler internally and
-// exposes set_arduino_panic_handler() as the official single-callback
-// extension point.  Adding our own --wrap would cause a multiple-definition
-// link error.  Caveat: set_arduino_panic_handler keeps only ONE callback, so
-// a later registration by any library would silently replace ours.  That is
-// acceptable here — no other panic-hooking components exist in this project.
+// We use the Arduino core's official extension point set_arduino_panic_handler()
+// rather than defining our own __wrap_esp_panic_handler (the core already defines
+// that symbol; a second definition would multiple-define).
+//
+// CRITICAL build requirement: the core's wrapper only takes effect if the firmware
+// is LINKED with `-Wl,--wrap=esp_panic_handler`. Arduino IDE adds this via
+// platform.txt; PlatformIO/pioarduino does NOT, so it is added explicitly in
+// platformio.ini ([panic_wrap]). WITHOUT that flag the wrapper is dead code and
+// on_panic is never called — the breadcrumb silently records nothing. (This was the
+// real bug found by on-device validation: every boot recovered "none" and the
+// selftest panic-looped.)
+//
+// Caveat: set_arduino_panic_handler keeps only ONE callback, so a later registration
+// by any library would silently replace ours — acceptable here (no other panic hooks).
 //
 // Register at static-init time so panics during early setup() are captured
 // even before panic_breadcrumb_recover_on_boot() is called.
