@@ -43,3 +43,13 @@ off level (LOW) early in setup()** so the board is silent on boot. Added to the 
 sketches; needs to be in the production controller-s3 board init. (If LOW doesn't
 silence it, the buzzer is active-low and needs HIGH — confirm on hardware.)
 Possible future use: deliberate audible alerts (e.g. failsafe), but default = silent.
+
+### F3 — PCF85063 RTC VALIDATED on real hardware ✅ + battery finding  🔵 USER: consider RTC battery
+RTC driver read/set/tick confirmed on the board: read-before showed osc_ok=0 (time lost),
+set 2026-06-16 12:00:00 -> osc_ok=1, seconds advance (oscillator runs). Decode/encode +
+osc-stop flag all correct. **Finding:** the RTC backup (coin cell/supercap) is NOT
+populated/charged (osc_ok=0 at boot = time not retained across power-off). The firmware
+handles this (trust RTC only when osc_ok, else NTP), but **populating the RTC battery
+would give instant correct time on cold boot** — recommend adding it for the cutover unit.
+
+### F4 — Pca9554RelayBackend + PCF85063 RTC drivers: native-tested (176) + on-board validated.
