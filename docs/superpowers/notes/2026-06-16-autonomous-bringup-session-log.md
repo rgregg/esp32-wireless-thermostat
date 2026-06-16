@@ -189,3 +189,47 @@ warm-reboot link recovery); buzzer-silence snippet duplicated across 3 bench ske
 5. **Resilience inc 1–2 on-device validation** — needs a controllable MQTT-unreachable bench
    (and, for the Ethernet plan, a broker reachable on the Ethernet LAN).
 6. **Identity override + production cutover.**
+
+## Ethernet-primary networking — IMPLEMENTED + VALIDATED on hardware ✅ (Ryan's decisions applied)
+Executed `docs/superpowers/plans/2026-06-16-ethernet-primary-networking.md` after Ryan
+confirmed: **no WiFi fallback** + **watchdog reboots only on isolation**. All changes gated
+to `CONTROLLER_BOARD_WAVESHARE` (classic esp32dev untouched).
+- Added `ctrl_ip_link_up()` / `ctrl_ip_local_addr()` helpers — the only place that knows the
+  primary link. On Waveshare → Ethernet (`ETH.hasIP()`/`ETH.localIP()`); on classic → WiFi
+  STA (reduces to the exact prior behavior, zero change).
+- `ETH.begin(W5500, ...)` in setup() (Waveshare); ETH GOT_IP/DISCONNECTED handled in the
+  net event handler. WiFi-creds provisioning **skipped** on Waveshare (WiFi = ESP-NOW only).
+- Replaced the WiFi-status gates (web, mDNS, MQTT-connect, weather, announce×2, heartbeat,
+  status JSON, OTA rollback) with the link helpers. RSSI stays WiFi-specific (0/omitted on
+  Ethernet-only — correct).
+- loop(): `ctrl_ensure_wifi_connected` + `wifi_watchdog_tick` skipped on Waveshare; the
+  isolation watchdog (MQTT && ESP-NOW down >15min) is the SOLE reboot authority.
+
+### F9 — on-board validation (fresh NVS, Ethernet to the bench LAN)
+- `[eth] ETH.begin() -> ok` → `[eth] GOT_IP 10.0.2.43 link=100Mbps FD`.
+- **No BLE provisioning** (`prov=idle`) — correctly skipped; `controller_node_begin=1`
+  (ESP-NOW up with WiFi radio, no association).
+- Heartbeat `ip=10.0.2.43, mqtt=yes` — **MQTT connected OVER ETHERNET** to the default broker
+  `mqtt.lan` (resolved via DNS over the W5500), under the isolated TEST base topic. Proves
+  the full DHCP→DNS→TCP→MQTT stack works over Ethernet with ZERO WiFi association — the
+  link-agnostic-client theory holds exactly as planned.
+- Stable for 30s+, no reboot. Builds: Waveshare clean (RAM dropped 21.2%→19.8% since WiFi
+  provisioning no longer runs); native tests 176/0.
+**This is the core deliverable of the whole port — the controller now runs on a wired link,
+ending the marginal-WiFi reboot problem that started this work.**
+
+### Code review of the Ethernet-primary refactor (esp-idf-engineer)
+PASS overall: classic-path invariance confirmed (helpers reduce to the exact prior
+WiFi.status()/localIP() behavior), String temporaries safe in every printf callsite,
+ESP-NOW/ETH init ordering correct, `provisioning_active()` safe on the never-begun manager,
+no new unused-var warnings. One **important** finding actioned:
+- **3a — masked ETH.begin() failure / no retry:** a transient W5500 init failure would leave
+  the board permanently IP-dark, and because ESP-NOW still works the isolation watchdog
+  wouldn't catch it (not "isolated") → no auto-recovery. **Fix:** bounded 3× retry of
+  ETH.begin() at boot (recovers transient SPI/PHY failures); if all fail, run ESP-NOW-only
+  rather than reboot-loop on dead hardware (respects "reboot only on isolation").
+- **nit 5 (actioned):** added a comment at the loop's WiFi-gate documenting the
+  "stray wifi_ssid write persists creds but never associates (ensure_connected is gated out)
+  → ESP-NOW channel pinning stays safe" invariant.
+Other nits (heartbeat double-eval; announce-IP freshness self-heals on MQTT reconnect after a
+flap-with-new-IP) noted, no action needed.

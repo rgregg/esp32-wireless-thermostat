@@ -30,6 +30,9 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+#include <ETH.h>
+#endif
 #include "improv_ble_provisioning.h"
 #include "wifi_provisioning_manager.h"
 #include <WiFiClientSecure.h>
@@ -63,6 +66,39 @@ thermostat::GpioRelayBackend g_relay_backend;          // classic ESP32: pins 32
 #endif
 thermostat::ControllerRelayIo g_relay_io(g_relay_backend);
 thermostat::AuditLog g_audit_log;
+
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+// Wired W5500 Ethernet is the PRIMARY IP link on the Waveshare board (pins validated
+// on hardware — see the esp32s3-waveshare-port design / bring-up session log F6). The
+// WiFi radio is used for ESP-NOW ONLY (STA mode, pinned channel, never associates) —
+// see docs/superpowers/plans/2026-06-16-ethernet-primary-networking.md.
+namespace {
+constexpr int kEthCs = 16, kEthIrq = 12, kEthRst = -1;
+constexpr int kEthSck = 15, kEthMiso = 14, kEthMosi = 13;
+}  // namespace
+bool g_ctrl_eth_started = false;
+#endif
+
+// IP-link abstraction. The controller's IP services (MQTT, web, OTA, mDNS) are
+// link-agnostic (lwIP routes over whichever netif has the route); these two helpers
+// are the only place that knows which physical link carries IP. On the Waveshare board
+// that is Ethernet (WiFi never associates); on the classic board it is WiFi STA — where
+// these reduce to exactly the prior WiFi.status()/WiFi.localIP() behavior (no change).
+static bool ctrl_ip_link_up() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  return g_ctrl_eth_started && ETH.hasIP();  // hasIP() => link up AND has an address
+#else
+  return WiFi.status() == WL_CONNECTED;
+#endif
+}
+
+static String ctrl_ip_local_addr() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  return ctrl_ip_link_up() ? ETH.localIP().toString() : String("");
+#else
+  return (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
+#endif
+}
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
 WebServer g_ctrl_web(80);
@@ -817,7 +853,7 @@ static void ctrl_weather_task(void *) {
         zip_raw  = g_cfg_ctrl_pirateweather_zip.c_str();
         xSemaphoreGive(g_ctrl_weather_mutex);
       }
-      if (WiFi.status() == WL_CONNECTED && !api_key.empty() && !zip_raw.empty()) break;
+      if (ctrl_ip_link_up() && !api_key.empty() && !zip_raw.empty()) break;
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
     }
 
@@ -1199,7 +1235,7 @@ void ctrl_publish_discovery() {
              "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
              THERMOSTAT_FIRMWARE_VERSION,
              g_cfg_ctrl_hostname.c_str(),
-             WiFi.localIP().toString().c_str());
+             ctrl_ip_local_addr().c_str());
     g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
   }
 
@@ -1396,9 +1432,9 @@ void ctrl_web_handle_status_get() {
     "\"firmware_version\":\"%s\""
     "}",
     static_cast<unsigned long>(now),
-    WiFi.isConnected() ? "true" : "false",
-    WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "",
-    WiFi.isConnected() ? WiFi.RSSI() : 0,
+    ctrl_ip_link_up() ? "true" : "false",
+    ctrl_ip_local_addr().c_str(),
+    (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0,
     g_ctrl_mqtt.connected() ? "true" : "false",
     app.has_indoor_temperature() ? "true" : "false",
     temp_str,
@@ -1727,7 +1763,7 @@ static void ctrl_web_server_task(void *) {
 }
 
 void ctrl_ensure_web_ready() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!ctrl_ip_link_up()) {
     return;
   }
   if (!g_ctrl_web_started) {
@@ -2182,8 +2218,22 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
 
 void ctrl_wifi_event_handler(arduino_event_t *event) {
   if (event == nullptr) return;
-  if (event->event_id == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-    g_ctrl_wifi.on_wifi_connected();
+  switch (event->event_id) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      g_ctrl_wifi.on_wifi_connected();
+      break;
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      Serial.printf("[eth] GOT_IP %s link=%dMbps %s\n",
+                    ETH.localIP().toString().c_str(), ETH.linkSpeed(),
+                    ETH.fullDuplex() ? "FD" : "HD");
+      break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      Serial.println("[eth] link DOWN");
+      break;
+#endif
+    default:
+      break;
   }
 }
 
@@ -2207,7 +2257,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     g_ctrl_mqtt_recovery.on_disconnected();
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!ctrl_ip_link_up()) {
     return;
   }
   if (g_ctrl_mqtt.connected()) {
@@ -2289,13 +2339,13 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
              "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
              THERMOSTAT_FIRMWARE_VERSION,
              g_cfg_ctrl_hostname.c_str(),
-             WiFi.localIP().toString().c_str());
+             ctrl_ip_local_addr().c_str());
     g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
   }
 }
 
 void ctrl_ensure_mdns_ready() {
-  if (WiFi.status() != WL_CONNECTED || g_ctrl_mdns_started) {
+  if (!ctrl_ip_link_up() || g_ctrl_mdns_started) {
     return;
   }
   const char *host = g_cfg_ctrl_hostname.length() > 0 ? g_cfg_ctrl_hostname.c_str()
@@ -2408,6 +2458,32 @@ void setup() {
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);
   g_controller = &node;
 
+  // Register the network event handler before bringing up any link, so we catch both
+  // WiFi STA GOT_IP and (Waveshare) ETH GOT_IP.
+  WiFi.onEvent(ctrl_wifi_event_handler);
+
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // Ethernet (W5500) is the primary IP link. WiFi does NOT associate to an AP — it is
+  // used for ESP-NOW only (the transport puts the radio in STA mode on a pinned channel
+  // in g_controller->begin() below). The WiFi-creds provisioning flow is therefore
+  // intentionally skipped on this board.
+  ETH.setHostname(g_cfg_ctrl_hostname.c_str());
+  Serial.println("[eth] starting W5500 Ethernet (primary IP link)...");
+  // Bounded retry: a hard ETH.begin() failure would leave the board permanently
+  // IP-dark, and (because ESP-NOW still works) the isolation watchdog would NOT catch
+  // it — so recover transient SPI/PHY init failures here. If all attempts fail the
+  // W5500 is likely dead; we run ESP-NOW-only rather than reboot-loop on dead hardware.
+  for (int attempt = 1; attempt <= 3 && !g_ctrl_eth_started; ++attempt) {
+    g_ctrl_eth_started = ETH.begin(ETH_PHY_W5500, 1, kEthCs, kEthIrq, kEthRst,
+                                   SPI2_HOST, kEthSck, kEthMiso, kEthMosi);
+    if (!g_ctrl_eth_started) {
+      Serial.printf("[eth] ETH.begin() attempt %d/3 failed; retrying...\n", attempt);
+      delay(500);
+    }
+  }
+  Serial.printf("[eth] ETH.begin() -> %s\n",
+                g_ctrl_eth_started ? "ok" : "FAILED (running ESP-NOW-only)");
+#else
   // Initialize WiFi provisioning manager — starts BLE immediately if no creds
   WifiProvisioningConfig wifi_cfg = {};
   wifi_cfg.device_name = "Controller";
@@ -2423,7 +2499,7 @@ void setup() {
     Serial.println("[provision] No WiFi configured — starting BLE provisioning");
     g_ctrl_wifi.start_provisioning();
   }
-  WiFi.onEvent(ctrl_wifi_event_handler);
+#endif
   g_ctrl_mqtt.setBufferSize(1024);
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
@@ -2516,9 +2592,9 @@ void loop() {
   const uint32_t now = millis();
   if (now - last_heartbeat >= 5000) {
     last_heartbeat = now;
-    Serial.printf("[%lu] controller alive, wifi=%s, mqtt=%s, prov=%s\n",
+    Serial.printf("[%lu] controller alive, ip=%s, mqtt=%s, prov=%s\n",
                   now,
-                  WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "no",
+                  ctrl_ip_link_up() ? ctrl_ip_local_addr().c_str() : "no",
                   g_ctrl_mqtt.connected() ? "yes" : "no",
                   g_ctrl_wifi.provisioning_active() ? "active" : "idle");
   }
@@ -2529,8 +2605,18 @@ void loop() {
     g_controller->tick(now);
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
+#if !defined(CONTROLLER_BOARD_WAVESHARE)
+    // Classic board: WiFi STA is the IP link, so keep it connected and let the WiFi
+    // watchdog reboot on sustained WiFi loss. On Waveshare, WiFi never associates
+    // (ESP-NOW only) and Ethernet/lwIP self-recovers — the isolation watchdog below is
+    // the SOLE reboot authority (no IP-link-down reboot). See ethernet-primary plan.
+    // NOTE: this gate is what keeps the WiFi radio from ever associating on Waveshare.
+    // A stray `wifi_ssid` write only persists creds + sets reconnect_required (see
+    // WifiProvisioningManager::set_credentials); association happens ONLY in
+    // ensure_connected(), which is gated out here — so ESP-NOW channel pinning is safe.
     ctrl_ensure_wifi_connected(now);
     wifi_watchdog_tick(now, g_ctrl_mqtt.connected());
+#endif
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
     ctrl_ensure_mqtt_connected(now);
@@ -2594,7 +2680,7 @@ void loop() {
       }
     }
   }
-  ota_rollback_check(WiFi.status() == WL_CONNECTED && g_ctrl_mqtt.connected());
+  ota_rollback_check(ctrl_ip_link_up() && g_ctrl_mqtt.connected());
   delay(100);
 }
 #endif

@@ -52,35 +52,27 @@ separate, later increment.)
 
 ---
 
-## OPEN DECISIONS — need Ryan's answer before executing
+## DECISIONS — RESOLVED (Ryan, 2026-06-16)
 
-1. **WiFi STA fallback if Ethernet link drops?**
-   The confirmed design says "WiFi radio for ESP-NOW only, no AP association." Taken
-   literally, if the Ethernet cable is unplugged the controller has **no IP** (no MQTT/web)
-   until the cable returns — but ESP-NOW (display ↔ controller) keeps working, which is the
-   resilience story. **Recommended: NO automatic WiFi-STA fallback** (it reintroduces the
-   exact marginal-WiFi failure mode + the ESP-NOW-channel-vs-AP-channel conflict we're
-   escaping). Confirm, or specify a fallback policy.
+1. **WiFi STA fallback if Ethernet link drops? → NO.**
+   WiFi never associates to an AP. If Ethernet drops, IP is down (no MQTT/web) but ESP-NOW
+   keeps carrying control — that's the resilience story. No marginal-WiFi failure mode, no
+   ESP-NOW-channel-vs-AP-channel conflict.
 
-2. **What does the watchdog reboot on now?**
-   Today `wifi_watchdog` reboots after ~5 min of gateway-unreachable. With Ethernet primary
-   + ESP-NOW as the control fallback, **rebooting on IP-link-down is wrong** — the device is
-   still doing its job over ESP-NOW. **Recommended:** on Waveshare, the watchdog monitors the
-   *Ethernet* link/gateway for telemetry/recovery but does **not** reboot on IP loss; device
-   reboots stay owned by the isolation watchdog (both MQTT *and* ESP-NOW down >15 min).
-   Confirm.
+2. **What does the watchdog reboot on now? → ISOLATION ONLY.**
+   The isolation watchdog (MQTT **and** ESP-NOW both down >15 min) is the **sole** reboot
+   authority. The IP-link watchdog does NOT reboot on IP loss. On Waveshare it may still
+   monitor the Ethernet link for telemetry/recovery, but never reboots.
 
-3. **Keep WiFi provisioning (Improv BLE / web) on the Waveshare at all?**
-   If WiFi never associates, the WiFi-creds provisioning flow is dead weight on this board.
-   **Recommended:** compile it out for `CONTROLLER_BOARD_WAVESHARE` (saves flash + removes a
-   confusing "starting BLE provisioning" boot path). Ethernet needs no provisioning (DHCP).
-   Confirm, or keep BLE provisioning as an out-of-band config channel.
+3. **Keep WiFi provisioning (Improv BLE / web) on Waveshare? → DISABLE its start** (default,
+   easily reversible). WiFi never associates, so the WiFi-creds provisioning flow is dead
+   weight + prints a confusing "starting BLE provisioning" boot line. Gate the *start* off
+   for `CONTROLLER_BOARD_WAVESHARE` (don't rip out the code). Device config (MQTT host,
+   peers) is set via the web UI over Ethernet (DHCP + mDNS) or MQTT.
 
-4. **Static IP / DHCP reservation?** Ethernet got `10.0.2.43` via DHCP on the bench. For the
-   production controller (currently `192.168.42.57` on WiFi), do you want a DHCP reservation
-   for the Ethernet MAC, or a static IP configured in NVS? (Affects HA/monitoring + OTA URL.)
-   The Ethernet MAC is derived from the chip and differs from the WiFi MAC — note for the
-   reservation.
+4. **Static IP / DHCP? → DHCP** (default). Recommend a **DHCP reservation** on the Ethernet
+   MAC as an ops task (the Ethernet MAC is chip-derived and differs from the WiFi MAC).
+   Static-IP-in-NVS can be added later if desired; not in this plan.
 
 ---
 
