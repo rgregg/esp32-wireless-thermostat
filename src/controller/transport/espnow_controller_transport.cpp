@@ -90,6 +90,19 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
 #endif
 }
 
+bool EspNowControllerTransport::restart() {
+#if defined(ARDUINO)
+  // Deregisters the recv/send callbacks and clears peers; safe to call even if ESP-NOW
+  // was never initialized or only partially came up.
+  esp_now_deinit();
+#endif
+  initialized_ = false;
+  // begin() re-inits ESP-NOW, re-registers callbacks, re-pins the channel, and re-adds
+  // peers from the stored config_. The transport-level command callbacks (set via
+  // set_callbacks) are separate members and are preserved.
+  return begin(config_);
+}
+
 void EspNowControllerTransport::loop(uint32_t now_ms) {
   if (!initialized_) {
     return;

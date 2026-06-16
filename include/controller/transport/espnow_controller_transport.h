@@ -28,6 +28,13 @@ class EspNowControllerTransport final : public IControllerTransport {
   EspNowControllerTransport() = default;
 
   bool begin(const EspNowControllerConfig &config);
+  // Tear down and re-initialize the ESP-NOW stack with the same config (deinit ->
+  // re-init -> re-register callbacks -> re-add peers -> re-pin channel). Used to recover
+  // a wedged ESP-NOW link in place instead of rebooting. Preserves the command callbacks
+  // set via set_callbacks(). Returns false if re-init fails.
+  // NOTE: re-pins the radio channel, so only safe when WiFi is NOT associated to an AP
+  // (i.e. the ESP-NOW-only / Ethernet-primary board) — the caller must enforce that.
+  bool restart();
   void loop(uint32_t now_ms);
 
   void set_callbacks(CommandWordCallback command_cb,

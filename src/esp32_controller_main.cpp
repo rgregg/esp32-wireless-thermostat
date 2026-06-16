@@ -231,6 +231,7 @@ String g_ctrl_reboot_reason = "none";
 bool g_ctrl_reboot_requested = false;
 uint32_t g_ctrl_reboot_at_ms = 0;
 uint32_t g_ctrl_isolation_start_ms = 0;  // 0 = not isolated
+bool g_ctrl_isolation_recovery_done = false;  // in-place subsystem recovery already tried this episode
 
 // --- Task Watchdog breadcrumb -----------------------------------------------
 // A hard Task-WDT panic doesn't run our reboot hook, so reboot_reason stays
@@ -309,6 +310,11 @@ constexpr uint8_t kCtrlMqttSocketTimeoutS = 5;
 // Reboot if both MQTT and ESP-NOW have been silent for this long.
 // Covers wedged network-stack states that the WiFi watchdog ping doesn't catch.
 constexpr uint32_t kCtrlIsolationRebootMs = 15UL * 60UL * 1000UL;
+// On the Waveshare board, after kCtrlIsolationRebootMs of isolation we first try an
+// in-place subsystem recovery (re-init ESP-NOW + force MQTT reconnect) instead of
+// rebooting. This is the grace window we give that recovery to restore connectivity
+// before falling back to a reboot as the true last resort.
+constexpr uint32_t kCtrlIsolationRecoveryGraceMs = 3UL * 60UL * 1000UL;
 struct CtrlWeatherResult {
   float temp_c = 0.0f;
   thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
@@ -2755,26 +2761,63 @@ void loop() {
 
       if (!isolated) {
         g_ctrl_isolation_start_ms = 0;
+        g_ctrl_isolation_recovery_done = false;
       } else if (g_ctrl_isolation_start_ms == 0) {
         g_ctrl_isolation_start_ms = now;
         Serial.printf("[watchdog] isolation_start: mqtt=%d espnow_hb=%lu ago=%lums\n",
                       g_ctrl_mqtt.connected() ? 1 : 0,
                       static_cast<unsigned long>(hb_ms),
                       hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
-      } else if (static_cast<uint32_t>(now - g_ctrl_isolation_start_ms) >= kCtrlIsolationRebootMs) {
-        ctrl_audit("isolation_reboot: isolated for %lus, mqtt=%d espnow_hb=%lu",
-                   static_cast<unsigned long>((now - g_ctrl_isolation_start_ms) / 1000),
-                   g_ctrl_mqtt.connected() ? 1 : 0,
-                   static_cast<unsigned long>(hb_ms));
-        {
-          char reason[80];
-          snprintf(reason, sizeof(reason),
-                   "isolation: mqtt+espnow down %lus",
-                   static_cast<unsigned long>(
-                       (now - g_ctrl_isolation_start_ms) / 1000));
-          ctrl_persist_reboot_reason(reason);
+      } else {
+        // After the recovery attempt the clock is restarted, so the threshold to act
+        // shrinks to the (shorter) grace window.
+        const uint32_t isolated_for = static_cast<uint32_t>(now - g_ctrl_isolation_start_ms);
+        const uint32_t threshold = g_ctrl_isolation_recovery_done
+                                       ? kCtrlIsolationRecoveryGraceMs
+                                       : kCtrlIsolationRebootMs;
+        if (isolated_for >= threshold) {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+          if (!g_ctrl_isolation_recovery_done) {
+            // Try to recover the network subsystems IN PLACE before rebooting. Safe on
+            // this board: ESP-NOW is on a pinned channel and WiFi is not associated, so
+            // re-pinning the channel during re-init can't disrupt an IP link (Ethernet).
+            ctrl_audit("isolation: %lus isolated — recovering in place (esp-now re-init + mqtt reconnect)",
+                       static_cast<unsigned long>(isolated_for / 1000));
+            const bool espnow_ok = g_controller->transport().restart();
+            g_ctrl_mqtt.disconnect();
+            g_ctrl_mqtt_recovery.on_disconnected();   // reset backoff -> immediate reconnect
+            g_ctrl_mqtt_reconfigure_required = true;  // clean reconnect (re-subscribe + rediscover)
+            g_ctrl_isolation_recovery_done = true;
+            g_ctrl_isolation_start_ms = now;          // restart clock; grace window now applies
+            ctrl_audit("isolation: recovery attempted (espnow_reinit=%d), grace %lus before reboot",
+                       espnow_ok ? 1 : 0,
+                       static_cast<unsigned long>(kCtrlIsolationRecoveryGraceMs / 1000));
+          } else {
+            // Recovery did not restore connectivity — reboot as the true last resort.
+            ctrl_audit("isolation_reboot: still isolated %lus after in-place recovery, mqtt=%d espnow_hb=%lu",
+                       static_cast<unsigned long>(isolated_for / 1000),
+                       g_ctrl_mqtt.connected() ? 1 : 0,
+                       static_cast<unsigned long>(hb_ms));
+            ctrl_persist_reboot_reason("isolation: mqtt+espnow down, recovery failed");
+            ESP.restart();
+          }
+#else
+          // Classic board: ESP-NOW shares the WiFi home channel (WiFi associated), so an
+          // in-place re-init could disrupt the association. Keep the simple reboot; the
+          // WiFi watchdog also covers outright WiFi loss.
+          ctrl_audit("isolation_reboot: isolated for %lus, mqtt=%d espnow_hb=%lu",
+                     static_cast<unsigned long>(isolated_for / 1000),
+                     g_ctrl_mqtt.connected() ? 1 : 0,
+                     static_cast<unsigned long>(hb_ms));
+          {
+            char reason[80];
+            snprintf(reason, sizeof(reason), "isolation: mqtt+espnow down %lus",
+                     static_cast<unsigned long>(isolated_for / 1000));
+            ctrl_persist_reboot_reason(reason);
+          }
+          ESP.restart();
+#endif
         }
-        ESP.restart();
       }
     }
 
