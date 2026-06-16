@@ -33,8 +33,11 @@ RecoveryAction NetworkRecoveryPolicy::poll(uint32_t now_ms) {
     has_next_attempt_ = false;
 
     if (restart_count_ > config_.restarts_before_reboot) {
-      reboot_requested_ = true;
-      return RecoveryAction::Reboot;
+      if (config_.reboot_enabled) {
+        reboot_requested_ = true;
+        return RecoveryAction::Reboot;
+      }
+      return RecoveryAction::RestartSubsystem;
     }
     return RecoveryAction::RestartSubsystem;
   }

@@ -80,6 +80,22 @@ TEST_CASE(recovery_backoff_safe_across_millis_wrap) {
   ASSERT_TRUE(p.poll(t0 + 1000u) == RecoveryAction::Connect);
 }
 
+TEST_CASE(recovery_reboot_disabled_keeps_restarting_never_reboots) {
+  NetworkRecoveryConfig c = cfg();
+  c.reboot_enabled = false;
+  NetworkRecoveryPolicy p(c);
+  uint32_t t = 0; int restarts = 0, reboots = 0, guard = 0;
+  while (guard++ < 200) {
+    RecoveryAction a = p.poll(t);
+    if (a == RecoveryAction::Connect) p.on_connect_failed();
+    else if (a == RecoveryAction::RestartSubsystem) restarts++;
+    else if (a == RecoveryAction::Reboot) reboots++;
+    t += 10000;
+  }
+  ASSERT_EQ(reboots, 0);
+  ASSERT_TRUE(restarts >= 3);
+}
+
 TEST_CASE(recovery_reboot_is_terminal) {
   NetworkRecoveryPolicy p(cfg());   // restarts_before_reboot=2
   uint32_t t = 0; int guard = 0; bool saw_reboot = false;

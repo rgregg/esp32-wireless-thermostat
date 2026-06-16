@@ -9,6 +9,7 @@ struct NetworkRecoveryConfig {
   uint32_t max_backoff_ms = 60000;
   uint32_t fails_before_restart = 5;
   uint32_t restarts_before_reboot = 3;
+  bool reboot_enabled = true;
 };
 
 enum class RecoveryAction : uint8_t {
