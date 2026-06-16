@@ -9,6 +9,7 @@
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
 #include "controller/pirateweather.h"
+#include "controller/weather_watchdog.h"
 #include "weather_icon.h"
 #include "command_builder.h"
 #include "espnow_cmd_word.h"
@@ -864,9 +865,8 @@ void ctrl_poll_weather(uint32_t now_ms) {
   // likely wedged on a hung TLS/SSL call that ignored the HTTP timeout. Kill
   // and restart it.
   if (g_ctrl_weather_task_handle != nullptr &&
-      g_ctrl_weather_task_heartbeat_ms != 0 &&
-      static_cast<uint32_t>(now_ms - g_ctrl_weather_task_heartbeat_ms) >
-          kCtrlWeatherTaskWatchdogMs) {
+      thermostat::weather_heartbeat_wedged(now_ms, g_ctrl_weather_task_heartbeat_ms,
+                                           kCtrlWeatherTaskWatchdogMs)) {
     // Forcibly killing the task via vTaskDelete leaks C++ stack objects
     // (HTTPClient, WiFiClientSecure) since their destructors won't run.
     // Rebooting is the only safe recovery from a hung TLS call.
