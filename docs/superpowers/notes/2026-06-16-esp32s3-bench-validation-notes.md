@@ -88,18 +88,26 @@ Workflow to validate on the remote bench:
 - ✅ **Remote bench works:** reading the Feather on piserial5's native USB (via the
   stable `/dev/serial/by-id/...` symlink + a reconnecting `cat` loop) captured the
   serial cleanly across reboots — what the KVM passthrough never could.
-- 🛑 **BUG FOUND (Plan 2): the panic-PC breadcrumb does NOT survive the reset on
-  hardware.** The selftest **panic-loops**: every boot reports `recovered breadcrumb:
-  none`, forces the StoreProhibited panic, reboots, and repeats forever. So the panic
-  handler's RTC write is not being recovered on the next boot. The native unit tests
-  pass (they cover `panic_breadcrumb_format`/`_present`, not the on-silicon
-  capture-across-reset), which is exactly why this needed on-device validation.
-  - Candidate causes to investigate (needs on-device iteration): the Arduino
-    `set_arduino_panic_handler` callback may not run for a StoreProhibited exception in
-    this build; or `g_panic_breadcrumb` (RTC_NOINIT) isn't persisting across the
-    panic-reset; or the handler's RTC store doesn't complete before reset. Note the
-    Guru-Meditation dump is NOT on the TinyUSB CDC (IDF console routes elsewhere with
-    USB_MODE=0), so a HWCDC build or UART tap may be needed to see the raw panic path.
-  - **Plan 2 is not done until this is fixed and re-validated on hardware.** The
-    `state/panic_pc` wiring is harmless (publishes "none"), but provides no value until
-    the capture works.
+- 🛑→✅ **BUG FOUND (Plan 2) and ROOT-CAUSED + FIXED.** On-device the selftest
+  **panic-looped**: every boot reported `recovered breadcrumb: none`, forced the
+  panic, rebooted, repeated. The native unit tests pass (they cover
+  `panic_breadcrumb_format`/`_present`, not the on-silicon capture-across-reset),
+  which is exactly why this needed on-device validation.
+  - **Root cause (found by inspection, no hardware): the firmware was not linked with
+    `-Wl,--wrap=esp_panic_handler`.** The Arduino core's `set_arduino_panic_handler()`
+    path only works when that wrap flag redirects `esp_panic_handler` to the core's
+    `__wrap_esp_panic_handler` (which calls the registered callback). Arduino IDE adds
+    the flag via `platform.txt`; **PlatformIO/pioarduino does NOT** (confirmed: the
+    real link had `--wrap=log_printf`/`--wrap=longjmp` but not `esp_panic_handler`).
+    So `on_panic` was dead code → breadcrumb never written. This affected EVERY
+    PlatformIO build, incl. the production controller — the breadcrumb has never worked.
+  - **Fix:** add `-Wl,--wrap=esp_panic_handler` via a shared `[panic_wrap]` ini
+    section to the controller / controller-s3 / selftest envs (commit on the branch).
+    Confirmed the flag is now in the link; builds clean.
+  - **Still pending: hardware re-validation of the fix** (reflash the fixed selftest,
+    confirm boot2 recovers a real `pc=0x..`). Blocked only by the reflash path —
+    piserial5 is offline (no pip/esptool/internet) and the board (TinyUSB) needs a
+    BOOT+RESET into download mode, or a copied-over esptool, to reflash.
+  - General lesson: **any Arduino-core feature gated behind a `platform.txt`
+    `compiler.*.elf.flags` linker flag is silently absent under PlatformIO.** Check the
+    actual link (`pio run -v | grep -- --wrap`) when a core hook "does nothing."
