@@ -297,3 +297,19 @@ NOTE: bench has no ESP-NOW peer, so any MQTT outage >15min would (correctly) tri
 isolation watchdog reboot — kept test outages ~20s to isolate the MQTT-policy behavior.
 NOTE: the board briefly published HA discovery to mqtt.lan under the TEST topic during the
 earlier Ethernet/RTC validation; offered to clean up those retained test-topic messages.
+
+## Resilience inc 3-4 (design 2026-06-16-resilience-3-4-design.md) — A & C done, B pending
+- **Piece A — weather TLS handshake timeout (8s, was 120s default):** shipped to PRODUCTION
+  (PR #35, squash-merged to main). Hardening on top of the weather-wedge signed-comparison
+  fix. NOT yet OTA'd to the live controller (low urgency — user's call).
+- **Piece C — isolation watchdog recovers in place (inc 4b):** done on S3 branch (ba0ba73).
+  On Waveshare, prolonged isolation now triggers ESP-NOW re-init (new
+  EspNowControllerTransport::restart() = esp_now_deinit -> begin) + forced MQTT reconnect,
+  3min grace, THEN reboot as last resort. Classic unchanged (board-gated — re-pinning the
+  channel would disrupt WiFi assoc). Hardware-validated: ESP-NOW re-init runs with no crash;
+  isolate->recover->grace->reboot('recovery failed') works; broker-returns->reconnect-no-reboot
+  works. Native 188, Waveshare+classic clean.
+- **Piece B — MQTT off the control loop (inc 3, the big one):** NOT started. Deferred to a
+  dedicated, staged, heavily-reviewed pass (command-queue + dual-task; ~50 publish sites on
+  the relay-control hot path). Justified by: kCtrlTaskWdtTimeoutMs=15s vs a ~5s+ MQTT
+  connect/subscribe/publish block on the loop task = real task_wdt panic exposure.
