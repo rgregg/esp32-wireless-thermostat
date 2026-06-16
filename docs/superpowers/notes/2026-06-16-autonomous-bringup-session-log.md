@@ -111,3 +111,17 @@ on the bench this firmware boots, drives the real relays safe-off, stays silent,
 no WiFi creds) sits in provisioning — exactly the boot/hardware checkpoint intended. Kept
 the **isolated TEST identity** (test base topic + ESP-NOW ch11/test-LMK) so it can never
 touch production until the cutover step.
+
+### F7 — Full controller firmware BOOTS CLEAN + STABLE on the real board ✅
+Flashed `esp32-furnace-controller-waveshare` (1.48MB, 22.6% of app slot, 21.2% RAM) to
+the real Waveshare board and read the boot:
+- buzzer SILENT (GPIO46 LOW ran first — no alarm);
+- `panic_pc=none wdt_section=none`, `Reset reason: other | last reboot cause: none` (clean);
+- `controller_node_begin=1` → `g_relay_io.begin()` → `Pca9554RelayBackend.begin()` found the
+  expander and set relays safe-off with NO I2C hang/error (begin() contract holds on real HW);
+- isolation watchdog armed; `controller alive` heartbeat every 5s for 40s — **no panic, no
+  watchdog reset, no reboot**: stable.
+- Correctly entered BLE provisioning (fresh NVS, no WiFi creds) — confirms Ethernet is NOT
+  yet wired into main (still WiFi-for-IP). NVS NOT_FOUND lines = expected first-boot noise.
+Milestone: the real production firmware runs on the real board driving the real relay
+hardware, silent and stable. Plan-4 hardware bring-up is functionally COMPLETE.
