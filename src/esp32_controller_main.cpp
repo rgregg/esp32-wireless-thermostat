@@ -8,6 +8,7 @@
 
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
+#include "controller/network_recovery_policy.h"
 #include "controller/pirateweather.h"
 #include "controller/gpio_relay_backend.h"
 #include "controller/panic_breadcrumb_hook.h"
@@ -71,6 +72,10 @@ String g_ctrl_last_ota_error = "none";
 String g_ctrl_last_espnow_error = "none";
 uint16_t g_ctrl_mqtt_seq = 0;
 bool g_ctrl_mqtt_discovery_sent = false;
+// NetworkRecoveryPolicy for MQTT reconnect backoff + subsystem restart.
+// reboot_enabled=false: the isolation watchdog owns device reboots.
+thermostat::NetworkRecoveryPolicy g_ctrl_mqtt_recovery(
+    thermostat::NetworkRecoveryConfig{1000, 60000, 5, 0, false});
 bool g_ctrl_have_shadow = false;
 FurnaceMode g_ctrl_shadow_mode = FurnaceMode::Off;
 FanMode g_ctrl_shadow_fan = FanMode::Automatic;
@@ -2188,14 +2193,34 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     g_ctrl_mqtt_reconfigure_required = false;
     g_ctrl_mqtt_discovery_sent = false;
     g_ctrl_mqtt.disconnect();
-    g_ctrl_last_mqtt_attempt_ms = 0;  // reconnect immediately on next loop
+    g_ctrl_mqtt_recovery.on_disconnected();  // reset backoff after forced reconfigure
   }
-  if (WiFi.status() != WL_CONNECTED || g_ctrl_mqtt.connected()) {
+
+  // Detect a drop: policy thought we were connected but the client is not.
+  if (g_ctrl_mqtt_recovery.connected() && !g_ctrl_mqtt.connected()) {
+    g_ctrl_mqtt_recovery.on_disconnected();
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
     return;
   }
-  if ((now_ms - g_ctrl_last_mqtt_attempt_ms) < kCtrlNetworkRetryMs) {
+  if (g_ctrl_mqtt.connected()) {
     return;
   }
+
+  const thermostat::RecoveryAction act = g_ctrl_mqtt_recovery.poll(now_ms);
+  if (act == thermostat::RecoveryAction::None) {
+    return;
+  }
+  if (act == thermostat::RecoveryAction::RestartSubsystem) {
+    g_ctrl_mqtt.disconnect();
+    g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
+    g_ctrl_mqtt.setSocketTimeout(kCtrlMqttSocketTimeoutS);
+    ctrl_audit("mqtt: subsystem restart (recovery escalation)");
+    return;
+  }
+  // act == Connect (Reboot cannot occur: reboot_enabled=false)
+
   g_ctrl_last_mqtt_attempt_ms = now_ms;
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
 
@@ -2213,9 +2238,11 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   ctrl_breadcrumb_clear();
   if (!ok) {
     g_ctrl_last_mqtt_error = String("connect_state_") + String(g_ctrl_mqtt.state());
+    g_ctrl_mqtt_recovery.on_connect_failed();
     return;
   }
   g_ctrl_last_mqtt_error = "none";
+  g_ctrl_mqtt_recovery.on_connected();
 
   const bool subs_ok =
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/lockout").c_str()) &&
