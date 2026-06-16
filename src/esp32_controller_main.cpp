@@ -114,7 +114,10 @@ thermostat::Pcf85063Rtc g_ctrl_rtc;       // default 0x51, sda42/scl41
 bool g_ctrl_rtc_present = false;          // RTC responded on the bus at boot
 bool g_ctrl_time_valid = false;          // system clock has trustworthy time (RTC or NTP)
 const char *g_ctrl_time_source = "none";  // "rtc" | "ntp" | "none"
-String g_ctrl_ntp_primary;               // persistent storage for the SNTP server name
+// Persistent storage for the SNTP server name. MUST outlive SNTP and MUST NOT be
+// reassigned or mutated after configTime() — SNTP (lwip) retains the .c_str() pointer,
+// not a copy, so a realloc here would be a use-after-free in the lwip task.
+String g_ctrl_ntp_primary;
 volatile bool g_ctrl_ntp_synced = false;  // set by the SNTP sync callback (NOT just "clock set")
 
 // SNTP notification callback — fires when SNTP actually receives a time update. This is
@@ -2655,9 +2658,10 @@ void setup() {
 
   g_relay_io.begin();
 #if defined(CONTROLLER_BOARD_WAVESHARE)
-  // RTC shares the I2C bus the relay backend just brought up. Seed the system clock from
-  // it now; SNTP corrects it once Ethernet is up (see ctrl_time_tick in loop()).
-  g_ctrl_rtc.begin();
+  // The PCA9554 relay backend's begin() (just called above) is the single owner of I2C bus
+  // init for the shared SDA42/SCL41 @100kHz bus. The RTC lives on that same bus, so we do
+  // NOT re-init Wire here (RTC read()/set() only need Wire up, which it now is). Seed the
+  // system clock from the RTC; SNTP corrects it once Ethernet is up (ctrl_time_tick).
   ctrl_seed_time_from_rtc();
 #endif
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
