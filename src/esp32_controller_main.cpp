@@ -44,7 +44,15 @@
 #include "mac_address_utils.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
-thermostat::GpioRelayBackend g_relay_backend;          // defaults: pins 32/33/25/26, non-inverted
+#if defined(CONTROLLER_BOARD_S3)
+// ESP32-S3 bench board has no relay hardware (no PCA9554). GPIO 32/33/25 don't
+// exist on the S3, so drive safe spare S3 GPIOs (nothing wired) to keep pinMode
+// valid. The real S3 board will use Pca9554RelayBackend instead.
+thermostat::GpioRelayBackend g_relay_backend(
+    thermostat::GpioRelayBackendConfig{4, 5, 6, 7});   // heat/cool/fan/spare, non-inverted
+#else
+thermostat::GpioRelayBackend g_relay_backend;          // classic ESP32: pins 32/33/25/26, non-inverted
+#endif
 thermostat::ControllerRelayIo g_relay_io(g_relay_backend);
 thermostat::AuditLog g_audit_log;
 WiFiClient g_ctrl_wifi_client;
@@ -2291,6 +2299,9 @@ void setup() {
     thermostat::panic_breadcrumb_recover_on_boot(panic_buf, sizeof(panic_buf));
     g_ctrl_panic_pc = panic_buf;
   }
+  // Boot diagnostic on serial (visible without MQTT) — recovered crash breadcrumbs.
+  Serial.printf("[boot] panic_pc=%s wdt_section=%s\n",
+                g_ctrl_panic_pc.c_str(), g_ctrl_wdt_section.c_str());
   // Recover and clear the persisted cause of the preceding firmware reboot.
   // Cleared after reading so an uninstrumented reset (panic/brownout/power-on)
   // is reported as "none" rather than the stale prior cause.
