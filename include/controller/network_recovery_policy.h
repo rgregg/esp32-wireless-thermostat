@@ -37,12 +37,13 @@ class NetworkRecoveryPolicy {
   NetworkRecoveryConfig config_{};
   bool connected_ = false;
   bool attempt_in_progress_ = false;
+  bool reboot_requested_ = false;
+  bool has_next_attempt_ = false;  // true once on_connect_failed() has scheduled a retry
   uint32_t consecutive_fails_ = 0;
   uint32_t restart_count_ = 0;
   uint32_t backoff_ms_ = 0;
   uint32_t next_attempt_ms_ = 0;
   uint32_t attempt_start_ms_ = 0;
-  bool started_ = false;
 };
 
 }  // namespace thermostat
