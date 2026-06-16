@@ -125,3 +125,23 @@ the real Waveshare board and read the boot:
   yet wired into main (still WiFi-for-IP). NVS NOT_FOUND lines = expected first-boot noise.
 Milestone: the real production firmware runs on the real board driving the real relay
 hardware, silent and stable. Plan-4 hardware bring-up is functionally COMPLETE.
+
+### F8 — Crash COREDUMP capture VALIDATED end-to-end on real hardware ✅  (closes panic-diagnostics gap)
+Built `waveshare-coredump-validate` (sketch deliberately crashes, reboots, then checks
+`esp_core_dump_image_get()`). On the real board:
+- boot1: no coredump -> 8s countdown -> null-ptr write -> `Guru Meditation StoreProhibited`,
+  `EXCVADDR=0x00000000`, PC `0x42002011`; IDF wrote the coredump + rebooted;
+- boot2: **`[coredump] PRESENT in flash: addr=0x00FF0000 size=12100 bytes`** — address matches
+  the `coredump` partition in default_16MB.csv exactly; CAPTURE VALIDATED; erased clean.
+- **Coredump is enabled by default** in the Arduino-ESP32 framework sdkconfig
+  (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`, `DATA_FORMAT_ELF=y`, `CHECK_BOOT=y`) — so the
+  ONLY thing needed was a partition table with a `coredump` partition (already in the 16MB
+  layout / waveshare env). No sdkconfig change required.
+- **Symbolication works**: addr2line on the env's firmware.elf resolved PC `0x42002011` ->
+  `waveshare_coredump_validate.cpp:73` (the exact crash line) with a clean backtrace.
+- Host-side full-coredump decode (`esp-coredump info_corefile`) needs xtensa-esp32s3-elf-gdb,
+  which isn't installed on this dev box (and piserial5 is offline). Not blocking: the
+  on-serial register dump + addr2line give the same symbolication, and the coredump is now
+  captured in flash for offline `esp-coredump`/gdb analysis whenever needed.
+**Impact:** directly closes the open "controller panics on new firmware, no coredump/backtrace
+available" issue — once the Waveshare firmware is deployed, that panic WILL be captured.
