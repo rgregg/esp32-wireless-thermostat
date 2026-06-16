@@ -59,7 +59,6 @@ thermostat::AuditLog g_audit_log;
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
 WebServer g_ctrl_web(80);
-uint32_t g_ctrl_last_mqtt_attempt_ms = 0;
 uint32_t g_ctrl_last_mqtt_publish_ms = 0;
 bool g_ctrl_last_lockout = false;
 bool g_ctrl_have_lockout = false;
@@ -2221,7 +2220,6 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   }
   // act == Connect (Reboot cannot occur: reboot_enabled=false)
 
-  g_ctrl_last_mqtt_attempt_ms = now_ms;
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
 
   bool ok = false;
@@ -2242,7 +2240,6 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     return;
   }
   g_ctrl_last_mqtt_error = "none";
-  g_ctrl_mqtt_recovery.on_connected();
 
   const bool subs_ok =
       g_ctrl_mqtt.subscribe(self_topic_for("cmd/lockout").c_str()) &&
@@ -2267,10 +2264,12 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   if (!subs_ok) {
     ctrl_audit("mqtt_subscribe_failed: disconnecting to retry");
     g_ctrl_mqtt.disconnect();
-    // Leave g_ctrl_last_mqtt_attempt_ms as-is so kCtrlNetworkRetryMs
-    // backoff is enforced; resetting to 0 would cause rapid reconnect storms.
+    g_ctrl_mqtt_recovery.on_disconnected();   // ensure connected_ is false
+    g_ctrl_mqtt_recovery.on_connect_failed(); // count as failed attempt so backoff/escalation apply
     return;
   }
+  // Both connect AND all subscribes succeeded — policy is now "connected".
+  g_ctrl_mqtt_recovery.on_connected();
   if (g_cfg_ha_discovery_enabled) {
     ctrl_publish_discovery();
   }
