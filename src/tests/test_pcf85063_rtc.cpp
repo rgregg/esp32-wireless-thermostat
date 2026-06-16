@@ -64,4 +64,48 @@ TEST_CASE(rtc_encode_decode_roundtrip) {
   ASSERT_EQ(out.second, 58u);
   ASSERT_EQ(out.weekday, 4u);
 }
+
+TEST_CASE(rtc_epoch_known_value) {
+  // 2026-06-16 14:30:45 UTC == 1781620245 (verified with `date -u`).
+  RtcTime t;
+  t.year = 2026; t.month = 6; t.day = 16; t.hour = 14; t.minute = 30; t.second = 45;
+  ASSERT_TRUE(thermostat::rtc_time_to_epoch(t) == 1781620245LL);
+}
+
+TEST_CASE(rtc_epoch_unix_zero) {
+  // Epoch 0 == 1970-01-01 00:00:00 UTC, a Thursday (weekday 4).
+  RtcTime t = thermostat::rtc_time_from_epoch(0);
+  ASSERT_EQ(t.year, 1970u);
+  ASSERT_EQ(t.month, 1u);
+  ASSERT_EQ(t.day, 1u);
+  ASSERT_EQ(t.hour, 0u);
+  ASSERT_EQ(t.minute, 0u);
+  ASSERT_EQ(t.second, 0u);
+  ASSERT_EQ(t.weekday, 4u);
+}
+
+TEST_CASE(rtc_epoch_roundtrip) {
+  RtcTime in;
+  in.year = 2026; in.month = 6; in.day = 16; in.hour = 14; in.minute = 30; in.second = 45;
+  long long epoch = thermostat::rtc_time_to_epoch(in);
+  RtcTime out = thermostat::rtc_time_from_epoch(epoch);
+  ASSERT_EQ(out.year, in.year);
+  ASSERT_EQ(out.month, in.month);
+  ASSERT_EQ(out.day, in.day);
+  ASSERT_EQ(out.hour, in.hour);
+  ASSERT_EQ(out.minute, in.minute);
+  ASSERT_EQ(out.second, in.second);
+  ASSERT_EQ(out.weekday, 2u);  // 2026-06-16 is a Tuesday
+}
+
+TEST_CASE(rtc_epoch_leap_day) {
+  // 2028-02-29 (leap day) 12:00:00 UTC round-trips correctly.
+  RtcTime in;
+  in.year = 2028; in.month = 2; in.day = 29; in.hour = 12; in.minute = 0; in.second = 0;
+  RtcTime out = thermostat::rtc_time_from_epoch(thermostat::rtc_time_to_epoch(in));
+  ASSERT_EQ(out.year, 2028u);
+  ASSERT_EQ(out.month, 2u);
+  ASSERT_EQ(out.day, 29u);
+  ASSERT_EQ(out.hour, 12u);
+}
 #endif  // THERMOSTAT_RUN_TESTS

@@ -12,6 +12,7 @@
 #include "controller/pirateweather.h"
 #include "controller/gpio_relay_backend.h"
 #include "controller/pca9554_relay_backend.h"
+#include "controller/pcf85063_rtc.h"
 #include "controller/panic_breadcrumb_hook.h"
 #include "weather_icon.h"
 #include "command_builder.h"
@@ -41,6 +42,9 @@
 #include <esp_mac.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <time.h>
+#include <sys/time.h>
+#include <esp_sntp.h>
 #include "ota_web_updater.h"
 #include "controller/audit_log.h"
 #include "web/web_ui_escape.h"
@@ -99,6 +103,90 @@ static String ctrl_ip_local_addr() {
   return (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
 #endif
 }
+
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+// Network-independent time. The PCF85063 RTC seeds the system clock on boot; SNTP (over
+// Ethernet) then corrects it and writes the accurate time back to the RTC. The RTC
+// stores UTC. What to DO with wall-clock time (time-of-day scheduling) is a deferred
+// product decision — this is just the time-keeping plumbing. The RTC shares the I2C bus
+// with the relays (SDA=42/SCL=41), already brought up by the relay backend's begin().
+thermostat::Pcf85063Rtc g_ctrl_rtc;       // default 0x51, sda42/scl41
+bool g_ctrl_rtc_present = false;          // RTC responded on the bus at boot
+bool g_ctrl_time_valid = false;          // system clock has trustworthy time (RTC or NTP)
+const char *g_ctrl_time_source = "none";  // "rtc" | "ntp" | "none"
+String g_ctrl_ntp_primary;               // persistent storage for the SNTP server name
+volatile bool g_ctrl_ntp_synced = false;  // set by the SNTP sync callback (NOT just "clock set")
+
+// SNTP notification callback — fires when SNTP actually receives a time update. This is
+// what distinguishes a real NTP sync from the RTC seed (both set the system clock, so a
+// "time > sane epoch" check alone cannot tell them apart).
+static void ctrl_sntp_sync_cb(struct timeval *) { g_ctrl_ntp_synced = true; }
+
+// Read the RTC and, if its oscillator has been running (time trustworthy), seed the
+// system clock. Called once at boot after the I2C bus is up.
+static void ctrl_seed_time_from_rtc() {
+  thermostat::RtcTime rt;
+  bool osc_ok = false;
+  if (!g_ctrl_rtc.read(rt, osc_ok)) {
+    Serial.println("[time] RTC not responding on I2C");
+    return;
+  }
+  g_ctrl_rtc_present = true;
+  if (!osc_ok) {
+    Serial.println("[time] RTC oscillator stopped (no trusted time) — waiting for NTP");
+    return;
+  }
+  struct timeval tv = {};
+  tv.tv_sec = static_cast<time_t>(thermostat::rtc_time_to_epoch(rt));
+  settimeofday(&tv, nullptr);
+  g_ctrl_time_valid = true;
+  g_ctrl_time_source = "rtc";
+  Serial.printf("[time] seeded from RTC: %04u-%02u-%02uT%02u:%02u:%02uZ\n",
+                rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
+}
+
+// Write the current system time (UTC) back to the RTC. Called after an NTP sync.
+static void ctrl_write_system_time_to_rtc() {
+  if (!g_ctrl_rtc_present) return;
+  const time_t nowt = time(nullptr);
+  const thermostat::RtcTime rt =
+      thermostat::rtc_time_from_epoch(static_cast<long long>(nowt));
+  if (g_ctrl_rtc.set(rt)) {
+    Serial.printf("[time] RTC updated from NTP: %04u-%02u-%02uT%02u:%02u:%02uZ\n",
+                  rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
+  } else {
+    Serial.println("[time] RTC write FAILED");
+  }
+}
+
+// Per-loop: start SNTP once IP is up; on first NTP sync (and hourly after) write the
+// corrected time back to the RTC so it survives reboots / power loss (with a battery).
+static void ctrl_time_tick(uint32_t now_ms) {
+  static bool sntp_started = false;
+  static bool rtc_synced = false;
+  static uint32_t last_rtc_write_ms = 0;
+  if (!sntp_started && ctrl_ip_link_up()) {
+    g_ctrl_ntp_primary = ETH.gatewayIP().toString();  // LAN gateway often serves NTP
+    sntp_set_time_sync_notification_cb(ctrl_sntp_sync_cb);
+    configTime(0, 0, g_ctrl_ntp_primary.c_str(), "pool.ntp.org");  // UTC, no offset
+    sntp_started = true;
+    Serial.printf("[time] SNTP started (servers: %s, pool.ntp.org)\n",
+                  g_ctrl_ntp_primary.c_str());
+  }
+  // Only act on a REAL NTP sync (callback-driven) — not merely "clock is set", which is
+  // already true from the RTC seed.
+  if (g_ctrl_ntp_synced) {
+    g_ctrl_time_valid = true;
+    g_ctrl_time_source = "ntp";
+    if (!rtc_synced ||
+        static_cast<uint32_t>(now_ms - last_rtc_write_ms) >= 3600000UL) {  // hourly
+      ctrl_write_system_time_to_rtc();
+      rtc_synced = true;
+      last_rtc_write_ms = now_ms;
+    }
+  }
+}
+#endif  // CONTROLLER_BOARD_WAVESHARE
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
 WebServer g_ctrl_web(80);
@@ -1862,6 +1950,20 @@ void ctrl_publish_runtime_state() {
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
     g_ctrl_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
   }
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // Network-independent time diagnostics: source (rtc/ntp/none), RTC presence, and the
+  // current UTC time. Lets HA/monitoring see whether the clock is trustworthy.
+  g_ctrl_mqtt.publish(self_topic_for("state/time_source").c_str(), g_ctrl_time_source, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/rtc_present").c_str(),
+                      g_ctrl_rtc_present ? "true" : "false", true);
+  if (g_ctrl_time_valid) {
+    const thermostat::RtcTime rt =
+        thermostat::rtc_time_from_epoch(static_cast<long long>(time(nullptr)));
+    snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02uZ",
+             rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
+    g_ctrl_mqtt.publish(self_topic_for("state/time_utc").c_str(), buf, true);
+  }
+#endif
   g_ctrl_mqtt.publish(self_topic_for("state/error_mqtt").c_str(), g_ctrl_last_mqtt_error.c_str(),
                       true);
   g_ctrl_mqtt.publish(self_topic_for("state/error_ota").c_str(), g_ctrl_last_ota_error.c_str(),
@@ -2552,6 +2654,12 @@ void setup() {
   ota_set_audit_callback(ctrl_runtime_audit_bridge);
 
   g_relay_io.begin();
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // RTC shares the I2C bus the relay backend just brought up. Seed the system clock from
+  // it now; SNTP corrects it once Ethernet is up (see ctrl_time_tick in loop()).
+  g_ctrl_rtc.begin();
+  ctrl_seed_time_from_rtc();
+#endif
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
   if (g_ctrl_wdt_section != "none") {
@@ -2621,6 +2729,9 @@ void loop() {
     ctrl_ensure_web_ready();
     ctrl_ensure_mqtt_connected(now);
     g_ctrl_mqtt.loop();
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+    ctrl_time_tick(now);  // start SNTP once IP up; sync NTP time back to the RTC
+#endif
     const bool mqtt_primary_active =
         g_ctrl_mqtt.connected() &&
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);

@@ -233,3 +233,32 @@ no new unused-var warnings. One **important** finding actioned:
   → ESP-NOW channel pinning stays safe" invariant.
 Other nits (heartbeat double-eval; announce-IP freshness self-heals on MQTT reconnect after a
 flap-with-new-IP) noted, no action needed.
+
+## RTC + SNTP time plumbing — IMPLEMENTED + VALIDATED on hardware ✅
+Wired the PCF85063 RTC + SNTP into the controller firmware (Waveshare-gated). Scheduling
+(use of wall-clock time) stays deferred — this is just time-keeping.
+- **Pure conversions** `rtc_time_to_epoch`/`rtc_time_from_epoch` added to `pcf85063_rtc.h`
+  (Howard Hinnant civil-date math — no libc/TZ, platform-agnostic) + 4 native tests
+  (known value, epoch-0/Thursday, round-trip, leap day). Native tests 176→**180**, 0 fail.
+- **Boot:** read RTC; if oscillator-OK, `settimeofday()` seeds the system clock (UTC).
+- **SNTP:** once Ethernet has IP, `configTime(0,0, <ETH gateway>, "pool.ntp.org")` (UTC).
+  Server names kept in a persistent global String (configTime stores the pointer).
+- **NTP writeback:** on a REAL sync (SNTP notification callback) write system time back to
+  the RTC; refresh hourly. The RTC stores correct UTC thereafter.
+- **Telemetry:** `state/time_source` (rtc|ntp|none), `state/rtc_present`, `state/time_utc`.
+
+### Bug found + fixed during bring-up (good catch)
+First cut gated the RTC-writeback on `time(nullptr) > sane_epoch` ("clock is set"). That is
+true the instant the RTC seed runs, so it fired "RTC updated from NTP" immediately, before
+SNTP even started, and mislabeled the source as ntp. Fix: detect a real NTP sync via
+`sntp_set_time_sync_notification_cb()` and gate the writeback + source="ntp" on that flag.
+
+### F10 — on-board validation
+`[time] seeded from RTC: 2026-06-16T14:00:15Z` → `[time] SNTP started (servers: 10.0.0.1,
+pool.ntp.org)` → `[time] RTC updated from NTP: 2026-06-16T04:51:09Z`. The RTC held a STALE
+nominal time (14:00, left over from the earlier driver test that set "12:00"); NTP corrected
+it to true UTC and wrote it back — exactly the intended behavior, and the premature-writeback
+bug is gone (writeback now strictly follows the sync). Note: full correct-time-on-cold-boot
+still wants the RTC battery (F3); on USB-power resets the oscillator persists, and NTP
+corrects within seconds of Ethernet up regardless.
+Future nicety (not done): wall-clock timestamps in the audit log.
