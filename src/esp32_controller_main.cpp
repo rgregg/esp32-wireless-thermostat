@@ -149,6 +149,12 @@ constexpr uint32_t kCtrlWeatherPollMs = 15UL * 60UL * 1000UL;
 // Watchdog timeout (kCtrlTaskWdtTimeoutMs) so a stalled fetch aborts long before
 // the watchdog would panic.
 constexpr uint32_t kCtrlHttpTimeoutMs = 4000;
+// Bound the TLS handshake for weather HTTPS fetches. WiFiClientSecure defaults to a
+// 120s handshake timeout, so a stalled handshake could block the weather task for up to
+// two minutes. Cap it to a few seconds so a failed handshake returns promptly (the fetch
+// just fails and retries next poll) instead of leaving the task apparently "wedged".
+// Given in SECONDS (NetworkClientSecure::setHandshakeTimeout multiplies by 1000).
+constexpr uint32_t kCtrlTlsHandshakeTimeoutS = 8;
 // Steady-state Task Watchdog timeout. Set explicitly in setup() (and mirrored in
 // ota_web_updater.cpp's post-OTA restore) so behavior is deterministic regardless
 // of the Arduino default. Must exceed every synchronous network timeout above.
@@ -723,6 +729,7 @@ bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out)
   if (lat_out == nullptr || lon_out == nullptr || zip[0] == '\0') return false;
   WiFiClientSecure client;
   client.setInsecure();
+  client.setHandshakeTimeout(kCtrlTlsHandshakeTimeoutS);  // bound TLS handshake (default 120s)
   HTTPClient http;
   const std::string url = pirateweather::geocode_url(zip);
   if (!http.begin(client, url.c_str())) {
@@ -754,6 +761,7 @@ bool ctrl_fetch_pirateweather_current(float lat, float lon, const char *api_key,
   }
   WiFiClientSecure client;
   client.setInsecure();
+  client.setHandshakeTimeout(kCtrlTlsHandshakeTimeoutS);  // bound TLS handshake (default 120s)
   HTTPClient http;
   const std::string url = pirateweather::forecast_url(api_key, lat, lon);
   if (!http.begin(client, url.c_str())) {
