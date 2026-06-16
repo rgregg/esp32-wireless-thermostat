@@ -104,10 +104,30 @@ Workflow to validate on the remote bench:
   - **Fix:** add `-Wl,--wrap=esp_panic_handler` via a shared `[panic_wrap]` ini
     section to the controller / controller-s3 / selftest envs (commit on the branch).
     Confirmed the flag is now in the link; builds clean.
-  - **Still pending: hardware re-validation of the fix** (reflash the fixed selftest,
-    confirm boot2 recovers a real `pc=0x..`). Blocked only by the reflash path —
-    piserial5 is offline (no pip/esptool/internet) and the board (TinyUSB) needs a
-    BOOT+RESET into download mode, or a copied-over esptool, to reflash.
+  - ✅ **FIX VALIDATED ON HARDWARE (2026-06-16, via piserial5, button-free).** After
+    flashing the fixed firmware: boot1 panics, **boot2 recovers `core1 pc=0x42002579
+    bt=0x42002576,0x42005e38,0x4037b891`** and idles (no re-loop). addr2line resolves
+    those to `loop() at panic_selftest.cpp:51` (the deliberate null write) → `loopTask`
+    → `vPortTaskWrapper` — exact crash site + correct backtrace. The breadcrumb works.
+
+### Button-free flashing of the Feather over SSH (the recipe that worked)
+piserial5 is offline, so: download the **standalone esptool aarch64 binary** on a
+machine with internet (`github.com/espressif/esptool/releases` →
+`esptool-vX-linux-aarch64.tar.gz`), `scp` + untar it onto piserial5. Then, all over SSH:
+1. **udev rule** so re-enumerated ESP ports are readable without the dialout group:
+   `SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", MODE="0666"` (+ `239a`/`8113`);
+   `sudo udevadm control --reload-rules && sudo udevadm trigger`.
+2. **1200-baud touch → ROM download mode** (no BOOT button!): `stty -F <feather-tty> 1200 hupcl`.
+   The Adafruit ESP32-S3 TinyUSB CDC reboots to the **303a USB-Serial-JTAG download** unit
+   (NOT UF2) — stable, since download mode doesn't run the looping app. A clean by-id
+   appears: `usb-Espressif_USB_JTAG_serial_debug_unit_<MAC>-if00`.
+3. **Flash** via that JTAG port: `sudo esptool --chip esp32s3 --port <jtag-byid>
+   --after hard_reset write_flash 0x0 bootloader.bin 0x8000 partitions.bin 0xe000
+   boot_app0.bin 0x10000 firmware.bin` (offsets from `pio run -t upload -v`).
+4. **Read** the booted app via the Feather TinyUSB by-id (`usb-Adafruit_Feather...`)
+   with a reconnecting `cat` loop (TinyUSB ignores DTR/RTS → reads don't reset it).
+
+This is a fully remote, button-free flash→read→validate loop on a real host.
   - General lesson: **any Arduino-core feature gated behind a `platform.txt`
     `compiler.*.elf.flags` linker flag is silently absent under PlatformIO.** Check the
     actual link (`pio run -v | grep -- --wrap`) when a core hook "does nothing."
