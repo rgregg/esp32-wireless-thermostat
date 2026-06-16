@@ -262,3 +262,38 @@ bug is gone (writeback now strictly follows the sync). Note: full correct-time-o
 still wants the RTC battery (F3); on USB-power resets the oscillator persists, and NTP
 corrects within seconds of Ethernet up regardless.
 Future nicety (not done): wall-clock timestamps in the audit log.
+
+## Resilience increments — ON-DEVICE VALIDATION + a real bug found & fixed
+Set up an ISOLATED test broker (Dockerized mosquitto on the dev box, 192.168.154.20) so we
+never touch the house mqtt.lan. Repointed the bench board's mqtt_host to it via the web UI
+(POST /config). Board connected over Ethernet under the test base topic.
+
+### Inc 1+2 (MQTT recovery) — VALIDATED ✅
+Broker outage/recovery cycles: MQTT goes down → recovery policy backs off (capped
+exponential) and escalates to RestartSubsystem at ~33s cadence (audit log) — NOT a tight
+loop (the old pre-fix bug) — and reconnects when the broker returns. The MQTT policy never
+reboots (reboot_enabled=false). Confirmed over 4 consecutive outage/recovery cycles.
+
+### F11 — REAL BUG found via the validation: spurious weather-wedge reboot ✅ FIXED
+First outage cycle rebooted the board. Diagnostics (the panic/reboot breadcrumb we built!)
+said `reboot_reason=weather_wedge: ...heartbeat stale uptime=730s`, `reset_reason=software`,
+`panic_pc=none`. Root cause (math-proven, can't fire at 730s with a 30min threshold unless
+the unsigned subtraction wrapped): `ctrl_poll_weather` compared the loop-top `now` against
+the weather task's heartbeat with UNSIGNED arithmetic. `now` is captured once at loop top;
+the heartbeat is updated concurrently by the weather task (core 0). On an MQTT reconnect the
+loop BLOCKS for connect + 19 subscribes + the discovery/state publish burst (100s of ms to
+seconds), so the weather task pushes the heartbeat AHEAD of the stale `now` → `(now -
+heartbeat)` underflows to ~4.29e9 > threshold → spurious esp_restart.
+- **This is very likely the ORIGINAL "weather task wedging → 30-min outages" symptom** that
+  started the whole project, and it is NOT board-gated → affects the production esp32dev too.
+- **Fix:** pure native-tested `weather_heartbeat_wedged()` (include/controller/weather_watchdog.h)
+  using SIGNED millis() arithmetic (a heartbeat ahead of `now` = fresh; real staleness =
+  wedged; wrap-safe). 8 native tests (188 total).
+- **Validated on hardware:** after the fix the board survived 4 outage/recovery cycles with
+  ZERO spurious reboots (uptime monotonic), while MQTT recovered each time. Builds:
+  Waveshare + classic clean.
+
+NOTE: bench has no ESP-NOW peer, so any MQTT outage >15min would (correctly) trip the
+isolation watchdog reboot — kept test outages ~20s to isolate the MQTT-policy behavior.
+NOTE: the board briefly published HA discovery to mqtt.lan under the TEST topic during the
+earlier Ethernet/RTC validation; offered to clean up those retained test-topic messages.
