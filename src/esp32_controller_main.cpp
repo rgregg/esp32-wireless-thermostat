@@ -244,6 +244,16 @@ struct CtrlInboundMsg {
 QueueHandle_t g_ctrl_inbound_q = nullptr;
 volatile uint32_t g_ctrl_inbound_dropped = 0;  // queue-full drops (diagnostic)
 
+// MQTT client serialization. g_ctrl_mqtt (PubSubClient) is NOT thread-safe; this mutex
+// serializes all access between the dedicated MQTT task (connect + loop) and the control
+// loop (publish). The control loop uses a TRY-lock for publishing so a slow connect on
+// the MQTT task can never block relay control. g_ctrl_mqtt_up mirrors connected() for the
+// many out-of-lock status reads (isolation watchdog, heartbeat, etc.). g_ctrl_just_connected
+// signals the control loop to (re)publish discovery + announce + a full state snapshot.
+SemaphoreHandle_t g_ctrl_mqtt_mtx = nullptr;
+std::atomic<bool> g_ctrl_mqtt_up{false};
+std::atomic<bool> g_ctrl_just_connected{false};
+
 // --- Task Watchdog breadcrumb -----------------------------------------------
 // A hard Task-WDT panic doesn't run our reboot hook, so reboot_reason stays
 // "none". To learn *which* blocking network call was running when the watchdog
@@ -753,9 +763,9 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "mqtt_enabled") {
     g_cfg_ctrl_mqtt_enabled = (strcmp(raw_value, "1") == 0);
     g_ctrl_cfg.putBool("mqtt_en", g_cfg_ctrl_mqtt_enabled);
-    if (!g_cfg_ctrl_mqtt_enabled && g_ctrl_mqtt.connected()) {
-      g_ctrl_mqtt.disconnect();
-    }
+    // The MQTT task disconnects under the mutex via reconfigure_required (the reconfigure
+    // block runs before the mqtt-enabled check). Config writers (this may run on the web
+    // task) must NOT touch g_ctrl_mqtt directly.
     g_ctrl_mqtt_reconfigure_required = true;
   } else if (key == "espnow_enabled") {
     g_cfg_ctrl_espnow_enabled = (strcmp(raw_value, "1") == 0);
@@ -1050,14 +1060,10 @@ void ctrl_poll_weather(uint32_t now_ms) {
 
   g_controller->app().set_outdoor_weather(temp_c, icon);
   g_controller->transport().publish_weather(temp_c, icon);
-
-  if (g_ctrl_mqtt.connected()) {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(temp_c));
-    g_ctrl_mqtt.publish(self_topic_for("state/outdoor_temp_c").c_str(), buf, true);
-    g_ctrl_mqtt.publish(self_topic_for("state/weather_condition").c_str(),
-                        thermostat::weather_icon_display_text(icon), true);
-  }
+  // The outdoor temp/condition are republished by ctrl_publish_runtime_state() (which runs
+  // on the control-loop task under the MQTT mutex) within kCtrlMqttPublishMs. We don't
+  // publish them directly here so ctrl_poll_weather never touches g_ctrl_mqtt — its wedge
+  // check must run regardless of the MQTT mutex / a busy MQTT task.
 }
 
 void ctrl_publish_discovery() {
@@ -1410,8 +1416,16 @@ void ctrl_check_stale_devices(uint32_t now) {
 
 // Audit log: MQTT publish callback and helpers
 void ctrl_audit_publish(const char *msg) {
-  if (g_ctrl_mqtt.connected()) {
-    g_ctrl_mqtt.publish(self_topic_for("state/audit").c_str(), msg, false);
+  // Called from the audit log on whatever task logged (loop, weather, web). Use a TRY-lock
+  // so this best-effort MQTT mirror never blocks, never corrupts g_ctrl_mqtt via a
+  // concurrent publish, and never deadlocks if the loop task is already inside its locked
+  // publish section. The entry is always in the in-memory audit log regardless.
+  if (g_ctrl_mqtt_mtx == nullptr) return;
+  if (xSemaphoreTake(g_ctrl_mqtt_mtx, 0) == pdTRUE) {
+    if (g_ctrl_mqtt.connected()) {
+      g_ctrl_mqtt.publish(self_topic_for("state/audit").c_str(), msg, false);
+    }
+    xSemaphoreGive(g_ctrl_mqtt_mtx);
   }
 }
 
@@ -1543,7 +1557,7 @@ void ctrl_web_handle_status_get() {
     ctrl_ip_link_up() ? "true" : "false",
     ctrl_ip_local_addr().c_str(),
     (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0,
-    g_ctrl_mqtt.connected() ? "true" : "false",
+    g_ctrl_mqtt_up.load() ? "true" : "false",
     app.has_indoor_temperature() ? "true" : "false",
     temp_str,
     app.has_indoor_humidity() ? "true" : "false",
@@ -1884,7 +1898,13 @@ void ctrl_ensure_web_ready() {
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
     ota_web_setup(g_ctrl_web);
     ota_set_prepare_callback([]() {
+      // Runs on the web task. Take the MQTT mutex so the dedicated MQTT task is not mid
+      // connect/loop/publish when we tear its socket out from under it. (The MQTT task and
+      // control loop both skip all MQTT work while ota_web_in_progress() is true.)
+      if (g_ctrl_mqtt_mtx != nullptr) xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY);
       g_ctrl_wifi_client.stop();
+      g_ctrl_mqtt_up.store(false);
+      if (g_ctrl_mqtt_mtx != nullptr) xSemaphoreGive(g_ctrl_mqtt_mtx);
       Serial.printf("[ota] prepare: closed MQTT socket, heap=%u\n", ESP.getFreeHeap());
     });
     g_ctrl_web.begin();
@@ -2385,14 +2405,18 @@ void ctrl_ensure_wifi_connected(uint32_t now_ms) {
 }
 
 void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
-  if (g_cfg_ctrl_mqtt_host.length() == 0 || !g_cfg_ctrl_mqtt_enabled) {
-    return;
-  }
+  // Handle a forced reconfigure (incl. MQTT being disabled or host/port/creds changing)
+  // FIRST, before the enabled/host early-return, so the disconnect happens here on the
+  // MQTT task under the mutex. Config writers just set the flag.
   if (g_ctrl_mqtt_reconfigure_required) {
     g_ctrl_mqtt_reconfigure_required = false;
     g_ctrl_mqtt_discovery_sent = false;
-    g_ctrl_mqtt.disconnect();
+    if (g_ctrl_mqtt.connected()) g_ctrl_mqtt.disconnect();
+    g_ctrl_mqtt_up.store(false);
     g_ctrl_mqtt_recovery.on_disconnected();  // reset backoff after forced reconfigure
+  }
+  if (g_cfg_ctrl_mqtt_host.length() == 0 || !g_cfg_ctrl_mqtt_enabled) {
+    return;
   }
 
   // Detect a drop: policy thought we were connected but the client is not.
@@ -2468,23 +2492,29 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     g_ctrl_mqtt_recovery.on_connect_failed(); // count as failed attempt so backoff/escalation apply
     return;
   }
-  // Both connect AND all subscribes succeeded — policy is now "connected".
+  // Both connect AND all subscribes succeeded — policy is now "connected". The discovery
+  // + announce + full-state burst is published by the control loop (ctrl_publish_on_connect
+  // via g_ctrl_just_connected) so it reads controller state on the loop task, not here on
+  // the MQTT task.
   g_ctrl_mqtt_recovery.on_connected();
+  g_ctrl_just_connected.store(true);
+}
+
+// Publish discovery + announce + a full state snapshot after an MQTT (re)connect. MUST run
+// on the control-loop task (triggered by g_ctrl_just_connected) and under the MQTT mutex —
+// it reads controller state, which only the loop task may touch.
+void ctrl_publish_on_connect() {
   if (g_cfg_ha_discovery_enabled) {
     ctrl_publish_discovery();
   }
   ctrl_publish_runtime_state();
-
-  // Publish announce so other devices/tools can discover us
-  {
-    char announce_buf[256];
-    snprintf(announce_buf, sizeof(announce_buf),
-             "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
-             THERMOSTAT_FIRMWARE_VERSION,
-             g_cfg_ctrl_hostname.c_str(),
-             ctrl_ip_local_addr().c_str());
-    g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
-  }
+  char announce_buf[256];
+  snprintf(announce_buf, sizeof(announce_buf),
+           "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
+           THERMOSTAT_FIRMWARE_VERSION,
+           g_cfg_ctrl_hostname.c_str(),
+           ctrl_ip_local_addr().c_str());
+  g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
 }
 
 void ctrl_ensure_mdns_ready() {
@@ -2646,6 +2676,7 @@ void setup() {
   g_ctrl_mqtt.setBufferSize(1024);
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
   g_ctrl_inbound_q = xQueueCreate(16, sizeof(CtrlInboundMsg));
+  g_ctrl_mqtt_mtx = xSemaphoreCreateMutex();
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 
   bool ok = false;
@@ -2728,11 +2759,18 @@ void loop() {
   // During OTA upload, suspend non-essential work to free CPU and
   // network bandwidth for the flash write.
   if (ota_web_in_progress()) {
-    // Disconnect MQTT to free TCP socket buffers for OTA upload.
-    if (g_ctrl_mqtt.connected()) {
-      g_ctrl_mqtt.disconnect();
-      Serial.printf("[ota] disconnected MQTT to free heap: %u bytes free\n",
-                    ESP.getFreeHeap());
+    // Disconnect MQTT to free TCP socket buffers for OTA upload. The prepare callback
+    // already does this under the mutex; this is a belt-and-suspenders catch, also under
+    // the mutex so it can't race the (now-skipping) MQTT task.
+    if (g_ctrl_mqtt_up.load() && g_ctrl_mqtt_mtx != nullptr &&
+        xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
+      if (g_ctrl_mqtt.connected()) {
+        g_ctrl_mqtt.disconnect();
+        g_ctrl_mqtt_up.store(false);
+        Serial.printf("[ota] disconnected MQTT to free heap: %u bytes free\n",
+                      ESP.getFreeHeap());
+      }
+      xSemaphoreGive(g_ctrl_mqtt_mtx);
     }
     ota_web_process_flash_ops();
     delay(1);
@@ -2746,7 +2784,7 @@ void loop() {
     Serial.printf("[%lu] controller alive, ip=%s, mqtt=%s, prov=%s\n",
                   now,
                   ctrl_ip_link_up() ? ctrl_ip_local_addr().c_str() : "no",
-                  g_ctrl_mqtt.connected() ? "yes" : "no",
+                  g_ctrl_mqtt_up.load() ? "yes" : "no",
                   g_ctrl_wifi.provisioning_active() ? "active" : "idle");
   }
   if (g_ctrl_reboot_requested && static_cast<uint32_t>(now - g_ctrl_reboot_at_ms) < 0x80000000u) {
@@ -2766,25 +2804,50 @@ void loop() {
     // WifiProvisioningManager::set_credentials); association happens ONLY in
     // ensure_connected(), which is gated out here — so ESP-NOW channel pinning is safe.
     ctrl_ensure_wifi_connected(now);
-    wifi_watchdog_tick(now, g_ctrl_mqtt.connected());
+    wifi_watchdog_tick(now, g_ctrl_mqtt_up.load());
 #endif
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
-    ctrl_ensure_mqtt_connected(now);
-    g_ctrl_mqtt.loop();
-    // Drain inbound MQTT commands the callback enqueued, applying them HERE on the
-    // control-loop task (single-threaded with tick()).
-    if (g_ctrl_inbound_q != nullptr) {
-      CtrlInboundMsg in;
-      while (xQueueReceive(g_ctrl_inbound_q, &in, 0) == pdTRUE) {
-        ctrl_handle_mqtt_message(in.topic, in.payload, in.len);
+    // ---- MQTT connection + receive. Stage 3 relocates this block to the dedicated MQTT
+    //      task; for now it runs here under the (uncontended) mutex. ----
+    if (xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
+      ctrl_ensure_mqtt_connected(now);  // connect+subscribe; sets g_ctrl_just_connected
+      g_ctrl_mqtt.loop();                // receive -> inbound queue
+      g_ctrl_mqtt_up.store(g_ctrl_mqtt.connected());
+      xSemaphoreGive(g_ctrl_mqtt_mtx);
+    }
+    // ---- Drain inbound commands + publish. ALWAYS the control-loop task, under the MQTT
+    //      mutex (Stage 3 makes this a TRY-lock so a slow connect can't block control). ----
+    if (xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
+      if (g_ctrl_inbound_q != nullptr) {
+        CtrlInboundMsg in;
+        while (xQueueReceive(g_ctrl_inbound_q, &in, 0) == pdTRUE) {
+          ctrl_handle_mqtt_message(in.topic, in.payload, in.len);
+        }
       }
+      if (g_ctrl_just_connected.exchange(false)) {
+        ctrl_publish_on_connect();
+      }
+      if (g_ctrl_mqtt_up.load()) {
+        if (!g_ctrl_have_lockout || g_ctrl_last_lockout != snap.hvac_lockout ||
+            (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
+          g_ctrl_last_mqtt_publish_ms = now;
+          ctrl_publish_runtime_state();
+        }
+        // Periodically clean up stale peer device discovery topics.
+        static uint32_t last_stale_check_ms = 0;
+        if (static_cast<uint32_t>(now - last_stale_check_ms) >= kStaleCheckIntervalMs) {
+          last_stale_check_ms = now;
+          ctrl_check_stale_devices(now);
+        }
+      }
+      xSemaphoreGive(g_ctrl_mqtt_mtx);
     }
 #if defined(CONTROLLER_BOARD_WAVESHARE)
     ctrl_time_tick(now);  // start SNTP once IP up; sync NTP time back to the RTC
 #endif
     const bool mqtt_primary_active =
-        g_ctrl_mqtt.connected() &&
+        g_ctrl_mqtt_up.load() &&
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
     ctrl_poll_weather(now);
@@ -2798,7 +2861,7 @@ void loop() {
       const uint32_t hb_ms = g_controller->app().runtime().heartbeat_last_seen_ms();
       const bool espnow_active = (hb_ms > 0) &&
           (static_cast<uint32_t>(now - hb_ms) < kCtrlIsolationRebootMs);
-      const bool isolated = !g_ctrl_mqtt.connected() && !espnow_active;
+      const bool isolated = !g_ctrl_mqtt_up.load() && !espnow_active;
 
       if (!isolated) {
         g_ctrl_isolation_start_ms = 0;
@@ -2806,7 +2869,7 @@ void loop() {
       } else if (g_ctrl_isolation_start_ms == 0) {
         g_ctrl_isolation_start_ms = now;
         Serial.printf("[watchdog] isolation_start: mqtt=%d espnow_hb=%lu ago=%lums\n",
-                      g_ctrl_mqtt.connected() ? 1 : 0,
+                      g_ctrl_mqtt_up.load() ? 1 : 0,
                       static_cast<unsigned long>(hb_ms),
                       hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
       } else {
@@ -2825,9 +2888,8 @@ void loop() {
             ctrl_audit("isolation: %lus isolated — recovering in place (esp-now re-init + mqtt reconnect)",
                        static_cast<unsigned long>(isolated_for / 1000));
             const bool espnow_ok = g_controller->transport().restart();
-            g_ctrl_mqtt.disconnect();
             g_ctrl_mqtt_recovery.on_disconnected();   // reset backoff -> immediate reconnect
-            g_ctrl_mqtt_reconfigure_required = true;  // clean reconnect (re-subscribe + rediscover)
+            g_ctrl_mqtt_reconfigure_required = true;  // MQTT task disconnects + reconnects cleanly
             g_ctrl_isolation_recovery_done = true;
             g_ctrl_isolation_start_ms = now;          // restart clock; grace window now applies
             ctrl_audit("isolation: recovery attempted (espnow_reinit=%d), grace %lus before reboot",
@@ -2837,7 +2899,7 @@ void loop() {
             // Recovery did not restore connectivity — reboot as the true last resort.
             ctrl_audit("isolation_reboot: still isolated %lus after in-place recovery, mqtt=%d espnow_hb=%lu",
                        static_cast<unsigned long>(isolated_for / 1000),
-                       g_ctrl_mqtt.connected() ? 1 : 0,
+                       g_ctrl_mqtt_up.load() ? 1 : 0,
                        static_cast<unsigned long>(hb_ms));
             ctrl_persist_reboot_reason("isolation: mqtt+espnow down, recovery failed");
             ESP.restart();
@@ -2848,7 +2910,7 @@ void loop() {
           // WiFi watchdog also covers outright WiFi loss.
           ctrl_audit("isolation_reboot: isolated for %lus, mqtt=%d espnow_hb=%lu",
                      static_cast<unsigned long>(isolated_for / 1000),
-                     g_ctrl_mqtt.connected() ? 1 : 0,
+                     g_ctrl_mqtt_up.load() ? 1 : 0,
                      static_cast<unsigned long>(hb_ms));
           {
             char reason[80];
@@ -2862,24 +2924,8 @@ void loop() {
       }
     }
 
-    if (g_ctrl_mqtt.connected()) {
-      if (!g_ctrl_have_lockout || g_ctrl_last_lockout != snap.hvac_lockout ||
-          (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
-        g_ctrl_last_mqtt_publish_ms = now;
-        ctrl_publish_runtime_state();
-      }
-
-      // Periodically check for and clean up stale peer device discovery topics
-      {
-        static uint32_t last_stale_check_ms = 0;
-        if (static_cast<uint32_t>(now - last_stale_check_ms) >= kStaleCheckIntervalMs) {
-          last_stale_check_ms = now;
-          ctrl_check_stale_devices(now);
-        }
-      }
-    }
   }
-  ota_rollback_check(ctrl_ip_link_up() && g_ctrl_mqtt.connected());
+  ota_rollback_check(ctrl_ip_link_up() && g_ctrl_mqtt_up.load());
   delay(100);
 }
 #endif
