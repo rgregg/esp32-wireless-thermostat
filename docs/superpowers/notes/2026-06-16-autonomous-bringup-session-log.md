@@ -313,3 +313,24 @@ earlier Ethernet/RTC validation; offered to clean up those retained test-topic m
   dedicated, staged, heavily-reviewed pass (command-queue + dual-task; ~50 publish sites on
   the relay-control hot path). Justified by: kCtrlTaskWdtTimeoutMs=15s vs a ~5s+ MQTT
   connect/subscribe/publish block on the loop task = real task_wdt panic exposure.
+
+## Piece B — MQTT off the control loop: COMPLETE (3 stages + review fixes)
+Implemented in 3 build-and-test stages on the S3 branch:
+- **Stage 1** (inbound command queue): callback parse-only enqueues; loop drains + applies
+  via ctrl_handle_mqtt_message — controller-state mutation single-threaded with tick().
+- **Stage 2** (mutex + connect/publish split): g_ctrl_mqtt_mtx serializes g_ctrl_mqtt;
+  g_ctrl_mqtt_up mirrors connected(); g_ctrl_just_connected drives the on-connect
+  discovery/announce/state burst from the loop. Audited + fixed every cross-task g_ctrl_mqtt
+  touch (audit_publish try-lock, weather no-publish, config-disconnect via reconfigure flag,
+  OTA prepare under mutex, isolation recovery via flag).
+- **Stage 3** (cutover): new ctrl_mqtt_task (core 0) owns connect+receive; loop publishes
+  under TRY-lock so a blocking connect can NEVER stall relay control (kills the task_wdt
+  exposure). 
+Adversarial concurrency review (esp-idf-engineer) found a **critical use-after-free** (C1:
+web config writes realloc the mqtt cred Strings the MQTT task reads during connect) — fixed
+by holding the mutex across config writes. Also W1 (atomic reconfigure/discovery flags +
+exchange test-and-clear), W2 (queue 16->32 + surfaced drop counter state/inbound_dropped),
+S3 (MQTT-task stack measured 5380B free of 8192). Validated on hardware: clean boot, command
+round-trip + rapid burst (FIFO), broker outage keeps loop ticking (uptime monotonic, no
+reboot) while MQTT task backs off, recovery, config-POST-during-operation no crash. Native
+188, Waveshare + classic clean. **Resilience inc 3-4 (A+B+C) all DONE.**
