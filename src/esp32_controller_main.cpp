@@ -205,7 +205,7 @@ String g_ctrl_last_mqtt_error = "none";
 String g_ctrl_last_ota_error = "none";
 String g_ctrl_last_espnow_error = "none";
 uint16_t g_ctrl_mqtt_seq = 0;
-bool g_ctrl_mqtt_discovery_sent = false;
+std::atomic<bool> g_ctrl_mqtt_discovery_sent{false};
 // NetworkRecoveryPolicy for MQTT reconnect backoff + subsystem restart.
 // reboot_enabled=false: the isolation watchdog owns device reboots.
 thermostat::NetworkRecoveryPolicy g_ctrl_mqtt_recovery(
@@ -242,7 +242,7 @@ struct CtrlInboundMsg {
   uint16_t len;
 };
 QueueHandle_t g_ctrl_inbound_q = nullptr;
-volatile uint32_t g_ctrl_inbound_dropped = 0;  // queue-full drops (diagnostic)
+std::atomic<uint32_t> g_ctrl_inbound_dropped{0};  // queue-full drops (surfaced in state/inbound_dropped)
 
 // MQTT client serialization. g_ctrl_mqtt (PubSubClient) is NOT thread-safe; this mutex
 // serializes all access between the dedicated MQTT task (connect + loop) and the control
@@ -250,6 +250,10 @@ volatile uint32_t g_ctrl_inbound_dropped = 0;  // queue-full drops (diagnostic)
 // the MQTT task can never block relay control. g_ctrl_mqtt_up mirrors connected() for the
 // many out-of-lock status reads (isolation watchdog, heartbeat, etc.). g_ctrl_just_connected
 // signals the control loop to (re)publish discovery + announce + a full state snapshot.
+// MUST stay a NON-recursive mutex: ctrl_audit_publish() relies on a try-lock self-failing
+// when the loop task already holds this (it calls ctrl_audit from inside its locked publish
+// section). A recursive mutex would let ctrl_audit_publish re-enter g_ctrl_mqtt.publish()
+// mid-ctrl_publish_runtime_state() and corrupt the PubSubClient TX buffer.
 SemaphoreHandle_t g_ctrl_mqtt_mtx = nullptr;
 std::atomic<bool> g_ctrl_mqtt_up{false};
 std::atomic<bool> g_ctrl_just_connected{false};
@@ -438,7 +442,7 @@ String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
 String g_cfg_ctrl_devices = "";  // NVS "devices": semicolon-separated "MAC[=role]"
 String g_cfg_ctrl_pirateweather_api_key = THERMOSTAT_CONTROLLER_PIRATEWEATHER_API_KEY;
 String g_cfg_ctrl_pirateweather_zip = THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP;
-bool g_ctrl_mqtt_reconfigure_required = false;
+std::atomic<bool> g_ctrl_mqtt_reconfigure_required{false};  // cross-task (web/loop write, MQTT task consumes)
 bool g_ctrl_cfg_reboot_required = false;
 bool g_ctrl_temp_unit_f = false;
 uint16_t g_cfg_fan_circ_period_min = 60;
@@ -1484,6 +1488,13 @@ void ctrl_web_handle_config_get() {
 
 void ctrl_web_handle_config_post() {
   int updated = 0;
+  // Hold the MQTT mutex across all config writes. ctrl_try_update_runtime_config mutates
+  // shared config Strings (mqtt_host/user/password/client_id) that the MQTT task reads via
+  // .c_str() during connect — without this, a config POST during a connect could realloc a
+  // String buffer under the TCP stack's feet (use-after-free). The MQTT task reads those
+  // Strings only while holding the same mutex, so this serializes them.
+  const bool locked =
+      g_ctrl_mqtt_mtx != nullptr && xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE;
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
     const String value = g_ctrl_web.arg(i);
@@ -1491,6 +1502,7 @@ void ctrl_web_handle_config_post() {
       ++updated;
     }
   }
+  if (locked) xSemaphoreGive(g_ctrl_mqtt_mtx);
   String body = "updated=" + String(updated) + "\n";
   g_ctrl_web.send(200, "text/plain", body);
 }
@@ -1986,6 +1998,9 @@ void ctrl_publish_runtime_state() {
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(esp_get_free_heap_size()));
   g_ctrl_mqtt.publish(self_topic_for("state/free_heap_bytes").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_ctrl_inbound_dropped.load()));
+  g_ctrl_mqtt.publish(self_topic_for("state/inbound_dropped").c_str(), buf, true);
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
     g_ctrl_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
@@ -2408,8 +2423,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   // Handle a forced reconfigure (incl. MQTT being disabled or host/port/creds changing)
   // FIRST, before the enabled/host early-return, so the disconnect happens here on the
   // MQTT task under the mutex. Config writers just set the flag.
-  if (g_ctrl_mqtt_reconfigure_required) {
-    g_ctrl_mqtt_reconfigure_required = false;
+  if (g_ctrl_mqtt_reconfigure_required.exchange(false)) {  // atomic test-and-clear (no lost request)
     g_ctrl_mqtt_discovery_sent = false;
     if (g_ctrl_mqtt.connected()) g_ctrl_mqtt.disconnect();
     g_ctrl_mqtt_up.store(false);
@@ -2529,6 +2543,34 @@ void ctrl_ensure_mdns_ready() {
   if (mdns_ok) {
     MDNS.addService("http", "tcp", 80);
     g_ctrl_mdns_started = true;
+  }
+}
+
+// Dedicated MQTT task (core 0). Owns ALL g_ctrl_mqtt I/O: connection management
+// (ctrl_ensure_mqtt_connected — connect/subscribe/backoff/reconfigure) and receive
+// (PubSubClient.loop(), whose callback only enqueues inbound commands). The control loop
+// touches g_ctrl_mqtt only via the try-locked publish section, so a slow connect here can
+// never block relay control. Skips entirely during OTA — the control loop and the OTA
+// prepare callback own the socket then.
+static void ctrl_mqtt_task(void *) {
+  bool logged_stack = false;
+  for (;;) {
+    if (!ota_web_in_progress() && g_ctrl_mqtt_mtx != nullptr) {
+      if (xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
+        ctrl_ensure_mqtt_connected(millis());
+        g_ctrl_mqtt.loop();
+        g_ctrl_mqtt_up.store(g_ctrl_mqtt.connected());
+        xSemaphoreGive(g_ctrl_mqtt_mtx);
+      }
+      // One-time stack headroom check after the first connect + receive (the deepest path:
+      // 19 subscribes + the ~420B CtrlInboundMsg receive-callback frame).
+      if (!logged_stack && g_ctrl_mqtt_up.load()) {
+        logged_stack = true;
+        Serial.printf("[mqtt] task stack high-water free: %u bytes (of 8192)\n",
+                      static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
 
@@ -2675,7 +2717,9 @@ void setup() {
 #endif
   g_ctrl_mqtt.setBufferSize(1024);
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
-  g_ctrl_inbound_q = xQueueCreate(16, sizeof(CtrlInboundMsg));
+  // Depth 32: a reconnect can deliver a burst of retained peer-device messages (the +
+  // wildcard subscriptions fan out per device) in a single PubSubClient.loop() pass.
+  g_ctrl_inbound_q = xQueueCreate(32, sizeof(CtrlInboundMsg));
   g_ctrl_mqtt_mtx = xSemaphoreCreateMutex();
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 
@@ -2747,6 +2791,12 @@ void setup() {
   xTaskCreatePinnedToCore(ctrl_web_server_task, "web", 8192,
                           nullptr, 1, nullptr, 0);
 
+  // MQTT task on Core 0: owns all g_ctrl_mqtt I/O (connect + receive) so a blocking
+  // connect/subscribe can never stall relay control on Core 1. Created after g_ctrl_mqtt
+  // is configured (setServer/setCallback) and the mutex/queue exist.
+  xTaskCreatePinnedToCore(ctrl_mqtt_task, "ctrl_mqtt", 8192,
+                          nullptr, 1, nullptr, 0);
+
   g_ctrl_weather_mutex = xSemaphoreCreateMutex();
   if (!g_ctrl_weather_mutex) {
     ctrl_audit("ctrl_weather: mutex alloc failed, weather disabled");
@@ -2808,17 +2858,11 @@ void loop() {
 #endif
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
-    // ---- MQTT connection + receive. Stage 3 relocates this block to the dedicated MQTT
-    //      task; for now it runs here under the (uncontended) mutex. ----
-    if (xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
-      ctrl_ensure_mqtt_connected(now);  // connect+subscribe; sets g_ctrl_just_connected
-      g_ctrl_mqtt.loop();                // receive -> inbound queue
-      g_ctrl_mqtt_up.store(g_ctrl_mqtt.connected());
-      xSemaphoreGive(g_ctrl_mqtt_mtx);
-    }
-    // ---- Drain inbound commands + publish. ALWAYS the control-loop task, under the MQTT
-    //      mutex (Stage 3 makes this a TRY-lock so a slow connect can't block control). ----
-    if (xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
+    // ---- MQTT connect + receive runs on the dedicated ctrl_mqtt task (ctrl_mqtt_task).
+    //      The control loop only drains inbound commands + publishes, under a TRY-lock so a
+    //      slow connect on the MQTT task can NEVER block relay control. If the lock is held
+    //      (MQTT task mid-connect), we just skip this cycle; commands stay queued. ----
+    if (xSemaphoreTake(g_ctrl_mqtt_mtx, 0) == pdTRUE) {
       if (g_ctrl_inbound_q != nullptr) {
         CtrlInboundMsg in;
         while (xQueueReceive(g_ctrl_inbound_q, &in, 0) == pdTRUE) {
