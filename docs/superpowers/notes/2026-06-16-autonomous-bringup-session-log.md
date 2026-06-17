@@ -334,3 +334,25 @@ S3 (MQTT-task stack measured 5380B free of 8192). Validated on hardware: clean b
 round-trip + rapid burst (FIFO), broker outage keeps loop ticking (uptime monotonic, no
 reboot) while MQTT task backs off, recovery, config-POST-during-operation no crash. Native
 188, Waveshare + classic clean. **Resilience inc 3-4 (A+B+C) all DONE.**
+
+## Session continuation (2026-06-17) — cleanup, prod env, runbook, coredump decode
+- **House broker cleanup:** cleared 64 retained TEST-topic messages (36 state/announce +
+  28 HA discovery configs) the board left on mqtt.lan during the early Ethernet/RTC
+  validation; production controller's 27 discovery msgs untouched. House HA no longer has a
+  phantom test device.
+- **Identity MAC override** built + hardware-validated (see memory / fbcddbb).
+- **Production env** `esp32-furnace-controller-waveshare-prod` (production base/ESP-NOW
+  defaults) + **cutover runbook** (`docs/superpowers/notes/2026-06-17-waveshare-controller-cutover-runbook.md`).
+- **F12 — coredump DECODE validated end-to-end.** The decode tooling IS available
+  (`~/.platformio/packages/tool-xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb` + penv
+  `esp-coredump`). Procedure (for a real controller panic):
+  1. read the coredump partition: `esptool --chip esp32s3 --port <port> read_flash
+     0xFF0000 0x10000 coredump.bin`
+  2. decode: `esp-coredump --chip esp32s3 info_corefile --gdb <esp32s3-gdb> --core
+     coredump.bin --core-format raw <firmware.elf>`  (the elf MUST match the running build's
+     SHA — keep each deployed build's firmware.elf!)
+  Validated: a deliberate crash decoded to `#0 loop() at waveshare_coredump_validate.cpp:73,
+  exccause 0x1d StoreProhibited, excvaddr 0x0` with full backtrace + all-task state.
+  CAVEAT: the coredump is only readable via serial/esptool today — a real live-controller
+  panic needs physical serial access to extract it (a future feature could expose it over
+  web/MQTT). Capture (F8) + decode (F12) both proven.
