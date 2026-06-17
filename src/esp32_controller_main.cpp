@@ -233,6 +233,17 @@ uint32_t g_ctrl_reboot_at_ms = 0;
 uint32_t g_ctrl_isolation_start_ms = 0;  // 0 = not isolated
 bool g_ctrl_isolation_recovery_done = false;  // in-place subsystem recovery already tried this episode
 
+// Inbound MQTT command queue. The PubSubClient callback (which runs on the MQTT task once
+// MQTT is moved off the control loop) only PARSES + enqueues; the control loop drains and
+// applies, keeping all controller-state mutation single-threaded with g_controller->tick().
+struct CtrlInboundMsg {
+  char topic[160];
+  uint8_t payload[256];
+  uint16_t len;
+};
+QueueHandle_t g_ctrl_inbound_q = nullptr;
+volatile uint32_t g_ctrl_inbound_dropped = 0;  // queue-full drops (diagnostic)
+
 // --- Task Watchdog breadcrumb -----------------------------------------------
 // A hard Task-WDT panic doesn't run our reboot hook, so reboot_reason stays
 // "none". To learn *which* blocking network call was running when the watchdog
@@ -2071,7 +2082,9 @@ void ctrl_persist_hvac_state() {
   g_ctrl_persisted_cool_sp_c = cool_sp;
 }
 
-void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
+// Applies a single MQTT command/message. ALWAYS runs on the control-loop task (via the
+// inbound queue drain), so it is single-threaded with g_controller->tick().
+void ctrl_handle_mqtt_message(char *topic, uint8_t *payload, unsigned int length) {
   if (topic == nullptr || payload == nullptr) {
     return;
   }
@@ -2324,6 +2337,25 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
                           value, /*retain=*/true);
     }
     return;
+  }
+}
+
+// PubSubClient receive callback. PARSE-ONLY: copy the message and enqueue it for the
+// control loop to apply via ctrl_handle_mqtt_message(). This keeps controller-state
+// mutation off whatever task runs PubSubClient.loop() (the dedicated MQTT task).
+void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
+  if (topic == nullptr || payload == nullptr || g_ctrl_inbound_q == nullptr) {
+    return;
+  }
+  CtrlInboundMsg msg;
+  const size_t tlen = strnlen(topic, sizeof(msg.topic) - 1);
+  memcpy(msg.topic, topic, tlen);
+  msg.topic[tlen] = '\0';
+  const size_t plen = (length < sizeof(msg.payload)) ? length : sizeof(msg.payload);
+  memcpy(msg.payload, payload, plen);
+  msg.len = static_cast<uint16_t>(plen);
+  if (xQueueSend(g_ctrl_inbound_q, &msg, 0) != pdTRUE) {
+    g_ctrl_inbound_dropped++;  // queue full — drop (state will reconcile on next command)
   }
 }
 
@@ -2613,6 +2645,7 @@ void setup() {
 #endif
   g_ctrl_mqtt.setBufferSize(1024);
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
+  g_ctrl_inbound_q = xQueueCreate(16, sizeof(CtrlInboundMsg));
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 
   bool ok = false;
@@ -2739,6 +2772,14 @@ void loop() {
     ctrl_ensure_web_ready();
     ctrl_ensure_mqtt_connected(now);
     g_ctrl_mqtt.loop();
+    // Drain inbound MQTT commands the callback enqueued, applying them HERE on the
+    // control-loop task (single-threaded with tick()).
+    if (g_ctrl_inbound_q != nullptr) {
+      CtrlInboundMsg in;
+      while (xQueueReceive(g_ctrl_inbound_q, &in, 0) == pdTRUE) {
+        ctrl_handle_mqtt_message(in.topic, in.payload, in.len);
+      }
+    }
 #if defined(CONTROLLER_BOARD_WAVESHARE)
     ctrl_time_tick(now);  // start SNTP once IP up; sync NTP time back to the RTC
 #endif
