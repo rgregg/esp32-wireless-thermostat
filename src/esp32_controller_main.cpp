@@ -497,6 +497,7 @@ static String ctrl_find_temp_sensor_mac_str(const String &devices) {
 }
 
 using mac_utils::mac_full;
+using mac_utils::mac_parse;
 using mac_utils::mac_strip_colons;
 
 void ctrl_load_runtime_config() {
@@ -506,6 +507,26 @@ void ctrl_load_runtime_config() {
 
   // Full colon-separated MAC for display and ESP-NOW.
   g_cfg_device_mac = mac_full();
+  // ---- Identity MAC override (controller cutover support) --------------------------
+  // If an override MAC is configured (NVS "id_mac"), this controller PRESENTS that MAC as
+  // its full identity: the radio (WiFi STA / ESP-NOW) MAC AND the Home Assistant / MQTT
+  // topic + uniq_id identity (which are derived from g_cfg_device_mac). This lets a new
+  // board (e.g. the ESP32-S3) replace an existing controller WITHOUT reconfiguring Home
+  // Assistant or re-pairing the thermostat display. Empty = use the factory eFuse MAC.
+  // ctrl_load_runtime_config runs once at boot, before WiFi/Ethernet/ESP-NOW init, so the
+  // esp_base_mac_addr_set() takes effect for every interface. Changing it needs a reboot.
+  {
+    uint8_t ov[6];
+    if (mac_parse(g_ctrl_cfg.getString("id_mac", "").c_str(), ov)) {
+      esp_base_mac_addr_set(ov);  // radio MAC — MUST be before any netif init (it is here)
+      char macbuf[18];
+      snprintf(macbuf, sizeof(macbuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+               ov[0], ov[1], ov[2], ov[3], ov[4], ov[5]);
+      g_cfg_device_mac = String(macbuf);  // HA/MQTT identity
+      Serial.printf("[identity] MAC override active: %s (replacing eFuse MAC for identity + ESP-NOW)\n",
+                    macbuf);
+    }
+  }
   // Compact form (no colons) for hostnames and MQTT topics.
   g_cfg_device_mac_compact = mac_strip_colons(g_cfg_device_mac);
   g_cfg_ctrl_hostname = "controller-" + g_cfg_device_mac_compact;
@@ -695,6 +716,15 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_ctrl_discovery_prefix = value;
     g_ctrl_cfg.putString("disc_pref", value);
     g_ctrl_mqtt_discovery_sent = false;
+  } else if (key == "id_mac") {
+    // Identity MAC override (cutover): present another controller's MAC for HA identity +
+    // ESP-NOW. Empty clears it (use the factory eFuse MAC). Applied on reboot.
+    uint8_t tmp[6];
+    if (value.length() != 0 && !mac_utils::mac_parse(value.c_str(), tmp)) {
+      return false;  // reject malformed MAC (leave the stored value unchanged)
+    }
+    g_ctrl_cfg.putString("id_mac", value);
+    g_ctrl_cfg_reboot_required = true;  // takes effect at boot (before WiFi/ETH/ESP-NOW init)
   } else if (key == "hostname") {
     // Validate: ≤63 chars, [a-zA-Z0-9-], no leading/trailing hyphens
     if (value.length() == 0 || value.length() > 63) return false;
@@ -1708,6 +1738,9 @@ void ctrl_web_handle_root() {
   html += F(">");
   text_field(html, "Discovery Prefix", "discovery_prefix", g_cfg_ctrl_discovery_prefix,
              "HA MQTT discovery prefix, e.g. homeassistant");
+  text_field(html, "Identity MAC Override", "id_mac", g_ctrl_cfg.getString("id_mac", ""),
+             "Replace this board's MAC for HA identity + ESP-NOW (e.g. AA:BB:CC:DD:EE:FF to "
+             "assume another controller's identity). Empty = factory MAC. Reboot to apply.");
   html += F("</div>");
   form_end(html, "Save MQTT");
   card_end(html);
@@ -2728,6 +2761,11 @@ void setup() {
     ok = g_controller->begin();
   }
   g_ctrl_last_espnow_error = ok ? "none" : (g_cfg_ctrl_espnow_enabled ? "begin_failed" : "disabled");
+  // The MAC the controller presents on the ESP-NOW radio (WiFi STA). With an identity
+  // override active this is the assumed MAC; otherwise the factory MAC. Logged so the
+  // display's peer MAC can be confirmed/matched during cutover.
+  Serial.printf("[espnow] radio MAC=%s  identity MAC=%s\n",
+                WiFi.macAddress().c_str(), g_cfg_device_mac.c_str());
 
   // Apply temp sensor MAC from devices list (nullptr = auto-claim)
   {

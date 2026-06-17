@@ -22,6 +22,21 @@ inline String mac_full() {
   return String(buf);
 }
 
+// Parse "AA:BB:CC:DD:EE:FF" (case-insensitive, colon-separated) into out[6].
+// Returns true on success; empty or malformed input returns false (out untouched).
+inline bool mac_parse(const char *str, uint8_t out[6]) {
+  if (str == nullptr) return false;
+  unsigned v[6];
+  if (sscanf(str, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+    return false;
+  }
+  for (int i = 0; i < 6; ++i) {
+    if (v[i] > 0xFF) return false;
+    out[i] = static_cast<uint8_t>(v[i]);
+  }
+  return true;
+}
+
 // Strip colons from a MAC string for use in MQTT topics, hostnames, etc.
 inline String mac_strip_colons(const String &mac) {
   String out = mac;
