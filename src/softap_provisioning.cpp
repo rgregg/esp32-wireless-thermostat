@@ -18,6 +18,16 @@ SoftApProvisionedCb s_cb = nullptr;
 
 const IPAddress kApIp(192, 168, 4, 1);
 
+// HTML-escape user-controlled text (SSIDs) before embedding it in a portal page.
+String html_escape(String s) {
+  s.replace("&", "&amp;");
+  s.replace("<", "&lt;");
+  s.replace(">", "&gt;");
+  s.replace("\"", "&quot;");
+  s.replace("'", "&#39;");
+  return s;
+}
+
 // Cached scan results rendered as <option> tags. Refreshed from an async scan so the
 // portal handlers never block the loop on a ~2s scan.
 String s_scan_options;
@@ -42,13 +52,10 @@ void poll_scan() {
   }
   String opts;
   for (int i = 0; i < n; ++i) {
-    String ssid = WiFi.SSID(i);
+    const String ssid = WiFi.SSID(i);
     if (ssid.isEmpty()) continue;
-    // Minimal escaping for the value/text (HTML-attribute + text context).
-    ssid.replace("&", "&amp;");
-    ssid.replace("\"", "&quot;");
-    ssid.replace("<", "&lt;");
-    opts += "<option value=\"" + ssid + "\">" + ssid + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+    const String safe = html_escape(ssid);
+    opts += "<option value=\"" + safe + "\">" + safe + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
   }
   s_scan_options = opts;
   WiFi.scanDelete();
@@ -93,9 +100,9 @@ void handle_save() {
     return;
   }
   // Respond BEFORE invoking the callback so the page renders even if the callback
-  // triggers a reconnect that drops the AP.
+  // triggers a reconnect that drops the AP. Escape the SSID (reflected user input).
   s_web.send(200, "text/html",
-             "<html><body><h3>Saved.</h3><p>Connecting to <b>" + ssid +
+             "<html><body><h3>Saved.</h3><p>Connecting to <b>" + html_escape(ssid) +
                  "</b>… You can close this page.</p></body></html>");
   if (s_cb) s_cb(ssid.c_str(), password.c_str());
 }
