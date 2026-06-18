@@ -114,6 +114,7 @@ static String ctrl_ip_local_addr() {
 // persists NTP corrections (network-independent time); other boards rely on NTP alone.
 bool g_ctrl_time_valid = false;           // system clock has trustworthy time (RTC or NTP)
 const char *g_ctrl_time_source = "none";  // "rtc" | "ntp" | "none"
+bool g_ctrl_rtc_present = false;          // a PCF85063 RTC was found at boot (Waveshare only)
 // Persistent storage for the SNTP server name. MUST outlive SNTP and MUST NOT be
 // reassigned or mutated after configTime() — SNTP (lwip) retains the .c_str() pointer,
 // not a copy, so a realloc here would be a use-after-free in the lwip task.
@@ -140,7 +141,6 @@ static String ctrl_ip_gateway() {
 // The RTC stores UTC and shares the I2C bus with the relays (SDA=42/SCL=41), already
 // brought up by the relay backend's begin().
 thermostat::Pcf85063Rtc g_ctrl_rtc;       // default 0x51, sda42/scl41
-bool g_ctrl_rtc_present = false;          // RTC responded on the bus at boot
 
 // Read the RTC and, if its oscillator has been running (time trustworthy), seed the
 // system clock. Called once at boot after the I2C bus is up.
@@ -1646,6 +1646,13 @@ void ctrl_web_handle_status_get() {
   } else {
     strcpy(hum_str, "null");
   }
+  char time_utc_str[24] = "";
+  if (g_ctrl_time_valid) {
+    const thermostat::RtcTime trt =
+        thermostat::rtc_time_from_epoch(static_cast<long long>(time(nullptr)));
+    snprintf(time_utc_str, sizeof(time_utc_str), "%04u-%02u-%02uT%02u:%02u:%02uZ",
+             trt.year, trt.month, trt.day, trt.hour, trt.minute, trt.second);
+  }
   char buf[1200];
   snprintf(buf, sizeof(buf),
     "{"
@@ -1677,6 +1684,10 @@ void ctrl_web_handle_status_get() {
     "\"relay_heat\":%s,"
     "\"relay_cool\":%s,"
     "\"relay_fan\":%s,"
+    "\"time_source\":\"%s\","
+    "\"time_valid\":%s,"
+    "\"rtc_present\":%s,"
+    "\"time_utc\":\"%s\","
     "\"free_heap\":%lu,"
     "\"firmware_version\":\"%s\""
     "}",
@@ -1708,6 +1719,10 @@ void ctrl_web_handle_status_get() {
     g_relay_io.latched_output().heat ? "true" : "false",
     g_relay_io.latched_output().cool ? "true" : "false",
     g_relay_io.latched_output().fan ? "true" : "false",
+    g_ctrl_time_source,
+    g_ctrl_time_valid ? "true" : "false",
+    g_ctrl_rtc_present ? "true" : "false",
+    time_utc_str,
     static_cast<unsigned long>(ESP.getFreeHeap()),
     THERMOSTAT_FIRMWARE_VERSION
   );
@@ -2133,9 +2148,9 @@ void ctrl_publish_runtime_state() {
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
     g_ctrl_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
   }
-#if defined(CONTROLLER_BOARD_WAVESHARE)
-  // Network-independent time diagnostics: source (rtc/ntp/none), RTC presence, and the
-  // current UTC time. Lets HA/monitoring see whether the clock is trustworthy.
+  // Time diagnostics: source (rtc/ntp/none), RTC presence, and the current UTC time.
+  // Lets HA/monitoring see whether the clock is trustworthy. Board-agnostic: the classic
+  // controller reports source=ntp/rtc_present=false once SNTP syncs over WiFi.
   g_ctrl_mqtt.publish(self_topic_for("state/time_source").c_str(), g_ctrl_time_source, true);
   g_ctrl_mqtt.publish(self_topic_for("state/rtc_present").c_str(),
                       g_ctrl_rtc_present ? "true" : "false", true);
@@ -2146,7 +2161,6 @@ void ctrl_publish_runtime_state() {
              rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
     g_ctrl_mqtt.publish(self_topic_for("state/time_utc").c_str(), buf, true);
   }
-#endif
   g_ctrl_mqtt.publish(self_topic_for("state/error_mqtt").c_str(), g_ctrl_last_mqtt_error.c_str(),
                       true);
   g_ctrl_mqtt.publish(self_topic_for("state/error_ota").c_str(), g_ctrl_last_ota_error.c_str(),
