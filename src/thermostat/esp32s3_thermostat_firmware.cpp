@@ -85,6 +85,14 @@ constexpr uint32_t kIsolationRebootMs = 15UL * 60UL * 1000UL;
 #define THERMOSTAT_WIFI_PASSWORD ""
 #endif
 
+// ESP-NOW-only mode: when 1, the display never joins WiFi and never enters BLE
+// provisioning — it brings up the LCD + ESP-NOW only. Useful for a display that
+// talks solely to the controller over ESP-NOW (no WiFi infrastructure), and for
+// bench validation where WiFi association would fight the pinned ESP-NOW channel.
+#ifndef THERMOSTAT_WIFI_DISABLED
+#define THERMOSTAT_WIFI_DISABLED 0
+#endif
+
 #ifndef THERMOSTAT_MQTT_HOST
 #define THERMOSTAT_MQTT_HOST "mqtt.lan"
 #endif
@@ -190,6 +198,16 @@ lv_color_t *g_buf_1 = nullptr;
 lv_color_t *g_buf_2 = nullptr;
 lv_disp_drv_t g_disp_drv;
 lv_indev_drv_t g_indev_drv;
+// True once the RGB panel + LVGL display driver are fully initialized. When the
+// LCD bounce-buffer allocation fails (e.g. NimBLE fragmented internal DMA RAM
+// during provisioning boot), we run headless: no LVGL display/indev is registered,
+// and every UI touchpoint is gated on this flag so the firmware degrades instead
+// of dereferencing a null default display. Invariant: g_display_ready ⇒ g_panel
+// non-null, and (after setup) g_display_ready ⇒ g_ui_ready.
+// Threading: written exactly once on the main task inside init_display_and_lvgl(),
+// which runs before the Core-0 web task is created (a full barrier), so no atomic
+// is needed. The web task does not read this flag.
+bool g_display_ready = false;
 
 TouchState g_touch{};
 enum class SensorType : uint8_t { None, AHT, Si7021 };
@@ -269,6 +287,7 @@ float g_cfg_temp_comp_c = 0.0f;
 bool g_cfg_temp_unit_f = false;
 String g_cfg_wifi_ssid = THERMOSTAT_WIFI_SSID;
 String g_cfg_wifi_password = THERMOSTAT_WIFI_PASSWORD;
+bool g_cfg_wifi_disabled = THERMOSTAT_WIFI_DISABLED;  // NVS "wifi_off": ESP-NOW-only mode
 String g_cfg_mqtt_host = THERMOSTAT_MQTT_HOST;
 uint16_t g_cfg_mqtt_port = THERMOSTAT_MQTT_PORT;
 String g_cfg_mqtt_user = THERMOSTAT_MQTT_USER;
@@ -365,6 +384,7 @@ void load_runtime_config() {
 
   g_cfg_wifi_ssid = g_cfg.getString("wifi_ssid", g_cfg_wifi_ssid);
   g_cfg_wifi_password = g_cfg.getString("wifi_pwd", g_cfg_wifi_password);
+  g_cfg_wifi_disabled = g_cfg.getBool("wifi_off", g_cfg_wifi_disabled);
   g_cfg_mqtt_host = g_cfg.getString("mqtt_host", g_cfg_mqtt_host);
   g_cfg_mqtt_port = static_cast<uint16_t>(g_cfg.getUInt("mqtt_port", g_cfg_mqtt_port));
   g_cfg_mqtt_user = g_cfg.getString("mqtt_user", g_cfg_mqtt_user);
@@ -540,6 +560,10 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "espnow_enabled") {
     g_cfg_espnow_enabled = (strcmp(raw_value, "1") == 0);
     g_cfg.putBool("espnow_en", g_cfg_espnow_enabled);
+    g_cfg_reboot_required = true;
+  } else if (key == "wifi_disabled") {
+    g_cfg_wifi_disabled = (strcmp(raw_value, "1") == 0);
+    g_cfg.putBool("wifi_off", g_cfg_wifi_disabled);
     g_cfg_reboot_required = true;
   } else if (key == "controller_timeout_ms") {
     const long parsed = atol(raw_value);
@@ -738,6 +762,7 @@ void web_handle_config_get() {
   String body = "{";
   body += "\"wifi_ssid\":\"" + web_ui::json_escape(g_cfg_wifi_ssid) + "\",";
   body += "\"wifi_password\":\"" + String(g_cfg_wifi_password.length() > 0 ? "set" : "unset") + "\",";
+  body += "\"wifi_disabled\":" + String(g_cfg_wifi_disabled ? "true" : "false") + ",";
   body += "\"mqtt_host\":\"" + web_ui::json_escape(g_cfg_mqtt_host) + "\",";
   body += "\"mqtt_port\":" + String(g_cfg_mqtt_port) + ",";
   body += "\"mqtt_user\":\"" + web_ui::json_escape(g_cfg_mqtt_user) + "\",";
@@ -2429,7 +2454,7 @@ void create_ui() {
   g_ui_ready = true;
 }
 
-void init_display_and_lvgl() {
+bool init_display_and_lvgl() {
   esp_lcd_rgb_panel_config_t panel_config = {};
   panel_config.clk_src = LCD_CLK_SRC_DEFAULT;
   panel_config.timings.pclk_hz = 14000000;
@@ -2463,49 +2488,67 @@ void init_display_and_lvgl() {
   lv_init();
 
   delay(kDisplayInitSettleMs);
-  if (esp_lcd_new_rgb_panel(&panel_config, &g_panel) == ESP_OK) {
-    esp_lcd_panel_reset(g_panel);
-    esp_lcd_panel_init(g_panel);
-
-    // Register VSYNC callback so the flush can wait for the buffer swap
-    g_flush_ready_sem = xSemaphoreCreateBinary();
-    if (!g_flush_ready_sem) {
-      Serial.println("[display] FATAL: failed to create VSYNC semaphore");
-      return;
-    }
-    esp_lcd_rgb_panel_event_callbacks_t cbs = {};
-    cbs.on_vsync = on_vsync_ready;
-    esp_lcd_rgb_panel_register_event_callbacks(g_panel, &cbs, nullptr);
-
-    // Get the panel's two PSRAM framebuffers for double-buffered direct mode.
-    // LVGL draws dirty areas into one buffer while the panel DMA reads the other.
-    // On flush, esp_lcd_panel_draw_bitmap detects the source is a panel buffer
-    // and does an atomic pointer swap instead of a copy.
-    void *panel_fb0 = nullptr;
-    void *panel_fb1 = nullptr;
-    esp_lcd_rgb_panel_get_frame_buffer(g_panel, 2, &panel_fb0, &panel_fb1);
-
-    const size_t buf_pixels = kDisplayWidth * kDisplayHeight;
-    g_buf_1 = static_cast<lv_color_t *>(panel_fb0);
-    g_buf_2 = static_cast<lv_color_t *>(panel_fb1);
-
-    lv_disp_draw_buf_init(&g_draw_buf, g_buf_1, g_buf_2, buf_pixels);
-    lv_disp_drv_init(&g_disp_drv);
-    g_disp_drv.hor_res = kDisplayWidth;
-    g_disp_drv.ver_res = kDisplayHeight;
-    g_disp_drv.flush_cb = rgb_flush_cb;
-    g_disp_drv.draw_buf = &g_draw_buf;
-    g_disp_drv.direct_mode = 1;
-    g_disp_drv.full_refresh = 1;
-    lv_disp_drv_register(&g_disp_drv);
-  } else {
-    Serial.println("[display] FATAL: esp_lcd_new_rgb_panel failed");
+  if (esp_lcd_new_rgb_panel(&panel_config, &g_panel) != ESP_OK) {
+    // Most common cause: not enough *contiguous* internal DMA RAM for the bounce
+    // buffer (e.g. NimBLE fragmented it during provisioning boot). Don't register
+    // an LVGL display with null buffers — that derefs a null default display and
+    // panics. Run headless instead so the rest of the firmware stays up.
+    Serial.println("[display] FATAL: esp_lcd_new_rgb_panel failed — running headless");
+    g_panel = nullptr;
+    g_display_ready = false;
+    return false;
   }
 
+  esp_lcd_panel_reset(g_panel);
+  esp_lcd_panel_init(g_panel);
+
+  // Register VSYNC callback so the flush can wait for the buffer swap
+  g_flush_ready_sem = xSemaphoreCreateBinary();
+  if (!g_flush_ready_sem) {
+    Serial.println("[display] FATAL: failed to create VSYNC semaphore — running headless");
+    // Release the panel's PSRAM framebuffers + contiguous internal bounce buffers
+    // and null g_panel so the post-condition holds: g_display_ready == false implies
+    // g_panel == nullptr. The reboot/OTA teardown paths gate on g_panel != nullptr,
+    // so leaving a half-wired panel here would let them poke uninitialized hardware.
+    esp_lcd_panel_del(g_panel);
+    g_panel = nullptr;
+    g_display_ready = false;
+    return false;
+  }
+  esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+  cbs.on_vsync = on_vsync_ready;
+  esp_lcd_rgb_panel_register_event_callbacks(g_panel, &cbs, nullptr);
+
+  // Get the panel's two PSRAM framebuffers for double-buffered direct mode.
+  // LVGL draws dirty areas into one buffer while the panel DMA reads the other.
+  // On flush, esp_lcd_panel_draw_bitmap detects the source is a panel buffer
+  // and does an atomic pointer swap instead of a copy.
+  void *panel_fb0 = nullptr;
+  void *panel_fb1 = nullptr;
+  esp_lcd_rgb_panel_get_frame_buffer(g_panel, 2, &panel_fb0, &panel_fb1);
+
+  const size_t buf_pixels = kDisplayWidth * kDisplayHeight;
+  g_buf_1 = static_cast<lv_color_t *>(panel_fb0);
+  g_buf_2 = static_cast<lv_color_t *>(panel_fb1);
+
+  lv_disp_draw_buf_init(&g_draw_buf, g_buf_1, g_buf_2, buf_pixels);
+  lv_disp_drv_init(&g_disp_drv);
+  g_disp_drv.hor_res = kDisplayWidth;
+  g_disp_drv.ver_res = kDisplayHeight;
+  g_disp_drv.flush_cb = rgb_flush_cb;
+  g_disp_drv.draw_buf = &g_draw_buf;
+  g_disp_drv.direct_mode = 1;
+  g_disp_drv.full_refresh = 1;
+  lv_disp_drv_register(&g_disp_drv);
+
+  // Touch input is only meaningful with a live display.
   lv_indev_drv_init(&g_indev_drv);
   g_indev_drv.type = LV_INDEV_TYPE_POINTER;
   g_indev_drv.read_cb = touch_read_cb;
   lv_indev_drv_register(&g_indev_drv);
+
+  g_display_ready = true;
+  return true;
 }
 
 void init_backlight() {
@@ -2689,31 +2732,39 @@ static void run_provisioning_boot() {
   g_wifi.begin(wifi_cfg);
   g_wifi.start_provisioning();
 
-  // Now init display — BLE is already running and allocated its memory
+  // Now init display — BLE is already running and allocated its memory. On boards
+  // where NimBLE has fragmented internal DMA RAM below the LCD bounce-buffer's
+  // contiguous requirement, this fails; we then provision headless via BLE so the
+  // board is still setup-able (otherwise it crash-loops and can never be onboarded).
   init_backlight();
-  init_display_and_lvgl();
+  const bool disp_ok = init_display_and_lvgl();
 
-  // Simple provisioning screen: dark background, centered text
-  lv_obj_t *scr = lv_scr_act();
-  lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+  if (disp_ok) {
+    // Simple provisioning screen: dark background, centered text
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
 
-  lv_obj_t *title = lv_label_create(scr);
-  lv_label_set_text(title, "WiFi Setup Required");
-  lv_obj_set_style_text_color(title, lv_color_white(), 0);
-  lv_obj_set_style_text_font(title, &thermostat_font_montserrat_30, 0);
-  lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "WiFi Setup Required");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title, &thermostat_font_montserrat_30, 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
 
-  lv_obj_t *body = lv_label_create(scr);
-  lv_label_set_text(body, "Use the Improv Wi-Fi app or\nimprov-wifi.com to configure");
-  lv_obj_set_style_text_color(body, lv_color_make(0xAA, 0xAA, 0xAA), 0);
-  lv_obj_set_style_text_font(body, &thermostat_font_montserrat_20, 0);
-  lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_t *body = lv_label_create(scr);
+    lv_label_set_text(body, "Use the Improv Wi-Fi app or\nimprov-wifi.com to configure");
+    lv_obj_set_style_text_color(body, lv_color_make(0xAA, 0xAA, 0xAA), 0);
+    lv_obj_set_style_text_font(body, &thermostat_font_montserrat_20, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
 
-  // Turn on backlight
-  ledcWrite(kBacklightPin, 200);
+    // Turn on backlight
+    ledcWrite(kBacklightPin, 200);
+  } else {
+    Serial.println("[provision] Display unavailable — provisioning headless via BLE only");
+  }
 
-  // Minimal loop: LVGL ticks + watchdog + deferred reboot after BLE response
+  // Minimal loop: LVGL ticks (if display is up) + watchdog + deferred reboot after
+  // BLE response.
   esp_task_wdt_add(NULL);
   uint32_t last_tick = millis();
   for (;;) {
@@ -2723,7 +2774,7 @@ static void run_provisioning_boot() {
       ESP.restart();
     }
     uint32_t now = millis();
-    if ((now - last_tick) >= kUiTickMs) {
+    if (disp_ok && (now - last_tick) >= kUiTickMs) {
       lv_tick_inc(now - last_tick);
       last_tick = now;
       lv_timer_handler();
@@ -2749,9 +2800,14 @@ void thermostat_firmware_setup() {
 
   // If no WiFi SSID is configured, enter minimal BLE provisioning mode.
   // This must happen before display init to keep internal RAM free for BLE.
-  if (g_cfg_wifi_ssid.isEmpty()) {
+  // ESP-NOW-only mode skips this entirely — no SSID is needed and we must not
+  // start BLE (it would fragment the internal RAM the LCD bounce buffer needs).
+  if (!g_cfg_wifi_disabled && g_cfg_wifi_ssid.isEmpty()) {
     run_provisioning_boot();
     return;  // never reached — run_provisioning_boot loops forever
+  }
+  if (g_cfg_wifi_disabled) {
+    Serial.println("[net] ESP-NOW-only mode — WiFi/MQTT/web disabled, ESP-NOW + LCD only");
   }
 
   ThermostatDeviceRuntimeConfig cfg;
@@ -2778,9 +2834,14 @@ void thermostat_firmware_setup() {
 
   init_backlight();
   init_sensors();
-  init_network();
-  init_display_and_lvgl();
-  create_ui();
+  if (!g_cfg_wifi_disabled) {
+    init_network();
+  }
+  if (init_display_and_lvgl()) {
+    create_ui();
+  } else {
+    Serial.println("[display] Continuing headless — UI disabled; ESP-NOW/MQTT/sensors/web active");
+  }
   g_backlight_enable_at_ms = millis() + kBacklightEnableDelayMs;
 
   bool runtime_ok = false;
@@ -2797,19 +2858,22 @@ void thermostat_firmware_setup() {
   // requests without blocking the LVGL/sensor/MQTT main loop on Core 1.
   // Create web task on Core 0 with stack in PSRAM to avoid consuming
   // internal SRAM that the WiFi driver needs for connection buffers.
-  static StaticTask_t web_task_tcb;
-  static StackType_t *web_task_stack = (StackType_t *)heap_caps_malloc(
-      8192 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
-  if (!web_task_stack) {
-    Serial.println("[web] PSRAM alloc failed, falling back to internal SRAM");
-    web_task_stack = (StackType_t *)heap_caps_malloc(
-        8192 * sizeof(StackType_t), MALLOC_CAP_INTERNAL);
-  }
-  if (web_task_stack) {
-    xTaskCreateStaticPinnedToCore(web_server_task, "web", 8192,
-                                  nullptr, 1, web_task_stack, &web_task_tcb, 0);
-  } else {
-    Serial.println("[web] FATAL: failed to allocate web task stack");
+  // Skipped in ESP-NOW-only mode — there is no IP for it to serve on.
+  if (!g_cfg_wifi_disabled) {
+    static StaticTask_t web_task_tcb;
+    static StackType_t *web_task_stack = (StackType_t *)heap_caps_malloc(
+        8192 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
+    if (!web_task_stack) {
+      Serial.println("[web] PSRAM alloc failed, falling back to internal SRAM");
+      web_task_stack = (StackType_t *)heap_caps_malloc(
+          8192 * sizeof(StackType_t), MALLOC_CAP_INTERNAL);
+    }
+    if (web_task_stack) {
+      xTaskCreateStaticPinnedToCore(web_server_task, "web", 8192,
+                                    nullptr, 1, web_task_stack, &web_task_tcb, 0);
+    } else {
+      Serial.println("[web] FATAL: failed to allocate web task stack");
+    }
   }
   esp_task_wdt_add(NULL);  // register main task with TWDT
   // Raise the Task Watchdog timeout to 15s so a bounded MQTT-connect spin (see
@@ -2887,7 +2951,7 @@ void thermostat_firmware_loop() {
     apply_backlight(g_screen.screensaver_active());
   }
 
-  if ((now - g_last_ui_tick_ms) >= kUiTickMs) {
+  if (g_display_ready && (now - g_last_ui_tick_ms) >= kUiTickMs) {
     lv_tick_inc(now - g_last_ui_tick_ms);
     g_last_ui_tick_ms = now;
     lv_timer_handler();
@@ -2907,41 +2971,49 @@ void thermostat_firmware_loop() {
       g_runtime->tick(now);
       xSemaphoreGive(g_api_mutex);
     }
-    g_screen.tick(now);
-    show_page(g_screen.current_page());
-    apply_backlight(g_screen.screensaver_active());
+    if (g_display_ready) {
+      g_screen.tick(now);
+      show_page(g_screen.current_page());
+      apply_backlight(g_screen.screensaver_active());
+    }
   }
 
-  ensure_wifi_connected(now);
-  wifi_watchdog_tick(now, g_mqtt.connected());
-  ensure_mdns_ready();
-  ensure_web_ready();
-  ensure_mqtt_connected(now);
-  g_mqtt.loop();
-  poll_weather(now);
-  ota_rollback_check(WiFi.status() == WL_CONNECTED && g_mqtt.connected());
+  // ESP-NOW-only mode skips all WiFi/MQTT/web/weather/OTA work: there is no IP,
+  // and re-running ensure_wifi_connected() would re-trigger a join and channel-hop
+  // that fights the pinned ESP-NOW channel. Controller state arrives over ESP-NOW
+  // (transport callbacks), not MQTT, so the apply/publish blocks aren't needed.
+  if (!g_cfg_wifi_disabled) {
+    ensure_wifi_connected(now);
+    wifi_watchdog_tick(now, g_mqtt.connected());
+    ensure_mdns_ready();
+    ensure_web_ready();
+    ensure_mqtt_connected(now);
+    g_mqtt.loop();
+    poll_weather(now);
+    ota_rollback_check(WiFi.status() == WL_CONNECTED && g_mqtt.connected());
 
-  // Apply accumulated MQTT controller state to app layer
-  if (g_runtime != nullptr && g_mqtt_ctrl_last_update_ms > g_mqtt_ctrl_last_applied_ms) {
-    xSemaphoreTake(g_api_mutex, portMAX_DELAY);
-    g_runtime->on_controller_state_update(
-        now, g_mqtt_ctrl_state, g_mqtt_ctrl_lockout,
-        g_mqtt_ctrl_mode, g_mqtt_ctrl_fan,
-        g_mqtt_ctrl_setpoint_c, g_mqtt_ctrl_filter_runtime_s,
-        g_mqtt_ctrl_windows_open);
-    g_mqtt_ctrl_last_applied_ms = g_mqtt_ctrl_last_update_ms;
-    xSemaphoreGive(g_api_mutex);
-  }
-
-  {
-    const bool should_publish = g_mqtt_state_dirty ||
-                                (now - g_last_mqtt_publish_ms >= kMqttPublishMs);
-    if (should_publish && g_mqtt.connected()) {
+    // Apply accumulated MQTT controller state to app layer
+    if (g_runtime != nullptr && g_mqtt_ctrl_last_update_ms > g_mqtt_ctrl_last_applied_ms) {
       xSemaphoreTake(g_api_mutex, portMAX_DELAY);
-      mqtt_publish_state();
-      g_mqtt_state_dirty = false;
-      g_last_mqtt_publish_ms = now;
+      g_runtime->on_controller_state_update(
+          now, g_mqtt_ctrl_state, g_mqtt_ctrl_lockout,
+          g_mqtt_ctrl_mode, g_mqtt_ctrl_fan,
+          g_mqtt_ctrl_setpoint_c, g_mqtt_ctrl_filter_runtime_s,
+          g_mqtt_ctrl_windows_open);
+      g_mqtt_ctrl_last_applied_ms = g_mqtt_ctrl_last_update_ms;
       xSemaphoreGive(g_api_mutex);
+    }
+
+    {
+      const bool should_publish = g_mqtt_state_dirty ||
+                                  (now - g_last_mqtt_publish_ms >= kMqttPublishMs);
+      if (should_publish && g_mqtt.connected()) {
+        xSemaphoreTake(g_api_mutex, portMAX_DELAY);
+        mqtt_publish_state();
+        g_mqtt_state_dirty = false;
+        g_last_mqtt_publish_ms = now;
+        xSemaphoreGive(g_api_mutex);
+      }
     }
   }
 
@@ -2949,7 +3021,7 @@ void thermostat_firmware_loop() {
   poll_sensors(now);
   xSemaphoreGive(g_api_mutex);
 
-  if ((now - g_last_ui_refresh_ms) >= kUiRefreshMs) {
+  if (g_display_ready && (now - g_last_ui_refresh_ms) >= kUiRefreshMs) {
     g_last_ui_refresh_ms = now;
     refresh_ui();
   }
@@ -2960,6 +3032,16 @@ void thermostat_firmware_loop() {
     const uint32_t hb_ms = g_runtime != nullptr ? g_runtime->last_controller_heartbeat_ms() : 0;
     const bool espnow_active = (hb_ms > 0) &&
         (static_cast<uint32_t>(now - hb_ms) < g_cfg_controller_timeout_ms);
+    // Log controller ESP-NOW connect/disconnect transitions. The only way to see
+    // link state on a headless / ESP-NOW-only display (no screen access, no web/MQTT).
+    static int prev_espnow_active = -1;  // -1 = unset → logs the first evaluation
+    if (static_cast<int>(espnow_active) != prev_espnow_active) {
+      prev_espnow_active = static_cast<int>(espnow_active);
+      Serial.printf("[espnow] controller %s (hb=%lu ago=%lums)\n",
+                    espnow_active ? "CONNECTED" : "disconnected",
+                    static_cast<unsigned long>(hb_ms),
+                    hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
+    }
     const bool isolated = !g_mqtt.connected() && !espnow_active;
 
     if (!isolated) {
