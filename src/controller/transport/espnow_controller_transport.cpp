@@ -13,8 +13,22 @@
 namespace thermostat {
 
 namespace {
+bool is_broadcast_mac(const uint8_t mac[6]) {
+  for (int i = 0; i < 6; ++i) {
+    if (mac[i] != 0xFF) return false;
+  }
+  return true;
+}
+
 bool is_registered_peer(const EspNowControllerConfig &config, const uint8_t mac[6]) {
   for (int i = 0; i < config.peer_count; ++i) {
+    // A broadcast peer means "talk to everyone" — so also accept RX from anyone.
+    // Otherwise a controller configured to broadcast (e.g. an isolated bench, or a
+    // controller addressing all displays) would receive every frame but drop it at
+    // the filter, never registering a thermostat heartbeat -> spurious failsafe.
+    if (is_broadcast_mac(config.peer_macs[i])) {
+      return true;
+    }
     if (memcmp(config.peer_macs[i], mac, 6) == 0) {
       return true;
     }
