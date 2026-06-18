@@ -30,6 +30,17 @@ bool ThermostatApp::is_newer_u16(uint16_t previous, uint16_t incoming) {
 }
 
 void ThermostatApp::on_controller_heartbeat(uint32_t now_ms) {
+  // Reconnect resync: if the controller went silent long enough to be considered
+  // disconnected and is now heartbeating again, it may have restarted and reset its
+  // telemetry sequence to a lower value. Drop our seq tracking so the next telemetry
+  // is accepted regardless of seq (otherwise the display freezes on the pre-restart
+  // state). Handled here (heartbeat usually precedes/accompanies telemetry) so the
+  // resync lands before the next telemetry is seq-checked.
+  if (config_.controller_reconnect_resync_ms != 0 && last_controller_heartbeat_ms_ != 0 &&
+      static_cast<uint32_t>(now_ms - last_controller_heartbeat_ms_) >=
+          config_.controller_reconnect_resync_ms) {
+    has_controller_seq_ = false;
+  }
   last_controller_heartbeat_ms_ = now_ms;
 }
 

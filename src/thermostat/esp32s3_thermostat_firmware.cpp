@@ -2825,6 +2825,8 @@ void thermostat_firmware_setup() {
   cfg.transport.channel = g_cfg_espnow_channel;
   cfg.transport.heartbeat_interval_ms = 10000;
   cfg.controller_connection_timeout_ms = g_cfg_controller_timeout_ms;
+  // Resync telemetry seq on reconnect after the same gap that marks "disconnected".
+  cfg.app.controller_reconnect_resync_ms = g_cfg_controller_timeout_ms;
   if (g_cfg_espnow_enabled) {
     parse_mac(g_cfg_espnow_peer_mac.c_str(), cfg.transport.peer_mac);
     uint8_t lmk[16] = {0};
@@ -3033,6 +3035,17 @@ void thermostat_firmware_loop() {
   if (g_display_ready && (now - g_last_ui_refresh_ms) >= kUiRefreshMs) {
     g_last_ui_refresh_ms = now;
     refresh_ui();
+  }
+
+  // Log the on-screen status whenever it changes — the only window into displayed
+  // state on a headless / ESP-NOW-only display (no screen access, no web/MQTT).
+  if (g_runtime != nullptr) {
+    static std::string prev_status;
+    std::string s = g_runtime->status_text(now);
+    if (s != prev_status) {
+      prev_status = s;
+      Serial.printf("[status] %s\n", s.c_str());
+    }
   }
 
   // Isolation reboot: if both MQTT and ESP-NOW have been down continuously
