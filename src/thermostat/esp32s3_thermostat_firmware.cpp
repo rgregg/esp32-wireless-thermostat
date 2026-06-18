@@ -2808,6 +2808,10 @@ void thermostat_firmware_setup() {
   }
   if (g_cfg_wifi_disabled) {
     Serial.println("[net] ESP-NOW-only mode — WiFi/MQTT/web disabled, ESP-NOW + LCD only");
+    // No NTP in this mode; wall-clock time arrives over ESP-NOW from the controller.
+    // Still set the timezone so the received UTC epoch renders as local time.
+    setenv("TZ", THERMOSTAT_TIME_TZ, 1);
+    tzset();
   }
 
   ThermostatDeviceRuntimeConfig cfg;

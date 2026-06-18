@@ -70,6 +70,17 @@ class ControllerApp {
   bool has_indoor_humidity() const { return has_indoor_humidity_; }
   float indoor_humidity_pct() const { return indoor_humidity_pct_; }
 
+  // Re-send the most recent telemetry (same payload + seq) without waiting for a
+  // change. Lets a caller periodically refresh state for displays that joined (or
+  // rebooted) after the last change — telemetry is otherwise sent change-driven, so
+  // a late display would show a stale/unknown ("Error") state until something moves.
+  // No-op until the controller has published at least once.
+  void republish_telemetry() {
+    if (has_last_published_) {
+      transport_.publish_telemetry(last_published_);
+    }
+  }
+
  private:
   void load_persisted_state();
   void maybe_persist_filter_runtime(bool force = false);

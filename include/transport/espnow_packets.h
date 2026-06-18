@@ -14,6 +14,7 @@ enum class PacketType : uint8_t {
   IndoorHumidity = 5,
   ControllerAck = 6,
   WeatherData = 7,
+  TimeSync = 8,
 };
 
 #pragma pack(push, 1)
@@ -57,6 +58,13 @@ struct WeatherDataPacket {
   PacketHeader header;
   float outdoor_temp_c;
   uint8_t weather_icon;
+};
+
+// Wall-clock time pushed from the controller (which has an RTC + SNTP) so a display
+// with no WiFi/NTP of its own can show the clock. Unix epoch seconds, UTC.
+struct TimeSyncPacket {
+  PacketHeader header;
+  uint32_t epoch_seconds;
 };
 
 #pragma pack(pop)

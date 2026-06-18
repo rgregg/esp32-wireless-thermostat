@@ -2964,6 +2964,26 @@ void loop() {
   }
   if (g_controller != nullptr) {
     g_controller->tick(now);
+    // Periodically rebroadcast the latest telemetry so a display that joined or
+    // rebooted after the last state change still learns the current state (telemetry
+    // is otherwise change-driven). ~15s keeps displays within their 30s timeout.
+    static uint32_t last_telemetry_republish_ms = 0;
+    if (static_cast<uint32_t>(now - last_telemetry_republish_ms) >= 15000) {
+      last_telemetry_republish_ms = now;
+      g_controller->app().republish_telemetry();
+    }
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+    // Broadcast wall-clock time (when ours is trustworthy) so a WiFi-less display
+    // can show a clock without its own NTP/RTC. Only the Waveshare board keeps
+    // network-independent time (PCF85063 RTC + SNTP); other controllers have no
+    // clock to share, so this is compiled out there.
+    static uint32_t last_time_broadcast_ms = 0;
+    if (g_ctrl_time_valid &&
+        static_cast<uint32_t>(now - last_time_broadcast_ms) >= 30000) {
+      last_time_broadcast_ms = now;
+      g_controller->transport().publish_time(static_cast<uint32_t>(time(nullptr)));
+    }
+#endif
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
 #if !defined(CONTROLLER_BOARD_WAVESHARE)

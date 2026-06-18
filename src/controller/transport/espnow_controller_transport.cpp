@@ -200,6 +200,17 @@ void EspNowControllerTransport::publish_weather(float outdoor_temp_c,
   send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
+void EspNowControllerTransport::publish_time(uint32_t epoch_seconds) {
+  if (!initialized_) {
+    return;
+  }
+  TimeSyncPacket pkt;
+  pkt.header.type = static_cast<uint8_t>(PacketType::TimeSync);
+  pkt.header.version = kEspNowProtocolVersion;
+  pkt.epoch_seconds = epoch_seconds;
+  send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+}
+
 void EspNowControllerTransport::on_recv_static(const void *recv_info,
                                                const uint8_t *data,
                                                int len) {

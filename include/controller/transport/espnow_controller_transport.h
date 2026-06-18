@@ -46,6 +46,9 @@ class EspNowControllerTransport final : public IControllerTransport {
 
   void publish_telemetry(const ControllerTelemetry &telemetry) override;
   void publish_weather(float outdoor_temp_c, WeatherIcon icon) override;
+  // Broadcast wall-clock time (Unix epoch seconds, UTC) so WiFi-less displays can
+  // show a clock. Caller should only send when its own clock is valid.
+  void publish_time(uint32_t epoch_seconds);
   uint32_t send_ok_count() const { return send_ok_count_; }
   uint32_t send_fail_count() const { return send_fail_count_; }
   // Count of ESP-NOW frames received (after the length/header sanity check, before
