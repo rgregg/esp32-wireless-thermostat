@@ -16,10 +16,11 @@ class AuditLog {
 
   void set_publish_callback(PublishCallback cb) { publish_cb_ = cb; }
 
-  void add(uint32_t uptime_ms, const char *fmt, ...) {
+  // `tstamp` is a caller-formatted timestamp prefix (e.g. "612s" uptime, or a wall-clock
+  // "04:51:09Z" once the clock is set). The caller owns the time-source decision.
+  void add(const char *tstamp, const char *fmt, ...) {
     char msg[kMaxLen];
-    int prefix_len = snprintf(msg, sizeof(msg), "%lus ",
-                              static_cast<unsigned long>(uptime_ms / 1000UL));
+    int prefix_len = snprintf(msg, sizeof(msg), "%s ", tstamp ? tstamp : "");
     if (prefix_len < 0) prefix_len = 0;
     va_list ap;
     va_start(ap, fmt);

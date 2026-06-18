@@ -46,6 +46,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include <esp_sntp.h>
+#include <esp_core_dump.h>
+#include <esp_partition.h>
 #include "ota_web_updater.h"
 #include "controller/audit_log.h"
 #include "web/web_ui_escape.h"
@@ -1463,18 +1465,36 @@ void ctrl_audit_publish(const char *msg) {
   }
 }
 
+// Audit-log timestamp prefix: a UTC wall-clock time once the clock is set (RTC/SNTP),
+// else the uptime in seconds. Lets the same log carry absolute times for diagnostics.
+static void ctrl_audit_timestamp(char *out, size_t n) {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  if (g_ctrl_time_valid) {
+    const thermostat::RtcTime rt =
+        thermostat::rtc_time_from_epoch(static_cast<long long>(time(nullptr)));
+    snprintf(out, n, "%02u:%02u:%02uZ", rt.hour, rt.minute, rt.second);
+    return;
+  }
+#endif
+  snprintf(out, n, "%lus", static_cast<unsigned long>(millis() / 1000UL));
+}
+
 void ctrl_audit(const char *fmt, ...) {
   char buf[80];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  g_audit_log.add(millis(), "%s", buf);
+  char ts[24];
+  ctrl_audit_timestamp(ts, sizeof(ts));
+  g_audit_log.add(ts, "%s", buf);
 }
 
 void ctrl_runtime_audit_bridge(const char *msg) {
   // Bridge from runtime audit callback → global audit log with timestamp
-  g_audit_log.add(millis(), "%s", msg);
+  char ts[24];
+  ctrl_audit_timestamp(ts, sizeof(ts));
+  g_audit_log.add(ts, "%s", msg);
 }
 
 void ctrl_web_handle_log_get() {
@@ -1540,6 +1560,44 @@ void ctrl_web_handle_config_post() {
 void ctrl_web_handle_reboot_post() {
   ctrl_schedule_reboot("scheduled: web /reboot");
   g_ctrl_web.send(200, "text/plain", "rebooting\n");
+}
+
+// GET /coredump — stream the captured crash coredump (if any) as a binary download, so a
+// remote panic can be pulled + decoded (esp-coredump) WITHOUT physical serial access. The
+// classic board has no coredump partition, so this returns 404 there.
+void ctrl_web_handle_coredump_get() {
+  size_t addr = 0, size = 0;
+  if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+    g_ctrl_web.send(404, "text/plain", "no coredump present\n");
+    return;
+  }
+  const esp_partition_t *part = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+  if (part == nullptr || size > part->size) {
+    g_ctrl_web.send(500, "text/plain", "coredump partition error\n");
+    return;
+  }
+  // The coredump lives at the start of the coredump partition. Stream it in chunks so we
+  // never need a multi-KB heap buffer.
+  g_ctrl_web.setContentLength(size);
+  g_ctrl_web.sendHeader("Content-Disposition", "attachment; filename=\"coredump.bin\"");
+  g_ctrl_web.send(200, "application/octet-stream", "");
+  uint8_t buf[512];
+  size_t off = 0;
+  while (off < size) {
+    const size_t chunk = (size - off) < sizeof(buf) ? (size - off) : sizeof(buf);
+    if (esp_partition_read(part, off, buf, chunk) != ESP_OK) break;
+    g_ctrl_web.client().write(buf, chunk);
+    off += chunk;
+  }
+}
+
+// POST /coredump/erase — clear the coredump after retrieval so the partition is ready for
+// the next crash.
+void ctrl_web_handle_coredump_erase_post() {
+  const esp_err_t er = esp_core_dump_image_erase();
+  g_ctrl_web.send(er == ESP_OK ? 200 : 500, "text/plain",
+                  er == ESP_OK ? "coredump erased\n" : "erase failed\n");
 }
 
 void ctrl_web_handle_status_get() {
@@ -1941,6 +1999,8 @@ void ctrl_ensure_web_ready() {
     g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
+    g_ctrl_web.on("/coredump", HTTP_GET, ctrl_web_handle_coredump_get);
+    g_ctrl_web.on("/coredump/erase", HTTP_POST, ctrl_web_handle_coredump_erase_post);
     ota_web_setup(g_ctrl_web);
     ota_set_prepare_callback([]() {
       // Runs on the web task. Take the MQTT mutex so the dedicated MQTT task is not mid
@@ -2034,6 +2094,14 @@ void ctrl_publish_runtime_state() {
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_ctrl_inbound_dropped.load()));
   g_ctrl_mqtt.publish(self_topic_for("state/inbound_dropped").c_str(), buf, true);
+  {
+    // Coredump presence: a captured crash dump waiting to be pulled (GET /coredump).
+    size_t cd_addr = 0, cd_size = 0;
+    const bool cd_present =
+        (esp_core_dump_image_get(&cd_addr, &cd_size) == ESP_OK) && cd_size > 0;
+    g_ctrl_mqtt.publish(self_topic_for("state/coredump_present").c_str(),
+                        cd_present ? "true" : "false", true);
+  }
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
     g_ctrl_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
