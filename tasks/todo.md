@@ -55,6 +55,19 @@ serial log (only link-state signal in headless/ESP-NOW-only mode).
 - [x] Display serial: `[espnow] controller CONNECTED (hb=9226 ago=72ms)` — hears controller,
       connects, stops isolating. LCD up, ch11, no WiFi/house network. FULL BIDIRECTIONAL BENCH.
 
+### Enhancements (DONE 2026-06-18) — committed
+- [x] **Telemetry staleness fix (A):** `ControllerApp::republish_telemetry()` + controller
+      loop calls it every 15s → late-joining/rebooted displays get state (was stuck on
+      "Error" because telemetry is change-driven). Commit b915db2.
+- [x] **Time over ESP-NOW (B):** new `TimeSync` packet (type 8, backward-compatible);
+      Waveshare controller broadcasts epoch-UTC every 30s; display applies via
+      settimeofday + sets TZ in ESP-NOW-only mode. Commit b915db2. NOTE: not bench-
+      demonstrable — the Feather has no RTC/NTP; works on Waveshare (RTC+SNTP).
+- [x] **NimBLE RAM fix (#1 LCD-before-BLE + #2 4-line bounce buffer):** VALIDATED on
+      hardware — provisioning boot now logs LCD up + BLE advertising together (no "no mem
+      for bounce buffer", no headless fallback); "WiFi Setup Required" screen renders.
+      Commit 2e136c1. The real fix vs the headless safety net.
+
 ### Observations / follow-ups
 - In ESP-NOW-only mode the display never hears the controller (Feather has peer_count=0, so it
   never transmits) → display logs `isolation_start` and will isolation-reboot after ~15 min.
