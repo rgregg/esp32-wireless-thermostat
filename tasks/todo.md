@@ -24,22 +24,24 @@ Build + ready; do NOT deploy to the live .57 controller.
 - [ ] Verify bench display (thermostat-bench-normal) connects to IoTDevices + the local
       test broker 10.0.2.175 (watch piserial5 /tmp/mqtt_log.txt), web UI responds.
 
-### Step 1 — SoftAP portal module (shared)
-- [ ] New softap_provisioning.h/.cpp: start AP + DNSServer + portal WebServer; SSID scan
-      page; on submit -> callback(ssid, password). stop() tears it down.
-- [ ] WifiProvisioningManager: start_provisioning() -> SoftAP portal (not BLE);
-      on_wifi_connected()/reboot_pending() updated; drop IMPROV paths.
+### Step 1 — SoftAP portal module (shared) — DONE
+- [x] softap_provisioning.h/.cpp: AP "Furnace-Setup-XXXX" + DNSServer captive portal +
+      WebServer (async SSID scan, SSID+password form) → callback(ssid,password). Compiles.
+- [x] WifiProvisioningManager: start_provisioning() → SoftAP; ensure_connected() services
+      the portal; on_wifi_connected() stops it; reboot_pending()→false; IMPROV paths gone.
 
 ### Step 2 — boot logic
-- [ ] Display: drop run_provisioning_boot BLE-RAM special case; normal boot → WiFi →
-      SoftAP fallback. LCD shows AP name when portal active.
-- [ ] Controller: Ethernet-primary (Waveshare) → WiFi fallback → SoftAP; classic → WiFi
-      → SoftAP.
+- [x] Display: run_provisioning_boot drives the SoftAP portal (LCD shows the AP name),
+      reboots on cred submit. Normal boot unchanged (loop's g_wifi services the portal).
+- [x] Classic controller: g_ctrl_wifi.start_provisioning() → SoftAP; loop's
+      ctrl_ensure_wifi_connected services it.
+- [ ] Waveshare Ethernet→WiFi runtime fallback (DEFERRED — separate state-machine change;
+      currently Waveshare stays Ethernet-only, just with NimBLE gone). Follow-up.
 
-### Step 3 — remove NimBLE + build/validate
-- [ ] platformio.ini: drop NimBLE-Arduino + Improv lib_deps + IMPROV_WIFI_BLE_ENABLED.
-- [ ] Delete improv_ble_provisioning.*.
-- [ ] Build all envs; confirm internal RAM headroom up (no NimBLE).
+### Step 3 — remove NimBLE + build/validate — IN PROGRESS
+- [x] platformio.ini: dropped NimBLE-Arduino + Improv lib_deps + IMPROV_WIFI_BLE_ENABLED.
+- [x] Deleted improv_ble_provisioning.*.
+- [ ] Build all envs (running); confirm RAM headroom up (no NimBLE).
 - [ ] Hardware: no crash; AP comes up. NOTE: full portal flow can't be tested remotely
       (needs someone to join the AP at the bench).
 

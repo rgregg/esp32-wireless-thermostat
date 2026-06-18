@@ -14,7 +14,6 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
-#include "improv_ble_provisioning.h"
 #include "wifi_provisioning_manager.h"
 #include <PubSubClient.h>
 #include <WebServer.h>
@@ -2483,9 +2482,10 @@ bool init_display_and_lvgl() {
 
   panel_config.flags.fb_in_psram = 1;
   // Bounce buffer is internal DMA-capable RAM (stages PSRAM framebuffer lines). 4
-  // lines (~12.8 KB across the two ping-pong buffers) instead of 10 (~32 KB) shrinks
-  // the *contiguous* internal block needed, so it still allocates when NimBLE has
-  // fragmented the heap during provisioning. Plenty for a low-refresh thermostat UI.
+  // lines (~12.8 KB across the two ping-pong buffers) instead of 10 (~32 KB) keeps the
+  // *contiguous* internal block modest — plenty for a low-refresh thermostat UI. (The
+  // old NimBLE provisioning could fragment this region; provisioning is now SoftAP, but
+  // the smaller buffer is kept as cheap headroom.)
   panel_config.bounce_buffer_size_px = 4 * kDisplayWidth;
   panel_config.num_fbs = 2;
 
@@ -2629,7 +2629,6 @@ void init_network() {
   wifi_cfg.default_password = g_cfg_wifi_password.c_str();
   wifi_cfg.hostname = g_cfg_hostname.c_str();
   wifi_cfg.retry_interval_ms = kNetworkRetryMs;
-  wifi_cfg.reboot_after_provision = false;
   g_wifi.begin(wifi_cfg);
   WiFi.onEvent(wifi_event_handler);
 
@@ -2712,31 +2711,26 @@ void poll_sensors(uint32_t now_ms) {
 
 }  // namespace
 
-// ---------- BLE provisioning boot mode ----------
+// ---------- SoftAP provisioning boot mode ----------
 // When no WiFi SSID is configured, we enter a minimal boot mode:
-// 1. Init the LCD first (grabs its small contiguous bounce buffer before NimBLE
-//    fragments internal DMA RAM), then start BLE provisioning
-// 2. Show a simple "configure WiFi" message (or run headless if the LCD failed)
-// 3. Loop only LVGL ticks + watchdog until BLE provides credentials → reboot
+// 1. Init the LCD + bring up the SoftAP captive portal (no Bluetooth, so no internal-RAM
+//    contention with the LCD framebuffers)
+// 2. Show the AP name to join on the LCD (or run headless if the LCD failed)
+// 3. Loop servicing the portal (DNS + web) until the user submits credentials → reboot
 static bool g_provisioning_boot_mode = false;
 
 extern "C" const lv_font_t thermostat_font_montserrat_20;
 extern "C" const lv_font_t thermostat_font_montserrat_30;
 
 static void run_provisioning_boot() {
-  Serial.println("[provision] No WiFi configured — entering BLE provisioning mode");
+  Serial.println("[provision] No WiFi configured — entering SoftAP portal mode");
   g_provisioning_boot_mode = true;
 
-  // Init the LCD FIRST, before NimBLE allocates. The bounce buffer needs one
-  // *contiguous* internal DMA block; NimBLE makes many small allocations that
-  // fragment the heap, so grabbing the (now small, 4-line) bounce buffer while RAM
-  // is still unfragmented lets the LCD and BLE coexist. If it still fails we run
-  // headless so the board stays onboardable via the Improv app.
+  // SoftAP provisioning uses only the WiFi stack (no Bluetooth), so the LCD comes up
+  // cleanly with no internal-DMA-RAM contention.
   init_backlight();
   const bool disp_ok = init_display_and_lvgl();
 
-  // Then start BLE provisioning. reboot_after_provision=true: once creds arrive we
-  // reboot into normal mode (where the LCD has the full heap, no BLE).
   WifiProvisioningConfig wifi_cfg = {};
   wifi_cfg.device_name = "Thermostat";
   wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
@@ -2744,45 +2738,48 @@ static void run_provisioning_boot() {
   wifi_cfg.hardware_variant = "ESP32-S3";
   wifi_cfg.nvs = &g_cfg;
   wifi_cfg.retry_interval_ms = kNetworkRetryMs;
-  wifi_cfg.reboot_after_provision = true;
   g_wifi.begin(wifi_cfg);
   g_wifi.start_provisioning();
+  const String ap_ssid = softap_provisioning_ap_ssid();
 
   if (disp_ok) {
-    // Simple provisioning screen: dark background, centered text
+    // Provisioning screen: dark background, AP name to join.
     lv_obj_t *scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
 
     lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "WiFi Setup Required");
+    lv_label_set_text(title, "WiFi Setup");
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_set_style_text_font(title, &thermostat_font_montserrat_30, 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -50);
 
     lv_obj_t *body = lv_label_create(scr);
-    lv_label_set_text(body, "Use the Improv Wi-Fi app or\nimprov-wifi.com to configure");
-    lv_obj_set_style_text_color(body, lv_color_make(0xAA, 0xAA, 0xAA), 0);
+    const String msg =
+        String("Join Wi-Fi network:\n") + ap_ssid + "\nthen open any web page";
+    lv_label_set_text(body, msg.c_str());
+    lv_obj_set_style_text_color(body, lv_color_make(0xCC, 0xCC, 0xCC), 0);
     lv_obj_set_style_text_font(body, &thermostat_font_montserrat_20, 0);
     lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
 
-    // Turn on backlight
     ledcWrite(kBacklightPin, 200);
   } else {
-    Serial.println("[provision] Display unavailable — provisioning headless via BLE only");
+    Serial.printf("[provision] Display unavailable — portal AP: %s\n", ap_ssid.c_str());
   }
 
-  // Minimal loop: LVGL ticks (if display is up) + watchdog + deferred reboot after
-  // BLE response.
+  // Service the SoftAP portal until the user submits credentials, then reboot into
+  // normal mode (which reads the new NVS creds and connects).
   esp_task_wdt_add(NULL);
   uint32_t last_tick = millis();
   for (;;) {
     esp_task_wdt_reset();
-    if (g_wifi.reboot_pending()) {
-      Serial.println("[provision] Rebooting with new credentials...");
+    const uint32_t now = millis();
+    if (g_wifi.has_credentials()) {
+      Serial.println("[provision] Credentials received — rebooting");
+      delay(800);  // let the portal's "Saved" response flush to the browser
       ESP.restart();
     }
-    uint32_t now = millis();
+    g_wifi.ensure_connected(now);  // runs the DNS + portal web server
     if (disp_ok && (now - last_tick) >= kUiTickMs) {
       lv_tick_inc(now - last_tick);
       last_tick = now;

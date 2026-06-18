@@ -35,7 +35,6 @@
 #if defined(CONTROLLER_BOARD_WAVESHARE)
 #include <ETH.h>
 #endif
-#include "improv_ble_provisioning.h"
 #include "wifi_provisioning_manager.h"
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -2841,7 +2840,7 @@ void setup() {
   Serial.printf("[eth] ETH.begin() -> %s\n",
                 g_ctrl_eth_started ? "ok" : "FAILED (running ESP-NOW-only)");
 #else
-  // Initialize WiFi provisioning manager — starts BLE immediately if no creds
+  // Initialize WiFi provisioning manager — brings up the SoftAP portal if no creds.
   WifiProvisioningConfig wifi_cfg = {};
   wifi_cfg.device_name = "Controller";
   wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
@@ -2850,10 +2849,9 @@ void setup() {
   wifi_cfg.nvs = &g_ctrl_cfg;
   wifi_cfg.hostname = g_cfg_ctrl_hostname.c_str();
   wifi_cfg.retry_interval_ms = kCtrlNetworkRetryMs;
-  wifi_cfg.reboot_after_provision = false;
   bool has_wifi = g_ctrl_wifi.begin(wifi_cfg);
   if (!has_wifi) {
-    Serial.println("[provision] No WiFi configured — starting BLE provisioning");
+    Serial.println("[provision] No WiFi configured — starting SoftAP portal");
     g_ctrl_wifi.start_provisioning();
   }
 #endif

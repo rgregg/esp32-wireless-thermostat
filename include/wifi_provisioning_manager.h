@@ -3,14 +3,14 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
-#include "improv_ble_provisioning.h"
+#include "softap_provisioning.h"
 
-// Shared WiFi connection + BLE provisioning manager.
+// Shared WiFi connection + provisioning manager.
 // Both display and controller firmware use this to avoid duplicating
-// WiFi retry logic, BLE Improv setup, and credential storage.
+// WiFi retry logic, SoftAP-portal provisioning setup, and credential storage.
 
 struct WifiProvisioningConfig {
-  // BLE Improv identity
+  // Provisioning identity (AP/portal naming)
   const char *device_name;        // e.g. "Thermostat", "Controller"
   const char *firmware_name;      // THERMOSTAT_PROJECT_NAME
   const char *firmware_version;   // THERMOSTAT_FIRMWARE_VERSION
@@ -30,10 +30,6 @@ struct WifiProvisioningConfig {
 
   // DHCP hostname (set before WiFi.begin)
   const char *hostname;
-
-  // If true, reboot after BLE provisioning completes (for devices
-  // where BLE and WiFi can't coexist, e.g. ESP32-S3 with display)
-  bool reboot_after_provision;
 };
 
 class WifiProvisioningManager {
