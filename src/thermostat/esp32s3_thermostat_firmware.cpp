@@ -2482,7 +2482,11 @@ bool init_display_and_lvgl() {
   }
 
   panel_config.flags.fb_in_psram = 1;
-  panel_config.bounce_buffer_size_px = 10 * kDisplayWidth;
+  // Bounce buffer is internal DMA-capable RAM (stages PSRAM framebuffer lines). 4
+  // lines (~12.8 KB across the two ping-pong buffers) instead of 10 (~32 KB) shrinks
+  // the *contiguous* internal block needed, so it still allocates when NimBLE has
+  // fragmented the heap during provisioning. Plenty for a low-refresh thermostat UI.
+  panel_config.bounce_buffer_size_px = 4 * kDisplayWidth;
   panel_config.num_fbs = 2;
 
   lv_init();
@@ -2706,8 +2710,9 @@ void poll_sensors(uint32_t now_ms) {
 
 // ---------- BLE provisioning boot mode ----------
 // When no WiFi SSID is configured, we enter a minimal boot mode:
-// 1. Start BLE immediately (before display, which consumes internal RAM)
-// 2. Init display and show a simple "configure WiFi" message
+// 1. Init the LCD first (grabs its small contiguous bounce buffer before NimBLE
+//    fragments internal DMA RAM), then start BLE provisioning
+// 2. Show a simple "configure WiFi" message (or run headless if the LCD failed)
 // 3. Loop only LVGL ticks + watchdog until BLE provides credentials → reboot
 static bool g_provisioning_boot_mode = false;
 
@@ -2718,9 +2723,16 @@ static void run_provisioning_boot() {
   Serial.println("[provision] No WiFi configured — entering BLE provisioning mode");
   g_provisioning_boot_mode = true;
 
-  // Start BLE first while internal RAM is still available (display not yet init).
-  // Use reboot_after_provision=true since WiFi+BLE can't coexist on ESP32-S3
-  // with display bounce buffers consuming internal RAM.
+  // Init the LCD FIRST, before NimBLE allocates. The bounce buffer needs one
+  // *contiguous* internal DMA block; NimBLE makes many small allocations that
+  // fragment the heap, so grabbing the (now small, 4-line) bounce buffer while RAM
+  // is still unfragmented lets the LCD and BLE coexist. If it still fails we run
+  // headless so the board stays onboardable via the Improv app.
+  init_backlight();
+  const bool disp_ok = init_display_and_lvgl();
+
+  // Then start BLE provisioning. reboot_after_provision=true: once creds arrive we
+  // reboot into normal mode (where the LCD has the full heap, no BLE).
   WifiProvisioningConfig wifi_cfg = {};
   wifi_cfg.device_name = "Thermostat";
   wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
@@ -2731,13 +2743,6 @@ static void run_provisioning_boot() {
   wifi_cfg.reboot_after_provision = true;
   g_wifi.begin(wifi_cfg);
   g_wifi.start_provisioning();
-
-  // Now init display — BLE is already running and allocated its memory. On boards
-  // where NimBLE has fragmented internal DMA RAM below the LCD bounce-buffer's
-  // contiguous requirement, this fails; we then provision headless via BLE so the
-  // board is still setup-able (otherwise it crash-loops and can never be onboarded).
-  init_backlight();
-  const bool disp_ok = init_display_and_lvgl();
 
   if (disp_ok) {
     // Simple provisioning screen: dark background, centered text
