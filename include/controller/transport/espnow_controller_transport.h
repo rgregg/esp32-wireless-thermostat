@@ -48,6 +48,11 @@ class EspNowControllerTransport final : public IControllerTransport {
   void publish_weather(float outdoor_temp_c, WeatherIcon icon) override;
   uint32_t send_ok_count() const { return send_ok_count_; }
   uint32_t send_fail_count() const { return send_fail_count_; }
+  // Count of ESP-NOW frames received (after the length/header sanity check, before
+  // peer filtering) and the source MAC of the most recent one. Diagnostic only —
+  // lets the firmware report "we are hearing a peer" without MQTT/web.
+  uint32_t rx_count() const { return rx_count_; }
+  const uint8_t *last_rx_mac() const { return last_rx_mac_; }
 
  private:
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
@@ -71,6 +76,8 @@ class EspNowControllerTransport final : public IControllerTransport {
   static EspNowControllerTransport *instance_;
   uint32_t send_ok_count_ = 0;
   uint32_t send_fail_count_ = 0;
+  uint32_t rx_count_ = 0;
+  uint8_t last_rx_mac_[6] = {0};
   uint32_t last_send_ms_ = 0;
   static constexpr uint32_t kMinSendIntervalMs = 50;
 };

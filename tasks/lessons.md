@@ -41,3 +41,19 @@
 - This is how the panic-PC breadcrumb "passed" unit tests but did nothing on hardware: `set_arduino_panic_handler()` needs `-Wl,--wrap=esp_panic_handler` to redirect `esp_panic_handler` → the core's `__wrap_esp_panic_handler` (which calls the callback). Without the flag the callback is never invoked.
 - **When an Arduino-core hook "does nothing," check the actual link:** `pio run -e <env> -v 2>&1 | grep -- '--wrap'`. Re-add any missing `platform.txt` link flags in `platformio.ini` `build_flags`.
 - Corollary: **on-device validation catches what unit tests can't.** Linker/runtime/RTC behavior is invisible to native tests.
+
+### `PLATFORMIO_BUILD_FLAGS` and `platformio.ini` edits wipe `.pio/build`
+- PlatformIO stores `.pio/build/project.checksum` (a hash of config incl. the
+  `PLATFORMIO_BUILD_FLAGS` env var). When it changes, pio **deletes the entire
+  `.pio/build/`** to force clean rebuilds — wiping *all* envs, not just the one you build.
+- Symptom that bit me: built a display env with `PLATFORMIO_BUILD_FLAGS=-D...` to inject
+  config, then built another env without it → the display's `firmware.bin` vanished and a
+  stale `/tmp/*.bin` got flashed instead (the scp had silently failed; the flash used old
+  files). Also turned every "incremental" rebuild into a slow full rebuild.
+- **Rules:**
+  - Don't toggle `PLATFORMIO_BUILD_FLAGS` between builds. Put per-variant config in a
+    committed `[env:...]` (use `extends`); env defs coexist at a stable checksum.
+  - To build multiple variants, pass them in ONE invocation: `pio run -e A -e B` — same
+    checksum, no inter-env wipe.
+  - After any flash-prep `scp`, verify it succeeded and check the remote file's timestamp
+    before flashing (`ls -la`); a failed scp leaves stale bins that flash "successfully."

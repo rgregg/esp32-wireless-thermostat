@@ -402,6 +402,14 @@ constexpr uint32_t kCtrlWeatherTaskWatchdogMs =
 #define THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL 6
 #endif
 
+// Default ESP-NOW peer/device list (semicolon-separated "MAC[=role]"), applied when
+// NVS has none. Normally empty (peers added via config); a bench build can set this
+// to "FF:FF:FF:FF:FF:FF" so the controller broadcasts heartbeats to any listening
+// display for an isolated end-to-end test.
+#ifndef THERMOSTAT_CONTROLLER_DEVICES
+#define THERMOSTAT_CONTROLLER_DEVICES ""
+#endif
+
 #ifndef THERMOSTAT_CONTROLLER_OTA_HOSTNAME
 #define THERMOSTAT_CONTROLLER_OTA_HOSTNAME "esp32-furnace-controller"
 #endif
@@ -441,7 +449,7 @@ String g_cfg_ctrl_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
 String g_cfg_ctrl_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
 uint8_t g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
 String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
-String g_cfg_ctrl_devices = "";  // NVS "devices": semicolon-separated "MAC[=role]"
+String g_cfg_ctrl_devices = THERMOSTAT_CONTROLLER_DEVICES;  // NVS "devices": "MAC[=role]" list
 String g_cfg_ctrl_pirateweather_api_key = THERMOSTAT_CONTROLLER_PIRATEWEATHER_API_KEY;
 String g_cfg_ctrl_pirateweather_zip = THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP;
 std::atomic<bool> g_ctrl_mqtt_reconfigure_required{false};  // cross-task (web/loop write, MQTT task consumes)
@@ -558,7 +566,7 @@ void ctrl_load_runtime_config() {
   if (g_cfg_ctrl_espnow_channel < 1 || g_cfg_ctrl_espnow_channel > 14)
     g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
   g_cfg_ctrl_espnow_lmk = g_ctrl_cfg.getString("esp_lmk", g_cfg_ctrl_espnow_lmk);
-  g_cfg_ctrl_devices = g_ctrl_cfg.getString("devices", "");
+  g_cfg_ctrl_devices = g_ctrl_cfg.getString("devices", g_cfg_ctrl_devices);
   g_cfg_ctrl_allow_ha = g_ctrl_cfg.getBool("allow_ha", true);
   g_cfg_ctrl_mqtt_enabled = g_ctrl_cfg.getBool("mqtt_en", true);
   g_cfg_ctrl_espnow_enabled = g_ctrl_cfg.getBool("espnow_en", true);
@@ -2942,6 +2950,14 @@ void loop() {
                   ctrl_ip_link_up() ? ctrl_ip_local_addr().c_str() : "no",
                   g_ctrl_mqtt_up.load() ? "yes" : "no",
                   g_ctrl_wifi.provisioning_active() ? "active" : "idle");
+    if (g_controller != nullptr) {
+      const auto &t = g_controller->transport();
+      const uint8_t *m = t.last_rx_mac();
+      Serial.printf(
+          "[espnow] rx=%lu tx_ok=%lu tx_fail=%lu last_rx=%02X:%02X:%02X:%02X:%02X:%02X\n",
+          (unsigned long)t.rx_count(), (unsigned long)t.send_ok_count(),
+          (unsigned long)t.send_fail_count(), m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
   }
   if (g_ctrl_reboot_requested && static_cast<uint32_t>(now - g_ctrl_reboot_at_ms) < 0x80000000u) {
     ESP.restart();

@@ -236,6 +236,11 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
   if (data == nullptr || len < static_cast<int>(sizeof(PacketHeader))) {
     return;
   }
+  // Diagnostic RX accounting (counts every sane frame, pre-peer-filter).
+  ++rx_count_;
+  if (src_mac != nullptr) {
+    memcpy(last_rx_mac_, src_mac, 6);
+  }
   // Accept packets from any registered peer, or all if no peers configured
   if (src_mac != nullptr && config_.peer_count > 0 &&
       !is_registered_peer(config_, src_mac)) {
