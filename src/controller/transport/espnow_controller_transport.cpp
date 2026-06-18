@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "controller/transport/espnow_peer_filter.h"
 #include "transport/espnow_packets.h"
 
 #if defined(ARDUINO)
@@ -11,38 +12,6 @@
 #endif
 
 namespace thermostat {
-
-namespace {
-bool is_broadcast_mac(const uint8_t mac[6]) {
-  for (int i = 0; i < 6; ++i) {
-    if (mac[i] != 0xFF) return false;
-  }
-  return true;
-}
-
-bool is_registered_peer(const EspNowControllerConfig &config, const uint8_t mac[6]) {
-  for (int i = 0; i < config.peer_count; ++i) {
-    // A broadcast peer means "talk to everyone" — so also accept RX from anyone.
-    // Otherwise a controller configured to broadcast (e.g. an isolated bench, or a
-    // controller addressing all displays) would receive every frame but drop it at
-    // the filter, never registering a thermostat heartbeat -> spurious failsafe.
-    if (is_broadcast_mac(config.peer_macs[i])) {
-      return true;
-    }
-    if (memcmp(config.peer_macs[i], mac, 6) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool is_all_zero_mac(const uint8_t mac[6]) {
-  for (int i = 0; i < 6; ++i) {
-    if (mac[i] != 0) return false;
-  }
-  return true;
-}
-}  // namespace
 
 EspNowControllerTransport *EspNowControllerTransport::instance_ = nullptr;
 
@@ -75,7 +44,7 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   });
 
   for (int i = 0; i < config_.peer_count; ++i) {
-    if (is_all_zero_mac(config_.peer_macs[i])) {
+    if (espnow_peer_filter::is_all_zero_mac(config_.peer_macs[i])) {
       continue;
     }
     esp_now_peer_info_t peer_info;
@@ -156,7 +125,7 @@ void EspNowControllerTransport::send_to_all_peers(const uint8_t *data, size_t le
   }
   last_send_ms_ = now;
   for (int i = 0; i < config_.peer_count; ++i) {
-    if (!is_all_zero_mac(config_.peer_macs[i])) {
+    if (!espnow_peer_filter::is_all_zero_mac(config_.peer_macs[i])) {
       esp_now_send(config_.peer_macs[i], data, len);
     }
   }
@@ -266,9 +235,13 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
   if (src_mac != nullptr) {
     memcpy(last_rx_mac_, src_mac, 6);
   }
-  // Accept packets from any registered peer, or all if no peers configured
-  if (src_mac != nullptr && config_.peer_count > 0 &&
-      !is_registered_peer(config_, src_mac)) {
+  // Authorize the source: when any unicast peer is configured, the source must match
+  // one. A broadcast-only config (isolated bench) or no peers -> accept all. Broadcast
+  // peer entries are TX-only and never authorize an arbitrary source — this keeps
+  // CommandWord (the only safety-relevant payload) from being accepted from anyone
+  // just because the controller also broadcasts.
+  if (!espnow_peer_filter::rx_source_authorized(config_.peer_macs, config_.peer_count,
+                                                src_mac)) {
     return;
   }
 
