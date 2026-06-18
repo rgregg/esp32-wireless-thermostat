@@ -15,3 +15,4 @@ sdkconfig.*
 /dependencies.lock
 /sdkconfig.defaults
 /sdkconfig.esp32-furnace-controller-s3
+include/bench_wifi_secrets.h

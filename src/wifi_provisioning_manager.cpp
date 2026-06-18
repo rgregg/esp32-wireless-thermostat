@@ -11,10 +11,15 @@ bool WifiProvisioningManager::begin(const WifiProvisioningConfig &config) {
   s_instance = this;
   m_config = config;
 
-  // Read stored credentials (fall back to compile-time defaults via caller)
+  // Read stored credentials; fall back to baked compile-time defaults when NVS has none.
+  const char *def_ssid = config.default_ssid ? config.default_ssid : "";
+  const char *def_pwd = config.default_password ? config.default_password : "";
   if (config.nvs) {
-    m_ssid = config.nvs->getString("wifi_ssid", "");
-    m_password = config.nvs->getString("wifi_pwd", "");
+    m_ssid = config.nvs->getString("wifi_ssid", def_ssid);
+    m_password = config.nvs->getString("wifi_pwd", def_pwd);
+  } else {
+    m_ssid = def_ssid;
+    m_password = def_pwd;
   }
 
   return has_credentials();

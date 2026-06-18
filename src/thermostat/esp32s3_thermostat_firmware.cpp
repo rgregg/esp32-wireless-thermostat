@@ -2623,6 +2623,10 @@ void init_network() {
   wifi_cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
   wifi_cfg.hardware_variant = "ESP32-S3";
   wifi_cfg.nvs = &g_cfg;
+  // Baked creds (THERMOSTAT_WIFI_SSID/PASSWORD) seed the connection when NVS has none,
+  // so a creds-baked build (e.g. the isolated bench) connects without provisioning.
+  wifi_cfg.default_ssid = g_cfg_wifi_ssid.c_str();
+  wifi_cfg.default_password = g_cfg_wifi_password.c_str();
   wifi_cfg.hostname = g_cfg_hostname.c_str();
   wifi_cfg.retry_interval_ms = kNetworkRetryMs;
   wifi_cfg.reboot_after_provision = false;

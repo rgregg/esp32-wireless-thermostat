@@ -19,6 +19,12 @@ struct WifiProvisioningConfig {
   // NVS handle (caller owns the Preferences object)
   Preferences *nvs;
 
+  // Compile-time / baked default credentials, used only when NVS has none. Lets a build
+  // bake WiFi creds (e.g. for an isolated bench) so the device connects without going
+  // through provisioning. Provisioned NVS creds always win. nullptr/"" = no default.
+  const char *default_ssid = nullptr;
+  const char *default_password = nullptr;
+
   // Timing
   uint32_t retry_interval_ms;     // How often to retry WiFi.begin()
 
