@@ -107,15 +107,12 @@ static String ctrl_ip_local_addr() {
 #endif
 }
 
-#if defined(CONTROLLER_BOARD_WAVESHARE)
-// Network-independent time. The PCF85063 RTC seeds the system clock on boot; SNTP (over
-// Ethernet) then corrects it and writes the accurate time back to the RTC. The RTC
-// stores UTC. What to DO with wall-clock time (time-of-day scheduling) is a deferred
-// product decision — this is just the time-keeping plumbing. The RTC shares the I2C bus
-// with the relays (SDA=42/SCL=41), already brought up by the relay backend's begin().
-thermostat::Pcf85063Rtc g_ctrl_rtc;       // default 0x51, sda42/scl41
-bool g_ctrl_rtc_present = false;          // RTC responded on the bus at boot
-bool g_ctrl_time_valid = false;          // system clock has trustworthy time (RTC or NTP)
+// Wall-clock time (board-agnostic). SNTP over whatever IP link the board has — Ethernet
+// on Waveshare, WiFi on the classic board — sets the system clock; once it has synced the
+// controller broadcasts the time to displays over ESP-NOW so a WiFi-less display can show
+// a clock. The Waveshare board ALSO has a PCF85063 RTC that seeds the clock at boot and
+// persists NTP corrections (network-independent time); other boards rely on NTP alone.
+bool g_ctrl_time_valid = false;           // system clock has trustworthy time (RTC or NTP)
 const char *g_ctrl_time_source = "none";  // "rtc" | "ntp" | "none"
 // Persistent storage for the SNTP server name. MUST outlive SNTP and MUST NOT be
 // reassigned or mutated after configTime() — SNTP (lwip) retains the .c_str() pointer,
@@ -127,6 +124,23 @@ volatile bool g_ctrl_ntp_synced = false;  // set by the SNTP sync callback (NOT 
 // what distinguishes a real NTP sync from the RTC seed (both set the system clock, so a
 // "time > sane epoch" check alone cannot tell them apart).
 static void ctrl_sntp_sync_cb(struct timeval *) { g_ctrl_ntp_synced = true; }
+
+// The LAN gateway often serves NTP; read it from whichever interface is the IP path.
+static String ctrl_ip_gateway() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  return ETH.gatewayIP().toString();
+#else
+  return WiFi.gatewayIP().toString();
+#endif
+}
+
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+// PCF85063 RTC: seeds the system clock on boot and persists NTP corrections so the
+// Waveshare board keeps trustworthy time across reboots/power loss without the network.
+// The RTC stores UTC and shares the I2C bus with the relays (SDA=42/SCL=41), already
+// brought up by the relay backend's begin().
+thermostat::Pcf85063Rtc g_ctrl_rtc;       // default 0x51, sda42/scl41
+bool g_ctrl_rtc_present = false;          // RTC responded on the bus at boot
 
 // Read the RTC and, if its oscillator has been running (time trustworthy), seed the
 // system clock. Called once at boot after the I2C bus is up.
@@ -165,14 +179,14 @@ static void ctrl_write_system_time_to_rtc() {
   }
 }
 
-// Per-loop: start SNTP once IP is up; on first NTP sync (and hourly after) write the
-// corrected time back to the RTC so it survives reboots / power loss (with a battery).
+#endif  // CONTROLLER_BOARD_WAVESHARE
+
+// Per-loop: start SNTP once the IP link is up; on a real NTP sync mark time valid (and,
+// on Waveshare, write the corrected time back to the RTC, hourly, so it survives reboots).
 static void ctrl_time_tick(uint32_t now_ms) {
   static bool sntp_started = false;
-  static bool rtc_synced = false;
-  static uint32_t last_rtc_write_ms = 0;
   if (!sntp_started && ctrl_ip_link_up()) {
-    g_ctrl_ntp_primary = ETH.gatewayIP().toString();  // LAN gateway often serves NTP
+    g_ctrl_ntp_primary = ctrl_ip_gateway();  // LAN gateway often serves NTP
     sntp_set_time_sync_notification_cb(ctrl_sntp_sync_cb);
     configTime(0, 0, g_ctrl_ntp_primary.c_str(), "pool.ntp.org");  // UTC, no offset
     sntp_started = true;
@@ -180,19 +194,24 @@ static void ctrl_time_tick(uint32_t now_ms) {
                   g_ctrl_ntp_primary.c_str());
   }
   // Only act on a REAL NTP sync (callback-driven) — not merely "clock is set", which is
-  // already true from the RTC seed.
+  // already true from the RTC seed on Waveshare.
   if (g_ctrl_ntp_synced) {
     g_ctrl_time_valid = true;
     g_ctrl_time_source = "ntp";
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+    static bool rtc_synced = false;
+    static uint32_t last_rtc_write_ms = 0;
     if (!rtc_synced ||
         static_cast<uint32_t>(now_ms - last_rtc_write_ms) >= 3600000UL) {  // hourly
       ctrl_write_system_time_to_rtc();
       rtc_synced = true;
       last_rtc_write_ms = now_ms;
     }
+#else
+    (void)now_ms;
+#endif
   }
 }
-#endif  // CONTROLLER_BOARD_WAVESHARE
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
 WebServer g_ctrl_web(80);
@@ -2972,18 +2991,15 @@ void loop() {
       last_telemetry_republish_ms = now;
       g_controller->app().republish_telemetry();
     }
-#if defined(CONTROLLER_BOARD_WAVESHARE)
-    // Broadcast wall-clock time (when ours is trustworthy) so a WiFi-less display
-    // can show a clock without its own NTP/RTC. Only the Waveshare board keeps
-    // network-independent time (PCF85063 RTC + SNTP); other controllers have no
-    // clock to share, so this is compiled out there.
+    // Broadcast wall-clock time (when ours is trustworthy, via RTC or NTP) so a WiFi-less
+    // display can show a clock without its own NTP/RTC. Works on any board that has a
+    // valid clock: Waveshare via RTC+SNTP over Ethernet, classic via SNTP over WiFi.
     static uint32_t last_time_broadcast_ms = 0;
     if (g_ctrl_time_valid &&
         static_cast<uint32_t>(now - last_time_broadcast_ms) >= 30000) {
       last_time_broadcast_ms = now;
       g_controller->transport().publish_time(static_cast<uint32_t>(time(nullptr)));
     }
-#endif
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
 #if !defined(CONTROLLER_BOARD_WAVESHARE)
@@ -3029,9 +3045,7 @@ void loop() {
       }
       xSemaphoreGive(g_ctrl_mqtt_mtx);
     }
-#if defined(CONTROLLER_BOARD_WAVESHARE)
-    ctrl_time_tick(now);  // start SNTP once IP up; sync NTP time back to the RTC
-#endif
+    ctrl_time_tick(now);  // start SNTP once IP up; mark time valid; (Waveshare: RTC write-back)
     const bool mqtt_primary_active =
         g_ctrl_mqtt_up.load() &&
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);
