@@ -132,8 +132,15 @@ constexpr uint32_t kMqttPrimaryHoldMs = 30000;
 uint32_t g_last_mqtt_command_ms = 0;
 bool g_espnow_command_enabled = true;
 
-// Relay IO interlock layer
-thermostat::ControllerRelayIo g_relay_io;
+// Relay IO interlock layer. ControllerRelayIo drives relays through an injected
+// backend; the preview only reads the latched output, so a no-op backend suffices.
+class SimRelayBackend : public thermostat::RelayBackend {
+ public:
+  void begin() override {}
+  void write(const RelayDemand &) override {}
+};
+SimRelayBackend g_relay_backend;
+thermostat::ControllerRelayIo g_relay_io(g_relay_backend);
 
 // Simulated state
 uint32_t g_start_time_ms = 0;
