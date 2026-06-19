@@ -10,3 +10,9 @@ __pycache__/
 managed_components/
 sdkconfig.*
 .dummy/
+# pioarduino hybrid-build artifacts (generated in project root by custom_sdkconfig envs)
+/CMakeLists.txt
+/dependencies.lock
+/sdkconfig.defaults
+/sdkconfig.esp32-furnace-controller-s3
+include/bench_wifi_secrets.h

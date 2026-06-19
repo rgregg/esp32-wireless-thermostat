@@ -8,8 +8,13 @@
 
 #include "controller/controller_relay_io.h"
 #include "controller/controller_node.h"
+#include "controller/network_recovery_policy.h"
 #include "controller/pirateweather.h"
+#include "controller/gpio_relay_backend.h"
+#include "controller/pca9554_relay_backend.h"
+#include "controller/pcf85063_rtc.h"
 #include "controller/weather_watchdog.h"
+#include "controller/panic_breadcrumb_hook.h"
 #include "weather_icon.h"
 #include "command_builder.h"
 #include "espnow_cmd_word.h"
@@ -27,7 +32,9 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
-#include "improv_ble_provisioning.h"
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+#include <ETH.h>
+#endif
 #include "wifi_provisioning_manager.h"
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -35,6 +42,11 @@
 #include <esp_mac.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
+#include <time.h>
+#include <sys/time.h>
+#include <esp_sntp.h>
+#include <esp_core_dump.h>
+#include <esp_partition.h>
 #include "ota_web_updater.h"
 #include "controller/audit_log.h"
 #include "web/web_ui_escape.h"
@@ -43,12 +55,165 @@
 #include "mac_address_utils.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
-thermostat::ControllerRelayIo g_relay_io;
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+// Real production board: Waveshare ESP32-S3-ETH-8DI-8RO. Relays are driven through a
+// PCA9554 I2C GPIO expander @0x20 (SDA=42/SCL=41), relay N = bit 1<<N, active-high.
+// Defaults verified on hardware (2026-06-16): heat=relay0, cool=relay1, fan=relay2,
+// spare=relay3 — see session log D1 (confirm furnace wiring before cutover).
+thermostat::Pca9554RelayBackend g_relay_backend;       // defaults: 0x20, sda42/scl41, heat0/cool1/fan2/spare3
+#elif defined(CONTROLLER_BOARD_S3)
+// ESP32-S3 bench board (devkit/Feather) has no relay hardware (no PCA9554). GPIO
+// 32/33/25 don't exist on the S3, so drive safe spare S3 GPIOs (nothing wired) to
+// keep pinMode valid. The real Waveshare board uses Pca9554RelayBackend above.
+thermostat::GpioRelayBackend g_relay_backend(
+    thermostat::GpioRelayBackendConfig{4, 5, 6, 7});   // heat/cool/fan/spare, non-inverted
+#else
+thermostat::GpioRelayBackend g_relay_backend;          // classic ESP32: pins 32/33/25/26, non-inverted
+#endif
+thermostat::ControllerRelayIo g_relay_io(g_relay_backend);
 thermostat::AuditLog g_audit_log;
+
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+// Wired W5500 Ethernet is the PRIMARY IP link on the Waveshare board (pins validated
+// on hardware — see the esp32s3-waveshare-port design / bring-up session log F6). The
+// WiFi radio is used for ESP-NOW ONLY (STA mode, pinned channel, never associates) —
+// see docs/superpowers/plans/2026-06-16-ethernet-primary-networking.md.
+namespace {
+constexpr int kEthCs = 16, kEthIrq = 12, kEthRst = -1;
+constexpr int kEthSck = 15, kEthMiso = 14, kEthMosi = 13;
+}  // namespace
+bool g_ctrl_eth_started = false;
+#endif
+
+// IP-link abstraction. The controller's IP services (MQTT, web, OTA, mDNS) are
+// link-agnostic (lwIP routes over whichever netif has the route); these two helpers
+// are the only place that knows which physical link carries IP. On the Waveshare board
+// that is Ethernet (WiFi never associates); on the classic board it is WiFi STA — where
+// these reduce to exactly the prior WiFi.status()/WiFi.localIP() behavior (no change).
+static bool ctrl_ip_link_up() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  return g_ctrl_eth_started && ETH.hasIP();  // hasIP() => link up AND has an address
+#else
+  return WiFi.status() == WL_CONNECTED;
+#endif
+}
+
+static String ctrl_ip_local_addr() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  return ctrl_ip_link_up() ? ETH.localIP().toString() : String("");
+#else
+  return (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
+#endif
+}
+
+// Wall-clock time (board-agnostic). SNTP over whatever IP link the board has — Ethernet
+// on Waveshare, WiFi on the classic board — sets the system clock; once it has synced the
+// controller broadcasts the time to displays over ESP-NOW so a WiFi-less display can show
+// a clock. The Waveshare board ALSO has a PCF85063 RTC that seeds the clock at boot and
+// persists NTP corrections (network-independent time); other boards rely on NTP alone.
+bool g_ctrl_time_valid = false;           // system clock has trustworthy time (RTC or NTP)
+const char *g_ctrl_time_source = "none";  // "rtc" | "ntp" | "none"
+bool g_ctrl_rtc_present = false;          // a PCF85063 RTC was found at boot (Waveshare only)
+// Persistent storage for the SNTP server name. MUST outlive SNTP and MUST NOT be
+// reassigned or mutated after configTime() — SNTP (lwip) retains the .c_str() pointer,
+// not a copy, so a realloc here would be a use-after-free in the lwip task.
+String g_ctrl_ntp_primary;
+volatile bool g_ctrl_ntp_synced = false;  // set by the SNTP sync callback (NOT just "clock set")
+
+// SNTP notification callback — fires when SNTP actually receives a time update. This is
+// what distinguishes a real NTP sync from the RTC seed (both set the system clock, so a
+// "time > sane epoch" check alone cannot tell them apart).
+static void ctrl_sntp_sync_cb(struct timeval *) { g_ctrl_ntp_synced = true; }
+
+// The LAN gateway often serves NTP; read it from whichever interface is the IP path.
+static String ctrl_ip_gateway() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  return ETH.gatewayIP().toString();
+#else
+  return WiFi.gatewayIP().toString();
+#endif
+}
+
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+// PCF85063 RTC: seeds the system clock on boot and persists NTP corrections so the
+// Waveshare board keeps trustworthy time across reboots/power loss without the network.
+// The RTC stores UTC and shares the I2C bus with the relays (SDA=42/SCL=41), already
+// brought up by the relay backend's begin().
+thermostat::Pcf85063Rtc g_ctrl_rtc;       // default 0x51, sda42/scl41
+
+// Read the RTC and, if its oscillator has been running (time trustworthy), seed the
+// system clock. Called once at boot after the I2C bus is up.
+static void ctrl_seed_time_from_rtc() {
+  thermostat::RtcTime rt;
+  bool osc_ok = false;
+  if (!g_ctrl_rtc.read(rt, osc_ok)) {
+    Serial.println("[time] RTC not responding on I2C");
+    return;
+  }
+  g_ctrl_rtc_present = true;
+  if (!osc_ok) {
+    Serial.println("[time] RTC oscillator stopped (no trusted time) — waiting for NTP");
+    return;
+  }
+  struct timeval tv = {};
+  tv.tv_sec = static_cast<time_t>(thermostat::rtc_time_to_epoch(rt));
+  settimeofday(&tv, nullptr);
+  g_ctrl_time_valid = true;
+  g_ctrl_time_source = "rtc";
+  Serial.printf("[time] seeded from RTC: %04u-%02u-%02uT%02u:%02u:%02uZ\n",
+                rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
+}
+
+// Write the current system time (UTC) back to the RTC. Called after an NTP sync.
+static void ctrl_write_system_time_to_rtc() {
+  if (!g_ctrl_rtc_present) return;
+  const time_t nowt = time(nullptr);
+  const thermostat::RtcTime rt =
+      thermostat::rtc_time_from_epoch(static_cast<long long>(nowt));
+  if (g_ctrl_rtc.set(rt)) {
+    Serial.printf("[time] RTC updated from NTP: %04u-%02u-%02uT%02u:%02u:%02uZ\n",
+                  rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
+  } else {
+    Serial.println("[time] RTC write FAILED");
+  }
+}
+
+#endif  // CONTROLLER_BOARD_WAVESHARE
+
+// Per-loop: start SNTP once the IP link is up; on a real NTP sync mark time valid (and,
+// on Waveshare, write the corrected time back to the RTC, hourly, so it survives reboots).
+static void ctrl_time_tick(uint32_t now_ms) {
+  static bool sntp_started = false;
+  if (!sntp_started && ctrl_ip_link_up()) {
+    g_ctrl_ntp_primary = ctrl_ip_gateway();  // LAN gateway often serves NTP
+    sntp_set_time_sync_notification_cb(ctrl_sntp_sync_cb);
+    configTime(0, 0, g_ctrl_ntp_primary.c_str(), "pool.ntp.org");  // UTC, no offset
+    sntp_started = true;
+    Serial.printf("[time] SNTP started (servers: %s, pool.ntp.org)\n",
+                  g_ctrl_ntp_primary.c_str());
+  }
+  // Only act on a REAL NTP sync (callback-driven) — not merely "clock is set", which is
+  // already true from the RTC seed on Waveshare.
+  if (g_ctrl_ntp_synced) {
+    g_ctrl_time_valid = true;
+    g_ctrl_time_source = "ntp";
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+    static bool rtc_synced = false;
+    static uint32_t last_rtc_write_ms = 0;
+    if (!rtc_synced ||
+        static_cast<uint32_t>(now_ms - last_rtc_write_ms) >= 3600000UL) {  // hourly
+      ctrl_write_system_time_to_rtc();
+      rtc_synced = true;
+      last_rtc_write_ms = now_ms;
+    }
+#else
+    (void)now_ms;
+#endif
+  }
+}
 WiFiClient g_ctrl_wifi_client;
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
 WebServer g_ctrl_web(80);
-uint32_t g_ctrl_last_mqtt_attempt_ms = 0;
 uint32_t g_ctrl_last_mqtt_publish_ms = 0;
 bool g_ctrl_last_lockout = false;
 bool g_ctrl_have_lockout = false;
@@ -60,7 +225,11 @@ String g_ctrl_last_mqtt_error = "none";
 String g_ctrl_last_ota_error = "none";
 String g_ctrl_last_espnow_error = "none";
 uint16_t g_ctrl_mqtt_seq = 0;
-bool g_ctrl_mqtt_discovery_sent = false;
+std::atomic<bool> g_ctrl_mqtt_discovery_sent{false};
+// NetworkRecoveryPolicy for MQTT reconnect backoff + subsystem restart.
+// reboot_enabled=false: the isolation watchdog owns device reboots.
+thermostat::NetworkRecoveryPolicy g_ctrl_mqtt_recovery(
+    thermostat::NetworkRecoveryConfig{1000, 60000, 5, 0, false});
 bool g_ctrl_have_shadow = false;
 FurnaceMode g_ctrl_shadow_mode = FurnaceMode::Off;
 FanMode g_ctrl_shadow_fan = FanMode::Automatic;
@@ -82,6 +251,32 @@ String g_ctrl_reboot_reason = "none";
 bool g_ctrl_reboot_requested = false;
 uint32_t g_ctrl_reboot_at_ms = 0;
 uint32_t g_ctrl_isolation_start_ms = 0;  // 0 = not isolated
+bool g_ctrl_isolation_recovery_done = false;  // in-place subsystem recovery already tried this episode
+
+// Inbound MQTT command queue. The PubSubClient callback (which runs on the MQTT task once
+// MQTT is moved off the control loop) only PARSES + enqueues; the control loop drains and
+// applies, keeping all controller-state mutation single-threaded with g_controller->tick().
+struct CtrlInboundMsg {
+  char topic[160];
+  uint8_t payload[256];
+  uint16_t len;
+};
+QueueHandle_t g_ctrl_inbound_q = nullptr;
+std::atomic<uint32_t> g_ctrl_inbound_dropped{0};  // queue-full drops (surfaced in state/inbound_dropped)
+
+// MQTT client serialization. g_ctrl_mqtt (PubSubClient) is NOT thread-safe; this mutex
+// serializes all access between the dedicated MQTT task (connect + loop) and the control
+// loop (publish). The control loop uses a TRY-lock for publishing so a slow connect on
+// the MQTT task can never block relay control. g_ctrl_mqtt_up mirrors connected() for the
+// many out-of-lock status reads (isolation watchdog, heartbeat, etc.). g_ctrl_just_connected
+// signals the control loop to (re)publish discovery + announce + a full state snapshot.
+// MUST stay a NON-recursive mutex: ctrl_audit_publish() relies on a try-lock self-failing
+// when the loop task already holds this (it calls ctrl_audit from inside its locked publish
+// section). A recursive mutex would let ctrl_audit_publish re-enter g_ctrl_mqtt.publish()
+// mid-ctrl_publish_runtime_state() and corrupt the PubSubClient TX buffer.
+SemaphoreHandle_t g_ctrl_mqtt_mtx = nullptr;
+std::atomic<bool> g_ctrl_mqtt_up{false};
+std::atomic<bool> g_ctrl_just_connected{false};
 
 // --- Task Watchdog breadcrumb -----------------------------------------------
 // A hard Task-WDT panic doesn't run our reboot hook, so reboot_reason stays
@@ -106,6 +301,7 @@ RTC_NOINIT_ATTR static volatile uint32_t g_ctrl_breadcrumb_section[kCtrlCoreCoun
 // Per-core section active at the prior boot's reset, captured once at boot.
 // "none" if the reset happened outside any instrumented blocking call (or power-on).
 String g_ctrl_wdt_section = "none";
+String g_ctrl_panic_pc = "none";
 
 static inline void ctrl_breadcrumb_set(CtrlBlockingSection s) {
   g_ctrl_breadcrumb_section[xPortGetCoreID()] = static_cast<uint32_t>(s);
@@ -165,6 +361,11 @@ constexpr uint8_t kCtrlMqttSocketTimeoutS = 5;
 // Reboot if both MQTT and ESP-NOW have been silent for this long.
 // Covers wedged network-stack states that the WiFi watchdog ping doesn't catch.
 constexpr uint32_t kCtrlIsolationRebootMs = 15UL * 60UL * 1000UL;
+// On the Waveshare board, after kCtrlIsolationRebootMs of isolation we first try an
+// in-place subsystem recovery (re-init ESP-NOW + force MQTT reconnect) instead of
+// rebooting. This is the grace window we give that recovery to restore connectivity
+// before falling back to a reboot as the true last resort.
+constexpr uint32_t kCtrlIsolationRecoveryGraceMs = 3UL * 60UL * 1000UL;
 struct CtrlWeatherResult {
   float temp_c = 0.0f;
   thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
@@ -225,6 +426,14 @@ constexpr uint32_t kCtrlWeatherTaskWatchdogMs =
 #define THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL 6
 #endif
 
+// Default ESP-NOW peer/device list (semicolon-separated "MAC[=role]"), applied when
+// NVS has none. Normally empty (peers added via config); a bench build can set this
+// to "FF:FF:FF:FF:FF:FF" so the controller broadcasts heartbeats to any listening
+// display for an isolated end-to-end test.
+#ifndef THERMOSTAT_CONTROLLER_DEVICES
+#define THERMOSTAT_CONTROLLER_DEVICES ""
+#endif
+
 #ifndef THERMOSTAT_CONTROLLER_OTA_HOSTNAME
 #define THERMOSTAT_CONTROLLER_OTA_HOSTNAME "esp32-furnace-controller"
 #endif
@@ -264,10 +473,10 @@ String g_cfg_ctrl_discovery_prefix = THERMOSTAT_MQTT_DISCOVERY_PREFIX;
 String g_cfg_ctrl_hostname = THERMOSTAT_CONTROLLER_OTA_HOSTNAME;
 uint8_t g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
 String g_cfg_ctrl_espnow_lmk = THERMOSTAT_CONTROLLER_ESPNOW_LMK;
-String g_cfg_ctrl_devices = "";  // NVS "devices": semicolon-separated "MAC[=role]"
+String g_cfg_ctrl_devices = THERMOSTAT_CONTROLLER_DEVICES;  // NVS "devices": "MAC[=role]" list
 String g_cfg_ctrl_pirateweather_api_key = THERMOSTAT_CONTROLLER_PIRATEWEATHER_API_KEY;
 String g_cfg_ctrl_pirateweather_zip = THERMOSTAT_CONTROLLER_PIRATEWEATHER_ZIP;
-bool g_ctrl_mqtt_reconfigure_required = false;
+std::atomic<bool> g_ctrl_mqtt_reconfigure_required{false};  // cross-task (web/loop write, MQTT task consumes)
 bool g_ctrl_cfg_reboot_required = false;
 bool g_ctrl_temp_unit_f = false;
 uint16_t g_cfg_fan_circ_period_min = 60;
@@ -322,6 +531,7 @@ static String ctrl_find_temp_sensor_mac_str(const String &devices) {
 }
 
 using mac_utils::mac_full;
+using mac_utils::mac_parse;
 using mac_utils::mac_strip_colons;
 
 void ctrl_load_runtime_config() {
@@ -331,6 +541,26 @@ void ctrl_load_runtime_config() {
 
   // Full colon-separated MAC for display and ESP-NOW.
   g_cfg_device_mac = mac_full();
+  // ---- Identity MAC override (controller cutover support) --------------------------
+  // If an override MAC is configured (NVS "id_mac"), this controller PRESENTS that MAC as
+  // its full identity: the radio (WiFi STA / ESP-NOW) MAC AND the Home Assistant / MQTT
+  // topic + uniq_id identity (which are derived from g_cfg_device_mac). This lets a new
+  // board (e.g. the ESP32-S3) replace an existing controller WITHOUT reconfiguring Home
+  // Assistant or re-pairing the thermostat display. Empty = use the factory eFuse MAC.
+  // ctrl_load_runtime_config runs once at boot, before WiFi/Ethernet/ESP-NOW init, so the
+  // esp_base_mac_addr_set() takes effect for every interface. Changing it needs a reboot.
+  {
+    uint8_t ov[6];
+    if (mac_parse(g_ctrl_cfg.getString("id_mac", "").c_str(), ov)) {
+      esp_base_mac_addr_set(ov);  // radio MAC — MUST be before any netif init (it is here)
+      char macbuf[18];
+      snprintf(macbuf, sizeof(macbuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+               ov[0], ov[1], ov[2], ov[3], ov[4], ov[5]);
+      g_cfg_device_mac = String(macbuf);  // HA/MQTT identity
+      Serial.printf("[identity] MAC override active: %s (replacing eFuse MAC for identity + ESP-NOW)\n",
+                    macbuf);
+    }
+  }
   // Compact form (no colons) for hostnames and MQTT topics.
   g_cfg_device_mac_compact = mac_strip_colons(g_cfg_device_mac);
   g_cfg_ctrl_hostname = "controller-" + g_cfg_device_mac_compact;
@@ -360,7 +590,7 @@ void ctrl_load_runtime_config() {
   if (g_cfg_ctrl_espnow_channel < 1 || g_cfg_ctrl_espnow_channel > 14)
     g_cfg_ctrl_espnow_channel = THERMOSTAT_CONTROLLER_ESPNOW_CHANNEL;
   g_cfg_ctrl_espnow_lmk = g_ctrl_cfg.getString("esp_lmk", g_cfg_ctrl_espnow_lmk);
-  g_cfg_ctrl_devices = g_ctrl_cfg.getString("devices", "");
+  g_cfg_ctrl_devices = g_ctrl_cfg.getString("devices", g_cfg_ctrl_devices);
   g_cfg_ctrl_allow_ha = g_ctrl_cfg.getBool("allow_ha", true);
   g_cfg_ctrl_mqtt_enabled = g_ctrl_cfg.getBool("mqtt_en", true);
   g_cfg_ctrl_espnow_enabled = g_ctrl_cfg.getBool("espnow_en", true);
@@ -520,6 +750,15 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_ctrl_discovery_prefix = value;
     g_ctrl_cfg.putString("disc_pref", value);
     g_ctrl_mqtt_discovery_sent = false;
+  } else if (key == "id_mac") {
+    // Identity MAC override (cutover): present another controller's MAC for HA identity +
+    // ESP-NOW. Empty clears it (use the factory eFuse MAC). Applied on reboot.
+    uint8_t tmp[6];
+    if (value.length() != 0 && !mac_utils::mac_parse(value.c_str(), tmp)) {
+      return false;  // reject malformed MAC (leave the stored value unchanged)
+    }
+    g_ctrl_cfg.putString("id_mac", value);
+    g_ctrl_cfg_reboot_required = true;  // takes effect at boot (before WiFi/ETH/ESP-NOW init)
   } else if (key == "hostname") {
     // Validate: ≤63 chars, [a-zA-Z0-9-], no leading/trailing hyphens
     if (value.length() == 0 || value.length() > 63) return false;
@@ -592,9 +831,9 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
   } else if (key == "mqtt_enabled") {
     g_cfg_ctrl_mqtt_enabled = (strcmp(raw_value, "1") == 0);
     g_ctrl_cfg.putBool("mqtt_en", g_cfg_ctrl_mqtt_enabled);
-    if (!g_cfg_ctrl_mqtt_enabled && g_ctrl_mqtt.connected()) {
-      g_ctrl_mqtt.disconnect();
-    }
+    // The MQTT task disconnects under the mutex via reconfigure_required (the reconfigure
+    // block runs before the mqtt-enabled check). Config writers (this may run on the web
+    // task) must NOT touch g_ctrl_mqtt directly.
     g_ctrl_mqtt_reconfigure_required = true;
   } else if (key == "espnow_enabled") {
     g_cfg_ctrl_espnow_enabled = (strcmp(raw_value, "1") == 0);
@@ -803,7 +1042,7 @@ static void ctrl_weather_task(void *) {
         zip_raw  = g_cfg_ctrl_pirateweather_zip.c_str();
         xSemaphoreGive(g_ctrl_weather_mutex);
       }
-      if (WiFi.status() == WL_CONNECTED && !api_key.empty() && !zip_raw.empty()) break;
+      if (ctrl_ip_link_up() && !api_key.empty() && !zip_raw.empty()) break;
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
     }
 
@@ -891,14 +1130,10 @@ void ctrl_poll_weather(uint32_t now_ms) {
 
   g_controller->app().set_outdoor_weather(temp_c, icon);
   g_controller->transport().publish_weather(temp_c, icon);
-
-  if (g_ctrl_mqtt.connected()) {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(temp_c));
-    g_ctrl_mqtt.publish(self_topic_for("state/outdoor_temp_c").c_str(), buf, true);
-    g_ctrl_mqtt.publish(self_topic_for("state/weather_condition").c_str(),
-                        thermostat::weather_icon_display_text(icon), true);
-  }
+  // The outdoor temp/condition are republished by ctrl_publish_runtime_state() (which runs
+  // on the control-loop task under the MQTT mutex) within kCtrlMqttPublishMs. We don't
+  // publish them directly here so ctrl_poll_weather never touches g_ctrl_mqtt — its wedge
+  // check must run regardless of the MQTT mutex / a busy MQTT task.
 }
 
 void ctrl_publish_discovery() {
@@ -922,6 +1157,8 @@ void ctrl_publish_discovery() {
       dp + "sensor/" + dev_id + "_controller_reboot_reason/config";
   const String wdt_section_topic =
       dp + "sensor/" + dev_id + "_controller_wdt_section/config";
+  const String panic_pc_topic =
+      dp + "sensor/" + dev_id + "_controller_panic_pc/config";
   const String boot_count_topic =
       dp + "sensor/" + dev_id + "_controller_boot_count/config";
   const String last_mqtt_cmd_topic =
@@ -1047,6 +1284,13 @@ void ctrl_publish_discovery() {
            "\"icon\":\"mdi:map-marker-path\",\"dev\":{\"ids\":[\"%s\"]}}",
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(wdt_section_topic.c_str(), payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"Controller Panic PC\",\"uniq_id\":\"%s_controller_panic_pc\","
+           "\"stat_t\":\"%s/state/panic_pc\",\"entity_category\":\"diagnostic\","
+           "\"icon\":\"mdi:bug\",\"dev\":{\"ids\":[\"%s\"]}}",
+           dev_id.c_str(), base.c_str(), dev_id.c_str());
+  g_ctrl_mqtt.publish(panic_pc_topic.c_str(), payload, true);
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Boot Count\",\"uniq_id\":\"%s_controller_boot_count\","
@@ -1175,7 +1419,7 @@ void ctrl_publish_discovery() {
              "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
              THERMOSTAT_FIRMWARE_VERSION,
              g_cfg_ctrl_hostname.c_str(),
-             WiFi.localIP().toString().c_str());
+             ctrl_ip_local_addr().c_str());
     g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
   }
 
@@ -1242,9 +1486,31 @@ void ctrl_check_stale_devices(uint32_t now) {
 
 // Audit log: MQTT publish callback and helpers
 void ctrl_audit_publish(const char *msg) {
-  if (g_ctrl_mqtt.connected()) {
-    g_ctrl_mqtt.publish(self_topic_for("state/audit").c_str(), msg, false);
+  // Called from the audit log on whatever task logged (loop, weather, web). Use a TRY-lock
+  // so this best-effort MQTT mirror never blocks, never corrupts g_ctrl_mqtt via a
+  // concurrent publish, and never deadlocks if the loop task is already inside its locked
+  // publish section. The entry is always in the in-memory audit log regardless.
+  if (g_ctrl_mqtt_mtx == nullptr) return;
+  if (xSemaphoreTake(g_ctrl_mqtt_mtx, 0) == pdTRUE) {
+    if (g_ctrl_mqtt.connected()) {
+      g_ctrl_mqtt.publish(self_topic_for("state/audit").c_str(), msg, false);
+    }
+    xSemaphoreGive(g_ctrl_mqtt_mtx);
   }
+}
+
+// Audit-log timestamp prefix: a UTC wall-clock time once the clock is set (RTC/SNTP),
+// else the uptime in seconds. Lets the same log carry absolute times for diagnostics.
+static void ctrl_audit_timestamp(char *out, size_t n) {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  if (g_ctrl_time_valid) {
+    const thermostat::RtcTime rt =
+        thermostat::rtc_time_from_epoch(static_cast<long long>(time(nullptr)));
+    snprintf(out, n, "%02u:%02u:%02uZ", rt.hour, rt.minute, rt.second);
+    return;
+  }
+#endif
+  snprintf(out, n, "%lus", static_cast<unsigned long>(millis() / 1000UL));
 }
 
 void ctrl_audit(const char *fmt, ...) {
@@ -1253,12 +1519,16 @@ void ctrl_audit(const char *fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  g_audit_log.add(millis(), "%s", buf);
+  char ts[24];
+  ctrl_audit_timestamp(ts, sizeof(ts));
+  g_audit_log.add(ts, "%s", buf);
 }
 
 void ctrl_runtime_audit_bridge(const char *msg) {
   // Bridge from runtime audit callback → global audit log with timestamp
-  g_audit_log.add(millis(), "%s", msg);
+  char ts[24];
+  ctrl_audit_timestamp(ts, sizeof(ts));
+  g_audit_log.add(ts, "%s", msg);
 }
 
 void ctrl_web_handle_log_get() {
@@ -1302,6 +1572,13 @@ void ctrl_web_handle_config_get() {
 
 void ctrl_web_handle_config_post() {
   int updated = 0;
+  // Hold the MQTT mutex across all config writes. ctrl_try_update_runtime_config mutates
+  // shared config Strings (mqtt_host/user/password/client_id) that the MQTT task reads via
+  // .c_str() during connect — without this, a config POST during a connect could realloc a
+  // String buffer under the TCP stack's feet (use-after-free). The MQTT task reads those
+  // Strings only while holding the same mutex, so this serializes them.
+  const bool locked =
+      g_ctrl_mqtt_mtx != nullptr && xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE;
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
     const String value = g_ctrl_web.arg(i);
@@ -1309,6 +1586,7 @@ void ctrl_web_handle_config_post() {
       ++updated;
     }
   }
+  if (locked) xSemaphoreGive(g_ctrl_mqtt_mtx);
   String body = "updated=" + String(updated) + "\n";
   g_ctrl_web.send(200, "text/plain", body);
 }
@@ -1316,6 +1594,44 @@ void ctrl_web_handle_config_post() {
 void ctrl_web_handle_reboot_post() {
   ctrl_schedule_reboot("scheduled: web /reboot");
   g_ctrl_web.send(200, "text/plain", "rebooting\n");
+}
+
+// GET /coredump — stream the captured crash coredump (if any) as a binary download, so a
+// remote panic can be pulled + decoded (esp-coredump) WITHOUT physical serial access. The
+// classic board has no coredump partition, so this returns 404 there.
+void ctrl_web_handle_coredump_get() {
+  size_t addr = 0, size = 0;
+  if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+    g_ctrl_web.send(404, "text/plain", "no coredump present\n");
+    return;
+  }
+  const esp_partition_t *part = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+  if (part == nullptr || size > part->size) {
+    g_ctrl_web.send(500, "text/plain", "coredump partition error\n");
+    return;
+  }
+  // The coredump lives at the start of the coredump partition. Stream it in chunks so we
+  // never need a multi-KB heap buffer.
+  g_ctrl_web.setContentLength(size);
+  g_ctrl_web.sendHeader("Content-Disposition", "attachment; filename=\"coredump.bin\"");
+  g_ctrl_web.send(200, "application/octet-stream", "");
+  uint8_t buf[512];
+  size_t off = 0;
+  while (off < size) {
+    const size_t chunk = (size - off) < sizeof(buf) ? (size - off) : sizeof(buf);
+    if (esp_partition_read(part, off, buf, chunk) != ESP_OK) break;
+    g_ctrl_web.client().write(buf, chunk);
+    off += chunk;
+  }
+}
+
+// POST /coredump/erase — clear the coredump after retrieval so the partition is ready for
+// the next crash.
+void ctrl_web_handle_coredump_erase_post() {
+  const esp_err_t er = esp_core_dump_image_erase();
+  g_ctrl_web.send(er == ESP_OK ? 200 : 500, "text/plain",
+                  er == ESP_OK ? "coredump erased\n" : "erase failed\n");
 }
 
 void ctrl_web_handle_status_get() {
@@ -1336,6 +1652,13 @@ void ctrl_web_handle_status_get() {
     snprintf(hum_str, sizeof(hum_str), "%.2f", static_cast<double>(app.indoor_humidity_pct()));
   } else {
     strcpy(hum_str, "null");
+  }
+  char time_utc_str[24] = "";
+  if (g_ctrl_time_valid) {
+    const thermostat::RtcTime trt =
+        thermostat::rtc_time_from_epoch(static_cast<long long>(time(nullptr)));
+    snprintf(time_utc_str, sizeof(time_utc_str), "%04u-%02u-%02uT%02u:%02u:%02uZ",
+             trt.year, trt.month, trt.day, trt.hour, trt.minute, trt.second);
   }
   char buf[1200];
   snprintf(buf, sizeof(buf),
@@ -1368,14 +1691,18 @@ void ctrl_web_handle_status_get() {
     "\"relay_heat\":%s,"
     "\"relay_cool\":%s,"
     "\"relay_fan\":%s,"
+    "\"time_source\":\"%s\","
+    "\"time_valid\":%s,"
+    "\"rtc_present\":%s,"
+    "\"time_utc\":\"%s\","
     "\"free_heap\":%lu,"
     "\"firmware_version\":\"%s\""
     "}",
     static_cast<unsigned long>(now),
-    WiFi.isConnected() ? "true" : "false",
-    WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "",
-    WiFi.isConnected() ? WiFi.RSSI() : 0,
-    g_ctrl_mqtt.connected() ? "true" : "false",
+    ctrl_ip_link_up() ? "true" : "false",
+    ctrl_ip_local_addr().c_str(),
+    (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0,
+    g_ctrl_mqtt_up.load() ? "true" : "false",
     app.has_indoor_temperature() ? "true" : "false",
     temp_str,
     app.has_indoor_humidity() ? "true" : "false",
@@ -1399,6 +1726,10 @@ void ctrl_web_handle_status_get() {
     g_relay_io.latched_output().heat ? "true" : "false",
     g_relay_io.latched_output().cool ? "true" : "false",
     g_relay_io.latched_output().fan ? "true" : "false",
+    g_ctrl_time_source,
+    g_ctrl_time_valid ? "true" : "false",
+    g_ctrl_rtc_present ? "true" : "false",
+    time_utc_str,
     static_cast<unsigned long>(ESP.getFreeHeap()),
     THERMOSTAT_FIRMWARE_VERSION
   );
@@ -1514,6 +1845,9 @@ void ctrl_web_handle_root() {
   html += F(">");
   text_field(html, "Discovery Prefix", "discovery_prefix", g_cfg_ctrl_discovery_prefix,
              "HA MQTT discovery prefix, e.g. homeassistant");
+  text_field(html, "Identity MAC Override", "id_mac", g_ctrl_cfg.getString("id_mac", ""),
+             "Replace this board's MAC for HA identity + ESP-NOW (e.g. AA:BB:CC:DD:EE:FF to "
+             "assume another controller's identity). Empty = factory MAC. Reboot to apply.");
   html += F("</div>");
   form_end(html, "Save MQTT");
   card_end(html);
@@ -1703,7 +2037,7 @@ static void ctrl_web_server_task(void *) {
 }
 
 void ctrl_ensure_web_ready() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!ctrl_ip_link_up()) {
     return;
   }
   if (!g_ctrl_web_started) {
@@ -1714,9 +2048,17 @@ void ctrl_ensure_web_ready() {
     g_ctrl_web.on("/config", HTTP_GET, ctrl_web_handle_config_get);
     g_ctrl_web.on("/config", HTTP_POST, ctrl_web_handle_config_post);
     g_ctrl_web.on("/reboot", HTTP_POST, ctrl_web_handle_reboot_post);
+    g_ctrl_web.on("/coredump", HTTP_GET, ctrl_web_handle_coredump_get);
+    g_ctrl_web.on("/coredump/erase", HTTP_POST, ctrl_web_handle_coredump_erase_post);
     ota_web_setup(g_ctrl_web);
     ota_set_prepare_callback([]() {
+      // Runs on the web task. Take the MQTT mutex so the dedicated MQTT task is not mid
+      // connect/loop/publish when we tear its socket out from under it. (The MQTT task and
+      // control loop both skip all MQTT work while ota_web_in_progress() is true.)
+      if (g_ctrl_mqtt_mtx != nullptr) xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY);
       g_ctrl_wifi_client.stop();
+      g_ctrl_mqtt_up.store(false);
+      if (g_ctrl_mqtt_mtx != nullptr) xSemaphoreGive(g_ctrl_mqtt_mtx);
       Serial.printf("[ota] prepare: closed MQTT socket, heap=%u\n", ESP.getFreeHeap());
     });
     g_ctrl_web.begin();
@@ -1776,6 +2118,8 @@ void ctrl_publish_runtime_state() {
                       g_ctrl_reboot_reason.c_str(), true);
   g_ctrl_mqtt.publish(self_topic_for("state/wdt_section").c_str(),
                       g_ctrl_wdt_section.c_str(), true);
+  g_ctrl_mqtt.publish(self_topic_for("state/panic_pc").c_str(),
+                      g_ctrl_panic_pc.c_str(), true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
   g_ctrl_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
@@ -1796,9 +2140,33 @@ void ctrl_publish_runtime_state() {
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(esp_get_free_heap_size()));
   g_ctrl_mqtt.publish(self_topic_for("state/free_heap_bytes").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_ctrl_inbound_dropped.load()));
+  g_ctrl_mqtt.publish(self_topic_for("state/inbound_dropped").c_str(), buf, true);
+  {
+    // Coredump presence: a captured crash dump waiting to be pulled (GET /coredump).
+    size_t cd_addr = 0, cd_size = 0;
+    const bool cd_present =
+        (esp_core_dump_image_get(&cd_addr, &cd_size) == ESP_OK) && cd_size > 0;
+    g_ctrl_mqtt.publish(self_topic_for("state/coredump_present").c_str(),
+                        cd_present ? "true" : "false", true);
+  }
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
     g_ctrl_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
+  }
+  // Time diagnostics: source (rtc/ntp/none), RTC presence, and the current UTC time.
+  // Lets HA/monitoring see whether the clock is trustworthy. Board-agnostic: the classic
+  // controller reports source=ntp/rtc_present=false once SNTP syncs over WiFi.
+  g_ctrl_mqtt.publish(self_topic_for("state/time_source").c_str(), g_ctrl_time_source, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/rtc_present").c_str(),
+                      g_ctrl_rtc_present ? "true" : "false", true);
+  if (g_ctrl_time_valid) {
+    const thermostat::RtcTime rt =
+        thermostat::rtc_time_from_epoch(static_cast<long long>(time(nullptr)));
+    snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02uZ",
+             rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
+    g_ctrl_mqtt.publish(self_topic_for("state/time_utc").c_str(), buf, true);
   }
   g_ctrl_mqtt.publish(self_topic_for("state/error_mqtt").c_str(), g_ctrl_last_mqtt_error.c_str(),
                       true);
@@ -1898,7 +2266,9 @@ void ctrl_persist_hvac_state() {
   g_ctrl_persisted_cool_sp_c = cool_sp;
 }
 
-void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
+// Applies a single MQTT command/message. ALWAYS runs on the control-loop task (via the
+// inbound queue drain), so it is single-threaded with g_controller->tick().
+void ctrl_handle_mqtt_message(char *topic, uint8_t *payload, unsigned int length) {
   if (topic == nullptr || payload == nullptr) {
     return;
   }
@@ -2154,10 +2524,43 @@ void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
   }
 }
 
+// PubSubClient receive callback. PARSE-ONLY: copy the message and enqueue it for the
+// control loop to apply via ctrl_handle_mqtt_message(). This keeps controller-state
+// mutation off whatever task runs PubSubClient.loop() (the dedicated MQTT task).
+void ctrl_mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
+  if (topic == nullptr || payload == nullptr || g_ctrl_inbound_q == nullptr) {
+    return;
+  }
+  CtrlInboundMsg msg;
+  const size_t tlen = strnlen(topic, sizeof(msg.topic) - 1);
+  memcpy(msg.topic, topic, tlen);
+  msg.topic[tlen] = '\0';
+  const size_t plen = (length < sizeof(msg.payload)) ? length : sizeof(msg.payload);
+  memcpy(msg.payload, payload, plen);
+  msg.len = static_cast<uint16_t>(plen);
+  if (xQueueSend(g_ctrl_inbound_q, &msg, 0) != pdTRUE) {
+    g_ctrl_inbound_dropped++;  // queue full — drop (state will reconcile on next command)
+  }
+}
+
 void ctrl_wifi_event_handler(arduino_event_t *event) {
   if (event == nullptr) return;
-  if (event->event_id == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-    g_ctrl_wifi.on_wifi_connected();
+  switch (event->event_id) {
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      g_ctrl_wifi.on_wifi_connected();
+      break;
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      Serial.printf("[eth] GOT_IP %s link=%dMbps %s\n",
+                    ETH.localIP().toString().c_str(), ETH.linkSpeed(),
+                    ETH.fullDuplex() ? "FD" : "HD");
+      break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      Serial.println("[eth] link DOWN");
+      break;
+#endif
+    default:
+      break;
   }
 }
 
@@ -2166,22 +2569,44 @@ void ctrl_ensure_wifi_connected(uint32_t now_ms) {
 }
 
 void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
+  // Handle a forced reconfigure (incl. MQTT being disabled or host/port/creds changing)
+  // FIRST, before the enabled/host early-return, so the disconnect happens here on the
+  // MQTT task under the mutex. Config writers just set the flag.
+  if (g_ctrl_mqtt_reconfigure_required.exchange(false)) {  // atomic test-and-clear (no lost request)
+    g_ctrl_mqtt_discovery_sent = false;
+    if (g_ctrl_mqtt.connected()) g_ctrl_mqtt.disconnect();
+    g_ctrl_mqtt_up.store(false);
+    g_ctrl_mqtt_recovery.on_disconnected();  // reset backoff after forced reconfigure
+  }
   if (g_cfg_ctrl_mqtt_host.length() == 0 || !g_cfg_ctrl_mqtt_enabled) {
     return;
   }
-  if (g_ctrl_mqtt_reconfigure_required) {
-    g_ctrl_mqtt_reconfigure_required = false;
-    g_ctrl_mqtt_discovery_sent = false;
+
+  // Detect a drop: policy thought we were connected but the client is not.
+  if (g_ctrl_mqtt_recovery.connected() && !g_ctrl_mqtt.connected()) {
+    g_ctrl_mqtt_recovery.on_disconnected();
+  }
+
+  if (!ctrl_ip_link_up()) {
+    return;
+  }
+  if (g_ctrl_mqtt.connected()) {
+    return;
+  }
+
+  const thermostat::RecoveryAction act = g_ctrl_mqtt_recovery.poll(now_ms);
+  if (act == thermostat::RecoveryAction::None) {
+    return;
+  }
+  if (act == thermostat::RecoveryAction::RestartSubsystem) {
     g_ctrl_mqtt.disconnect();
-    g_ctrl_last_mqtt_attempt_ms = 0;  // reconnect immediately on next loop
-  }
-  if (WiFi.status() != WL_CONNECTED || g_ctrl_mqtt.connected()) {
+    g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
+    g_ctrl_mqtt.setSocketTimeout(kCtrlMqttSocketTimeoutS);
+    ctrl_audit("mqtt: subsystem restart (recovery escalation)");
     return;
   }
-  if ((now_ms - g_ctrl_last_mqtt_attempt_ms) < kCtrlNetworkRetryMs) {
-    return;
-  }
-  g_ctrl_last_mqtt_attempt_ms = now_ms;
+  // act == Connect (Reboot cannot occur: reboot_enabled=false)
+
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
 
   bool ok = false;
@@ -2198,6 +2623,7 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   ctrl_breadcrumb_clear();
   if (!ok) {
     g_ctrl_last_mqtt_error = String("connect_state_") + String(g_ctrl_mqtt.state());
+    g_ctrl_mqtt_recovery.on_connect_failed();
     return;
   }
   g_ctrl_last_mqtt_error = "none";
@@ -2225,29 +2651,37 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
   if (!subs_ok) {
     ctrl_audit("mqtt_subscribe_failed: disconnecting to retry");
     g_ctrl_mqtt.disconnect();
-    // Leave g_ctrl_last_mqtt_attempt_ms as-is so kCtrlNetworkRetryMs
-    // backoff is enforced; resetting to 0 would cause rapid reconnect storms.
+    g_ctrl_mqtt_recovery.on_disconnected();   // ensure connected_ is false
+    g_ctrl_mqtt_recovery.on_connect_failed(); // count as failed attempt so backoff/escalation apply
     return;
   }
+  // Both connect AND all subscribes succeeded — policy is now "connected". The discovery
+  // + announce + full-state burst is published by the control loop (ctrl_publish_on_connect
+  // via g_ctrl_just_connected) so it reads controller state on the loop task, not here on
+  // the MQTT task.
+  g_ctrl_mqtt_recovery.on_connected();
+  g_ctrl_just_connected.store(true);
+}
+
+// Publish discovery + announce + a full state snapshot after an MQTT (re)connect. MUST run
+// on the control-loop task (triggered by g_ctrl_just_connected) and under the MQTT mutex —
+// it reads controller state, which only the loop task may touch.
+void ctrl_publish_on_connect() {
   if (g_cfg_ha_discovery_enabled) {
     ctrl_publish_discovery();
   }
   ctrl_publish_runtime_state();
-
-  // Publish announce so other devices/tools can discover us
-  {
-    char announce_buf[256];
-    snprintf(announce_buf, sizeof(announce_buf),
-             "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
-             THERMOSTAT_FIRMWARE_VERSION,
-             g_cfg_ctrl_hostname.c_str(),
-             WiFi.localIP().toString().c_str());
-    g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
-  }
+  char announce_buf[256];
+  snprintf(announce_buf, sizeof(announce_buf),
+           "{\"role\":\"controller\",\"firmware\":\"%s\",\"name\":\"%s\",\"ip\":\"%s\"}",
+           THERMOSTAT_FIRMWARE_VERSION,
+           g_cfg_ctrl_hostname.c_str(),
+           ctrl_ip_local_addr().c_str());
+  g_ctrl_mqtt.publish(self_topic_for("announce").c_str(), announce_buf, true);
 }
 
 void ctrl_ensure_mdns_ready() {
-  if (WiFi.status() != WL_CONNECTED || g_ctrl_mdns_started) {
+  if (!ctrl_ip_link_up() || g_ctrl_mdns_started) {
     return;
   }
   const char *host = g_cfg_ctrl_hostname.length() > 0 ? g_cfg_ctrl_hostname.c_str()
@@ -2261,7 +2695,43 @@ void ctrl_ensure_mdns_ready() {
   }
 }
 
+// Dedicated MQTT task (core 0). Owns ALL g_ctrl_mqtt I/O: connection management
+// (ctrl_ensure_mqtt_connected — connect/subscribe/backoff/reconfigure) and receive
+// (PubSubClient.loop(), whose callback only enqueues inbound commands). The control loop
+// touches g_ctrl_mqtt only via the try-locked publish section, so a slow connect here can
+// never block relay control. Skips entirely during OTA — the control loop and the OTA
+// prepare callback own the socket then.
+static void ctrl_mqtt_task(void *) {
+  bool logged_stack = false;
+  for (;;) {
+    if (!ota_web_in_progress() && g_ctrl_mqtt_mtx != nullptr) {
+      if (xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
+        ctrl_ensure_mqtt_connected(millis());
+        g_ctrl_mqtt.loop();
+        g_ctrl_mqtt_up.store(g_ctrl_mqtt.connected());
+        xSemaphoreGive(g_ctrl_mqtt_mtx);
+      }
+      // One-time stack headroom check after the first connect + receive (the deepest path:
+      // 19 subscribes + the ~420B CtrlInboundMsg receive-callback frame).
+      if (!logged_stack && g_ctrl_mqtt_up.load()) {
+        logged_stack = true;
+        Serial.printf("[mqtt] task stack high-water free: %u bytes (of 8192)\n",
+                      static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
 void setup() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // Silence the on-board buzzer (GPIO46) FIRST. It is uncontrolled/floating at boot
+  // and can sound an "alarm" until driven to its off level. Do this before anything
+  // else so the board is silent from the earliest possible moment. (Validated on
+  // hardware 2026-06-16: LOW silences it — see session log F2.)
+  pinMode(46, OUTPUT);
+  digitalWrite(46, LOW);
+#endif
   Serial.begin(115200);
   delay(500);
   Serial.println("\n\n============================");
@@ -2279,6 +2749,14 @@ void setup() {
   // preceding reset occurred. Surfaced via state/wdt_section to diagnose
   // task_wdt panics that leave reboot_reason="none".
   ctrl_breadcrumb_recover_on_boot();
+  {
+    char panic_buf[160];
+    thermostat::panic_breadcrumb_recover_on_boot(panic_buf, sizeof(panic_buf));
+    g_ctrl_panic_pc = panic_buf;
+  }
+  // Boot diagnostic on serial (visible without MQTT) — recovered crash breadcrumbs.
+  Serial.printf("[boot] panic_pc=%s wdt_section=%s\n",
+                g_ctrl_panic_pc.c_str(), g_ctrl_wdt_section.c_str());
   // Recover and clear the persisted cause of the preceding firmware reboot.
   // Cleared after reading so an uninstrumented reset (panic/brownout/power-on)
   // is reported as "none" rather than the stale prior cause.
@@ -2344,7 +2822,33 @@ void setup() {
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);
   g_controller = &node;
 
-  // Initialize WiFi provisioning manager — starts BLE immediately if no creds
+  // Register the network event handler before bringing up any link, so we catch both
+  // WiFi STA GOT_IP and (Waveshare) ETH GOT_IP.
+  WiFi.onEvent(ctrl_wifi_event_handler);
+
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // Ethernet (W5500) is the primary IP link. WiFi does NOT associate to an AP — it is
+  // used for ESP-NOW only (the transport puts the radio in STA mode on a pinned channel
+  // in g_controller->begin() below). The WiFi-creds provisioning flow is therefore
+  // intentionally skipped on this board.
+  ETH.setHostname(g_cfg_ctrl_hostname.c_str());
+  Serial.println("[eth] starting W5500 Ethernet (primary IP link)...");
+  // Bounded retry: a hard ETH.begin() failure would leave the board permanently
+  // IP-dark, and (because ESP-NOW still works) the isolation watchdog would NOT catch
+  // it — so recover transient SPI/PHY init failures here. If all attempts fail the
+  // W5500 is likely dead; we run ESP-NOW-only rather than reboot-loop on dead hardware.
+  for (int attempt = 1; attempt <= 3 && !g_ctrl_eth_started; ++attempt) {
+    g_ctrl_eth_started = ETH.begin(ETH_PHY_W5500, 1, kEthCs, kEthIrq, kEthRst,
+                                   SPI2_HOST, kEthSck, kEthMiso, kEthMosi);
+    if (!g_ctrl_eth_started) {
+      Serial.printf("[eth] ETH.begin() attempt %d/3 failed; retrying...\n", attempt);
+      delay(500);
+    }
+  }
+  Serial.printf("[eth] ETH.begin() -> %s\n",
+                g_ctrl_eth_started ? "ok" : "FAILED (running ESP-NOW-only)");
+#else
+  // Initialize WiFi provisioning manager — brings up the SoftAP portal if no creds.
   WifiProvisioningConfig wifi_cfg = {};
   wifi_cfg.device_name = "Controller";
   wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
@@ -2353,15 +2857,18 @@ void setup() {
   wifi_cfg.nvs = &g_ctrl_cfg;
   wifi_cfg.hostname = g_cfg_ctrl_hostname.c_str();
   wifi_cfg.retry_interval_ms = kCtrlNetworkRetryMs;
-  wifi_cfg.reboot_after_provision = false;
   bool has_wifi = g_ctrl_wifi.begin(wifi_cfg);
   if (!has_wifi) {
-    Serial.println("[provision] No WiFi configured — starting BLE provisioning");
+    Serial.println("[provision] No WiFi configured — starting SoftAP portal");
     g_ctrl_wifi.start_provisioning();
   }
-  WiFi.onEvent(ctrl_wifi_event_handler);
+#endif
   g_ctrl_mqtt.setBufferSize(1024);
   g_ctrl_mqtt.setServer(g_cfg_ctrl_mqtt_host.c_str(), g_cfg_ctrl_mqtt_port);
+  // Depth 32: a reconnect can deliver a burst of retained peer-device messages (the +
+  // wildcard subscriptions fan out per device) in a single PubSubClient.loop() pass.
+  g_ctrl_inbound_q = xQueueCreate(32, sizeof(CtrlInboundMsg));
+  g_ctrl_mqtt_mtx = xSemaphoreCreateMutex();
   g_ctrl_mqtt.setCallback(ctrl_mqtt_on_message);
 
   bool ok = false;
@@ -2369,6 +2876,11 @@ void setup() {
     ok = g_controller->begin();
   }
   g_ctrl_last_espnow_error = ok ? "none" : (g_cfg_ctrl_espnow_enabled ? "begin_failed" : "disabled");
+  // The MAC the controller presents on the ESP-NOW radio (WiFi STA). With an identity
+  // override active this is the assumed MAC; otherwise the factory MAC. Logged so the
+  // display's peer MAC can be confirmed/matched during cutover.
+  Serial.printf("[espnow] radio MAC=%s  identity MAC=%s\n",
+                WiFi.macAddress().c_str(), g_cfg_device_mac.c_str());
 
   // Apply temp sensor MAC from devices list (nullptr = auto-claim)
   {
@@ -2412,6 +2924,13 @@ void setup() {
   ota_set_audit_callback(ctrl_runtime_audit_bridge);
 
   g_relay_io.begin();
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // The PCA9554 relay backend's begin() (just called above) is the single owner of I2C bus
+  // init for the shared SDA42/SCL41 @100kHz bus. The RTC lives on that same bus, so we do
+  // NOT re-init Wire here (RTC read()/set() only need Wire up, which it now is). Seed the
+  // system clock from the RTC; SNTP corrects it once Ethernet is up (ctrl_time_tick).
+  ctrl_seed_time_from_rtc();
+#endif
   Serial.printf("controller_node_begin=%u\n", static_cast<unsigned>(ok));
   ctrl_audit("boot ok, espnow=%s", ok ? "true" : "false");
   if (g_ctrl_wdt_section != "none") {
@@ -2423,6 +2942,12 @@ void setup() {
   // Web server task on Core 0: handles HTTP requests without blocking the
   // relay control / MQTT / ESP-NOW main loop on Core 1.
   xTaskCreatePinnedToCore(ctrl_web_server_task, "web", 8192,
+                          nullptr, 1, nullptr, 0);
+
+  // MQTT task on Core 0: owns all g_ctrl_mqtt I/O (connect + receive) so a blocking
+  // connect/subscribe can never stall relay control on Core 1. Created after g_ctrl_mqtt
+  // is configured (setServer/setCallback) and the mutex/queue exist.
+  xTaskCreatePinnedToCore(ctrl_mqtt_task, "ctrl_mqtt", 8192,
                           nullptr, 1, nullptr, 0);
 
   g_ctrl_weather_mutex = xSemaphoreCreateMutex();
@@ -2437,11 +2962,18 @@ void loop() {
   // During OTA upload, suspend non-essential work to free CPU and
   // network bandwidth for the flash write.
   if (ota_web_in_progress()) {
-    // Disconnect MQTT to free TCP socket buffers for OTA upload.
-    if (g_ctrl_mqtt.connected()) {
-      g_ctrl_mqtt.disconnect();
-      Serial.printf("[ota] disconnected MQTT to free heap: %u bytes free\n",
-                    ESP.getFreeHeap());
+    // Disconnect MQTT to free TCP socket buffers for OTA upload. The prepare callback
+    // already does this under the mutex; this is a belt-and-suspenders catch, also under
+    // the mutex so it can't race the (now-skipping) MQTT task.
+    if (g_ctrl_mqtt_up.load() && g_ctrl_mqtt_mtx != nullptr &&
+        xSemaphoreTake(g_ctrl_mqtt_mtx, portMAX_DELAY) == pdTRUE) {
+      if (g_ctrl_mqtt.connected()) {
+        g_ctrl_mqtt.disconnect();
+        g_ctrl_mqtt_up.store(false);
+        Serial.printf("[ota] disconnected MQTT to free heap: %u bytes free\n",
+                      ESP.getFreeHeap());
+      }
+      xSemaphoreGive(g_ctrl_mqtt_mtx);
     }
     ota_web_process_flash_ops();
     delay(1);
@@ -2452,27 +2984,90 @@ void loop() {
   const uint32_t now = millis();
   if (now - last_heartbeat >= 5000) {
     last_heartbeat = now;
-    Serial.printf("[%lu] controller alive, wifi=%s, mqtt=%s, prov=%s\n",
+    Serial.printf("[%lu] controller alive, ip=%s, mqtt=%s, prov=%s\n",
                   now,
-                  WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "no",
-                  g_ctrl_mqtt.connected() ? "yes" : "no",
+                  ctrl_ip_link_up() ? ctrl_ip_local_addr().c_str() : "no",
+                  g_ctrl_mqtt_up.load() ? "yes" : "no",
                   g_ctrl_wifi.provisioning_active() ? "active" : "idle");
+    if (g_controller != nullptr) {
+      const auto &t = g_controller->transport();
+      const uint8_t *m = t.last_rx_mac();
+      Serial.printf(
+          "[espnow] rx=%lu tx_ok=%lu tx_fail=%lu last_rx=%02X:%02X:%02X:%02X:%02X:%02X\n",
+          (unsigned long)t.rx_count(), (unsigned long)t.send_ok_count(),
+          (unsigned long)t.send_fail_count(), m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
   }
   if (g_ctrl_reboot_requested && static_cast<uint32_t>(now - g_ctrl_reboot_at_ms) < 0x80000000u) {
     ESP.restart();
   }
   if (g_controller != nullptr) {
     g_controller->tick(now);
+    // Periodically rebroadcast the latest telemetry so a display that joined or
+    // rebooted after the last state change still learns the current state (telemetry
+    // is otherwise change-driven). ~15s keeps displays within their 30s timeout.
+    static uint32_t last_telemetry_republish_ms = 0;
+    if (static_cast<uint32_t>(now - last_telemetry_republish_ms) >= 15000) {
+      last_telemetry_republish_ms = now;
+      g_controller->app().republish_telemetry();
+    }
+    // Broadcast wall-clock time (when ours is trustworthy, via RTC or NTP) so a WiFi-less
+    // display can show a clock without its own NTP/RTC. Works on any board that has a
+    // valid clock: Waveshare via RTC+SNTP over Ethernet, classic via SNTP over WiFi.
+    static uint32_t last_time_broadcast_ms = 0;
+    if (g_ctrl_time_valid &&
+        static_cast<uint32_t>(now - last_time_broadcast_ms) >= 30000) {
+      last_time_broadcast_ms = now;
+      g_controller->transport().publish_time(static_cast<uint32_t>(time(nullptr)));
+    }
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
+#if !defined(CONTROLLER_BOARD_WAVESHARE)
+    // Classic board: WiFi STA is the IP link, so keep it connected and let the WiFi
+    // watchdog reboot on sustained WiFi loss. On Waveshare, WiFi never associates
+    // (ESP-NOW only) and Ethernet/lwIP self-recovers — the isolation watchdog below is
+    // the SOLE reboot authority (no IP-link-down reboot). See ethernet-primary plan.
+    // NOTE: this gate is what keeps the WiFi radio from ever associating on Waveshare.
+    // A stray `wifi_ssid` write only persists creds + sets reconnect_required (see
+    // WifiProvisioningManager::set_credentials); association happens ONLY in
+    // ensure_connected(), which is gated out here — so ESP-NOW channel pinning is safe.
     ctrl_ensure_wifi_connected(now);
-    wifi_watchdog_tick(now, g_ctrl_mqtt.connected());
+    wifi_watchdog_tick(now, g_ctrl_mqtt_up.load());
+#endif
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
-    ctrl_ensure_mqtt_connected(now);
-    g_ctrl_mqtt.loop();
+    // ---- MQTT connect + receive runs on the dedicated ctrl_mqtt task (ctrl_mqtt_task).
+    //      The control loop only drains inbound commands + publishes, under a TRY-lock so a
+    //      slow connect on the MQTT task can NEVER block relay control. If the lock is held
+    //      (MQTT task mid-connect), we just skip this cycle; commands stay queued. ----
+    if (xSemaphoreTake(g_ctrl_mqtt_mtx, 0) == pdTRUE) {
+      if (g_ctrl_inbound_q != nullptr) {
+        CtrlInboundMsg in;
+        while (xQueueReceive(g_ctrl_inbound_q, &in, 0) == pdTRUE) {
+          ctrl_handle_mqtt_message(in.topic, in.payload, in.len);
+        }
+      }
+      if (g_ctrl_just_connected.exchange(false)) {
+        ctrl_publish_on_connect();
+      }
+      if (g_ctrl_mqtt_up.load()) {
+        if (!g_ctrl_have_lockout || g_ctrl_last_lockout != snap.hvac_lockout ||
+            (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
+          g_ctrl_last_mqtt_publish_ms = now;
+          ctrl_publish_runtime_state();
+        }
+        // Periodically clean up stale peer device discovery topics.
+        static uint32_t last_stale_check_ms = 0;
+        if (static_cast<uint32_t>(now - last_stale_check_ms) >= kStaleCheckIntervalMs) {
+          last_stale_check_ms = now;
+          ctrl_check_stale_devices(now);
+        }
+      }
+      xSemaphoreGive(g_ctrl_mqtt_mtx);
+    }
+    ctrl_time_tick(now);  // start SNTP once IP up; mark time valid; (Waveshare: RTC write-back)
     const bool mqtt_primary_active =
-        g_ctrl_mqtt.connected() &&
+        g_ctrl_mqtt_up.load() &&
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
     ctrl_poll_weather(now);
@@ -2486,51 +3081,71 @@ void loop() {
       const uint32_t hb_ms = g_controller->app().runtime().heartbeat_last_seen_ms();
       const bool espnow_active = (hb_ms > 0) &&
           (static_cast<uint32_t>(now - hb_ms) < kCtrlIsolationRebootMs);
-      const bool isolated = !g_ctrl_mqtt.connected() && !espnow_active;
+      const bool isolated = !g_ctrl_mqtt_up.load() && !espnow_active;
 
       if (!isolated) {
         g_ctrl_isolation_start_ms = 0;
+        g_ctrl_isolation_recovery_done = false;
       } else if (g_ctrl_isolation_start_ms == 0) {
         g_ctrl_isolation_start_ms = now;
         Serial.printf("[watchdog] isolation_start: mqtt=%d espnow_hb=%lu ago=%lums\n",
-                      g_ctrl_mqtt.connected() ? 1 : 0,
+                      g_ctrl_mqtt_up.load() ? 1 : 0,
                       static_cast<unsigned long>(hb_ms),
                       hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
-      } else if (static_cast<uint32_t>(now - g_ctrl_isolation_start_ms) >= kCtrlIsolationRebootMs) {
-        ctrl_audit("isolation_reboot: isolated for %lus, mqtt=%d espnow_hb=%lu",
-                   static_cast<unsigned long>((now - g_ctrl_isolation_start_ms) / 1000),
-                   g_ctrl_mqtt.connected() ? 1 : 0,
-                   static_cast<unsigned long>(hb_ms));
-        {
-          char reason[80];
-          snprintf(reason, sizeof(reason),
-                   "isolation: mqtt+espnow down %lus",
-                   static_cast<unsigned long>(
-                       (now - g_ctrl_isolation_start_ms) / 1000));
-          ctrl_persist_reboot_reason(reason);
+      } else {
+        // After the recovery attempt the clock is restarted, so the threshold to act
+        // shrinks to the (shorter) grace window.
+        const uint32_t isolated_for = static_cast<uint32_t>(now - g_ctrl_isolation_start_ms);
+        const uint32_t threshold = g_ctrl_isolation_recovery_done
+                                       ? kCtrlIsolationRecoveryGraceMs
+                                       : kCtrlIsolationRebootMs;
+        if (isolated_for >= threshold) {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+          if (!g_ctrl_isolation_recovery_done) {
+            // Try to recover the network subsystems IN PLACE before rebooting. Safe on
+            // this board: ESP-NOW is on a pinned channel and WiFi is not associated, so
+            // re-pinning the channel during re-init can't disrupt an IP link (Ethernet).
+            ctrl_audit("isolation: %lus isolated — recovering in place (esp-now re-init + mqtt reconnect)",
+                       static_cast<unsigned long>(isolated_for / 1000));
+            const bool espnow_ok = g_controller->transport().restart();
+            g_ctrl_mqtt_recovery.on_disconnected();   // reset backoff -> immediate reconnect
+            g_ctrl_mqtt_reconfigure_required = true;  // MQTT task disconnects + reconnects cleanly
+            g_ctrl_isolation_recovery_done = true;
+            g_ctrl_isolation_start_ms = now;          // restart clock; grace window now applies
+            ctrl_audit("isolation: recovery attempted (espnow_reinit=%d), grace %lus before reboot",
+                       espnow_ok ? 1 : 0,
+                       static_cast<unsigned long>(kCtrlIsolationRecoveryGraceMs / 1000));
+          } else {
+            // Recovery did not restore connectivity — reboot as the true last resort.
+            ctrl_audit("isolation_reboot: still isolated %lus after in-place recovery, mqtt=%d espnow_hb=%lu",
+                       static_cast<unsigned long>(isolated_for / 1000),
+                       g_ctrl_mqtt_up.load() ? 1 : 0,
+                       static_cast<unsigned long>(hb_ms));
+            ctrl_persist_reboot_reason("isolation: mqtt+espnow down, recovery failed");
+            ESP.restart();
+          }
+#else
+          // Classic board: ESP-NOW shares the WiFi home channel (WiFi associated), so an
+          // in-place re-init could disrupt the association. Keep the simple reboot; the
+          // WiFi watchdog also covers outright WiFi loss.
+          ctrl_audit("isolation_reboot: isolated for %lus, mqtt=%d espnow_hb=%lu",
+                     static_cast<unsigned long>(isolated_for / 1000),
+                     g_ctrl_mqtt_up.load() ? 1 : 0,
+                     static_cast<unsigned long>(hb_ms));
+          {
+            char reason[80];
+            snprintf(reason, sizeof(reason), "isolation: mqtt+espnow down %lus",
+                     static_cast<unsigned long>(isolated_for / 1000));
+            ctrl_persist_reboot_reason(reason);
+          }
+          ESP.restart();
+#endif
         }
-        ESP.restart();
       }
     }
 
-    if (g_ctrl_mqtt.connected()) {
-      if (!g_ctrl_have_lockout || g_ctrl_last_lockout != snap.hvac_lockout ||
-          (now - g_ctrl_last_mqtt_publish_ms) >= kCtrlMqttPublishMs) {
-        g_ctrl_last_mqtt_publish_ms = now;
-        ctrl_publish_runtime_state();
-      }
-
-      // Periodically check for and clean up stale peer device discovery topics
-      {
-        static uint32_t last_stale_check_ms = 0;
-        if (static_cast<uint32_t>(now - last_stale_check_ms) >= kStaleCheckIntervalMs) {
-          last_stale_check_ms = now;
-          ctrl_check_stale_devices(now);
-        }
-      }
-    }
   }
-  ota_rollback_check(WiFi.status() == WL_CONNECTED && g_ctrl_mqtt.connected());
+  ota_rollback_check(ctrl_ip_link_up() && g_ctrl_mqtt_up.load());
   delay(100);
 }
 #endif

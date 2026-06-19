@@ -35,3 +35,25 @@
 - `firmware_version` is generated from `git describe --tags --dirty` at build time.
 - If you build before committing, the binary is stamped with the *previous* commit + `-dirty`, even though it contains your uncommitted edits. The flashed code is correct but the version label is misleading.
 - **Before flashing: commit first, then (re)build, then flash** — so the embedded version matches the deployed commit. Verify with `strings firmware.bin | grep 'v[0-9]'`.
+
+### PlatformIO silently drops `platform.txt` linker flags
+- Arduino-IDE-only build flags live in the framework's `platform.txt` (e.g. `compiler.c.elf.flags` has `-Wl,--wrap=esp_panic_handler`). **PlatformIO/pioarduino does NOT read `platform.txt`**, so any Arduino-core feature gated behind such a flag is silently inert under PlatformIO.
+- This is how the panic-PC breadcrumb "passed" unit tests but did nothing on hardware: `set_arduino_panic_handler()` needs `-Wl,--wrap=esp_panic_handler` to redirect `esp_panic_handler` → the core's `__wrap_esp_panic_handler` (which calls the callback). Without the flag the callback is never invoked.
+- **When an Arduino-core hook "does nothing," check the actual link:** `pio run -e <env> -v 2>&1 | grep -- '--wrap'`. Re-add any missing `platform.txt` link flags in `platformio.ini` `build_flags`.
+- Corollary: **on-device validation catches what unit tests can't.** Linker/runtime/RTC behavior is invisible to native tests.
+
+### `PLATFORMIO_BUILD_FLAGS` and `platformio.ini` edits wipe `.pio/build`
+- PlatformIO stores `.pio/build/project.checksum` (a hash of config incl. the
+  `PLATFORMIO_BUILD_FLAGS` env var). When it changes, pio **deletes the entire
+  `.pio/build/`** to force clean rebuilds — wiping *all* envs, not just the one you build.
+- Symptom that bit me: built a display env with `PLATFORMIO_BUILD_FLAGS=-D...` to inject
+  config, then built another env without it → the display's `firmware.bin` vanished and a
+  stale `/tmp/*.bin` got flashed instead (the scp had silently failed; the flash used old
+  files). Also turned every "incremental" rebuild into a slow full rebuild.
+- **Rules:**
+  - Don't toggle `PLATFORMIO_BUILD_FLAGS` between builds. Put per-variant config in a
+    committed `[env:...]` (use `extends`); env defs coexist at a stable checksum.
+  - To build multiple variants, pass them in ONE invocation: `pio run -e A -e B` — same
+    checksum, no inter-env wipe.
+  - After any flash-prep `scp`, verify it succeeded and check the remote file's timestamp
+    before flashing (`ls -la`); a failed scp leaves stale bins that flash "successfully."

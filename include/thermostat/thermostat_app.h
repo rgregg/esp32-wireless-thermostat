@@ -11,6 +11,10 @@ namespace thermostat {
 
 struct ThermostatAppConfig {
   uint32_t local_interaction_debounce_ms = 5000;
+  // If a controller heartbeat resumes after a gap at least this long, treat it as a
+  // reconnect and drop telemetry-seq tracking so the next telemetry is accepted even
+  // if the controller restarted and reset its sequence. 0 disables the resync.
+  uint32_t controller_reconnect_resync_ms = 30000;
 };
 
 class ThermostatApp {

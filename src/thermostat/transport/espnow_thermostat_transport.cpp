@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <sys/time.h>
 #endif
 
 namespace thermostat {
@@ -236,6 +237,21 @@ void EspNowThermostatTransport::on_recv(const uint8_t *src_mac,
                     static_cast<WeatherIcon>(pkt->weather_icon),
                     callback_context_);
       }
+      break;
+
+    case PacketType::TimeSync:
+#if defined(ARDUINO)
+      if (len >= static_cast<int>(sizeof(TimeSyncPacket))) {
+        const auto *pkt = reinterpret_cast<const TimeSyncPacket *>(data);
+        // Floor (~2023-11-14) so a bogus 0/garbage epoch can't rewind the clock.
+        if (pkt->epoch_seconds > 1700000000UL) {
+          struct timeval tv;
+          tv.tv_sec = static_cast<time_t>(pkt->epoch_seconds);
+          tv.tv_usec = 0;
+          settimeofday(&tv, nullptr);
+        }
+      }
+#endif
       break;
 
     default:

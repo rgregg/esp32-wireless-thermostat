@@ -11,10 +11,15 @@ bool WifiProvisioningManager::begin(const WifiProvisioningConfig &config) {
   s_instance = this;
   m_config = config;
 
-  // Read stored credentials (fall back to compile-time defaults via caller)
+  // Read stored credentials; fall back to baked compile-time defaults when NVS has none.
+  const char *def_ssid = config.default_ssid ? config.default_ssid : "";
+  const char *def_pwd = config.default_password ? config.default_password : "";
   if (config.nvs) {
-    m_ssid = config.nvs->getString("wifi_ssid", "");
-    m_password = config.nvs->getString("wifi_pwd", "");
+    m_ssid = config.nvs->getString("wifi_ssid", def_ssid);
+    m_password = config.nvs->getString("wifi_pwd", def_pwd);
+  } else {
+    m_ssid = def_ssid;
+    m_password = def_pwd;
   }
 
   return has_credentials();
@@ -32,42 +37,31 @@ void WifiProvisioningManager::ensure_wifi_radio() {
 
 void WifiProvisioningManager::start_provisioning() {
   if (m_provisioning_started) return;
-#ifdef IMPROV_WIFI_BLE_ENABLED
   Serial.printf("[provision] Free internal RAM: %u, largest block: %u\n",
                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-  ImprovBleConfig cfg = {};
-  cfg.device_name = m_config.device_name;
-  cfg.firmware_name = m_config.firmware_name;
-  cfg.firmware_version = m_config.firmware_version;
-  cfg.hardware_variant = m_config.hardware_variant;
-  cfg.device_url = nullptr;
-  cfg.reboot_after_provision = m_config.reboot_after_provision;
-  improv_ble_start(cfg, [](const char *ssid, const char *password) {
+  SoftApProvisioningConfig cfg = {};
+  cfg.ap_ssid_prefix = "Furnace-Setup";
+  cfg.device_label = m_config.device_name;
+  softap_provisioning_start(cfg, [](const char *ssid, const char *password) {
     Serial.printf("[provision] Credentials received for: %s\n", ssid);
     if (s_instance) {
       s_instance->set_credentials(ssid, password);
     }
   });
-#endif
   m_provisioning_started = true;
 }
 
 void WifiProvisioningManager::on_wifi_connected() {
-#ifdef IMPROV_WIFI_BLE_ENABLED
-  if (improv_ble_is_active()) {
-    improv_ble_stop();
+  if (softap_provisioning_is_active()) {
+    softap_provisioning_stop();
   }
-#endif
   m_provisioning_started = false;
 }
 
 bool WifiProvisioningManager::reboot_pending() const {
-#ifdef IMPROV_WIFI_BLE_ENABLED
-  return improv_ble_reboot_pending();
-#else
+  // SoftAP provisioning needs no reboot — set_credentials() sets m_reconnect_required.
   return false;
-#endif
 }
 
 void WifiProvisioningManager::set_credentials(const char *ssid, const char *password) {
@@ -92,10 +86,24 @@ void WifiProvisioningManager::clear_credentials() {
 void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
   if (m_reconnect_required) {
     m_reconnect_required = false;
+    // New credentials (e.g. just provisioned): tear down the portal/AP and bring the
+    // radio back to a clean STA so WiFi.begin() below connects to the real network.
+    if (softap_provisioning_is_active()) {
+      softap_provisioning_stop();
+    }
+    m_provisioning_started = false;
+    m_wifi_radio_started = false;
     ensure_wifi_radio();
     WiFi.disconnect();
     m_last_attempt_ms = 0;
   }
+
+  // While the SoftAP portal is up, just service it — don't fight it with WiFi.begin().
+  if (m_provisioning_started) {
+    softap_provisioning_loop();
+    return;
+  }
+
   if (WiFi.status() == WL_CONNECTED) return;
 
   // If we have credentials, keep trying to connect
@@ -107,7 +115,7 @@ void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
     return;
   }
 
-  // No credentials — start BLE provisioning
+  // No credentials — bring up the SoftAP captive portal.
   if (!m_provisioning_started) {
     start_provisioning();
   }

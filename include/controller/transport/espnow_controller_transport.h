@@ -28,6 +28,13 @@ class EspNowControllerTransport final : public IControllerTransport {
   EspNowControllerTransport() = default;
 
   bool begin(const EspNowControllerConfig &config);
+  // Tear down and re-initialize the ESP-NOW stack with the same config (deinit ->
+  // re-init -> re-register callbacks -> re-add peers -> re-pin channel). Used to recover
+  // a wedged ESP-NOW link in place instead of rebooting. Preserves the command callbacks
+  // set via set_callbacks(). Returns false if re-init fails.
+  // NOTE: re-pins the radio channel, so only safe when WiFi is NOT associated to an AP
+  // (i.e. the ESP-NOW-only / Ethernet-primary board) — the caller must enforce that.
+  bool restart();
   void loop(uint32_t now_ms);
 
   void set_callbacks(CommandWordCallback command_cb,
@@ -39,8 +46,16 @@ class EspNowControllerTransport final : public IControllerTransport {
 
   void publish_telemetry(const ControllerTelemetry &telemetry) override;
   void publish_weather(float outdoor_temp_c, WeatherIcon icon) override;
+  // Broadcast wall-clock time (Unix epoch seconds, UTC) so WiFi-less displays can
+  // show a clock. Caller should only send when its own clock is valid.
+  void publish_time(uint32_t epoch_seconds);
   uint32_t send_ok_count() const { return send_ok_count_; }
   uint32_t send_fail_count() const { return send_fail_count_; }
+  // Count of ESP-NOW frames received (after the length/header sanity check, before
+  // peer filtering) and the source MAC of the most recent one. Diagnostic only —
+  // lets the firmware report "we are hearing a peer" without MQTT/web.
+  uint32_t rx_count() const { return rx_count_; }
+  const uint8_t *last_rx_mac() const { return last_rx_mac_; }
 
  private:
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
@@ -64,6 +79,8 @@ class EspNowControllerTransport final : public IControllerTransport {
   static EspNowControllerTransport *instance_;
   uint32_t send_ok_count_ = 0;
   uint32_t send_fail_count_ = 0;
+  uint32_t rx_count_ = 0;
+  uint8_t last_rx_mac_[6] = {0};
   uint32_t last_send_ms_ = 0;
   static constexpr uint32_t kMinSendIntervalMs = 50;
 };

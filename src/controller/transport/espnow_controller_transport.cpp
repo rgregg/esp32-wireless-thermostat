@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "controller/transport/espnow_peer_filter.h"
 #include "transport/espnow_packets.h"
 
 #if defined(ARDUINO)
@@ -11,24 +12,6 @@
 #endif
 
 namespace thermostat {
-
-namespace {
-bool is_registered_peer(const EspNowControllerConfig &config, const uint8_t mac[6]) {
-  for (int i = 0; i < config.peer_count; ++i) {
-    if (memcmp(config.peer_macs[i], mac, 6) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-bool is_all_zero_mac(const uint8_t mac[6]) {
-  for (int i = 0; i < 6; ++i) {
-    if (mac[i] != 0) return false;
-  }
-  return true;
-}
-}  // namespace
 
 EspNowControllerTransport *EspNowControllerTransport::instance_ = nullptr;
 
@@ -61,7 +44,7 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   });
 
   for (int i = 0; i < config_.peer_count; ++i) {
-    if (is_all_zero_mac(config_.peer_macs[i])) {
+    if (espnow_peer_filter::is_all_zero_mac(config_.peer_macs[i])) {
       continue;
     }
     esp_now_peer_info_t peer_info;
@@ -88,6 +71,19 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   initialized_ = true;
   return true;
 #endif
+}
+
+bool EspNowControllerTransport::restart() {
+#if defined(ARDUINO)
+  // Deregisters the recv/send callbacks and clears peers; safe to call even if ESP-NOW
+  // was never initialized or only partially came up.
+  esp_now_deinit();
+#endif
+  initialized_ = false;
+  // begin() re-inits ESP-NOW, re-registers callbacks, re-pins the channel, and re-adds
+  // peers from the stored config_. The transport-level command callbacks (set via
+  // set_callbacks) are separate members and are preserved.
+  return begin(config_);
 }
 
 void EspNowControllerTransport::loop(uint32_t now_ms) {
@@ -129,7 +125,7 @@ void EspNowControllerTransport::send_to_all_peers(const uint8_t *data, size_t le
   }
   last_send_ms_ = now;
   for (int i = 0; i < config_.peer_count; ++i) {
-    if (!is_all_zero_mac(config_.peer_macs[i])) {
+    if (!espnow_peer_filter::is_all_zero_mac(config_.peer_macs[i])) {
       esp_now_send(config_.peer_macs[i], data, len);
     }
   }
@@ -187,6 +183,17 @@ void EspNowControllerTransport::publish_weather(float outdoor_temp_c,
   send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
+void EspNowControllerTransport::publish_time(uint32_t epoch_seconds) {
+  if (!initialized_) {
+    return;
+  }
+  TimeSyncPacket pkt;
+  pkt.header.type = static_cast<uint8_t>(PacketType::TimeSync);
+  pkt.header.version = kEspNowProtocolVersion;
+  pkt.epoch_seconds = epoch_seconds;
+  send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+}
+
 void EspNowControllerTransport::on_recv_static(const void *recv_info,
                                                const uint8_t *data,
                                                int len) {
@@ -223,9 +230,18 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
   if (data == nullptr || len < static_cast<int>(sizeof(PacketHeader))) {
     return;
   }
-  // Accept packets from any registered peer, or all if no peers configured
-  if (src_mac != nullptr && config_.peer_count > 0 &&
-      !is_registered_peer(config_, src_mac)) {
+  // Diagnostic RX accounting (counts every sane frame, pre-peer-filter).
+  ++rx_count_;
+  if (src_mac != nullptr) {
+    memcpy(last_rx_mac_, src_mac, 6);
+  }
+  // Authorize the source: when any unicast peer is configured, the source must match
+  // one. A broadcast-only config (isolated bench) or no peers -> accept all. Broadcast
+  // peer entries are TX-only and never authorize an arbitrary source — this keeps
+  // CommandWord (the only safety-relevant payload) from being accepted from anyone
+  // just because the controller also broadcasts.
+  if (!espnow_peer_filter::rx_source_authorized(config_.peer_macs, config_.peer_count,
+                                                src_mac)) {
     return;
   }
 

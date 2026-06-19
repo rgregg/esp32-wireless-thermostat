@@ -12,7 +12,7 @@ struct DiscoveryEntity {
   const char *suffix;     // e.g. "_lockout", "" (for climate)
 };
 
-// Controller entities (23 total) — must match ctrl_publish_discovery()
+// Controller entities (28 total) — must match ctrl_publish_discovery()
 static constexpr DiscoveryEntity kControllerDiscoveryEntities[] = {
     {"climate", ""},
     {"switch", "_lockout"},
@@ -22,6 +22,11 @@ static constexpr DiscoveryEntity kControllerDiscoveryEntities[] = {
     {"sensor", "_controller_firmware"},
     {"sensor", "_controller_wifi_rssi"},
     {"sensor", "_controller_free_heap"},
+    {"sensor", "_controller_reset_reason"},
+    {"sensor", "_controller_reboot_reason"},
+    {"sensor", "_controller_wdt_section"},
+    {"sensor", "_controller_panic_pc"},
+    {"sensor", "_controller_boot_count"},
     {"sensor", "_controller_last_mqtt_command"},
     {"sensor", "_controller_last_espnow_rx"},
     {"sensor", "_controller_espnow_send_ok"},

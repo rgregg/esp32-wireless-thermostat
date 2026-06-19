@@ -2,24 +2,21 @@
 
 #include <stdint.h>
 
+#include "controller/relay_backend.h"
 #include "thermostat_types.h"
 
 namespace thermostat {
 
 struct ControllerRelayIoConfig {
-  int heat_pin = 32;
-  int cool_pin = 33;
-  int fan_pin = 25;
-  int spare_pin = 26;
-  bool inverted = false;
   uint32_t heat_interlock_wait_ms = 500;
   uint32_t default_interlock_wait_ms = 1000;
 };
 
 class ControllerRelayIo {
  public:
-  explicit ControllerRelayIo(const ControllerRelayIoConfig &config = ControllerRelayIoConfig())
-      : config_(config) {}
+  explicit ControllerRelayIo(RelayBackend &backend,
+                             const ControllerRelayIoConfig &config = ControllerRelayIoConfig())
+      : backend_(backend), config_(config) {}
 
   void begin();
   void apply(uint32_t now_ms, const RelayDemand &desired, bool force_off);
@@ -59,6 +56,7 @@ class ControllerRelayIo {
   RelayDemand to_demand(RelaySelect relay) const;
   void write_outputs(const RelayDemand &out);
 
+  RelayBackend &backend_;
   ControllerRelayIoConfig config_{};
   bool initialized_ = false;
   RelayDemand output_{};
@@ -68,4 +66,3 @@ class ControllerRelayIo {
 };
 
 }  // namespace thermostat
-
