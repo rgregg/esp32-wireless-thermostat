@@ -12,6 +12,7 @@
 #include "controller/pirateweather.h"
 #include "controller/gpio_relay_backend.h"
 #include "controller/pca9554_relay_backend.h"
+#include "controller/controller_task_config.h"  // kCtrlMqttTaskCore (+ Core-0 static_assert)
 #include "controller/pcf85063_rtc.h"
 #include "controller/weather_watchdog.h"
 #include "controller/panic_breadcrumb_hook.h"
@@ -95,6 +96,26 @@ static bool ctrl_ip_link_up() {
   return g_ctrl_eth_started && ETH.hasIP();  // hasIP() => link up AND has an address
 #else
   return WiFi.status() == WL_CONNECTED;
+#endif
+}
+
+// Forward declaration: ctrl_audit is defined far below but used by early probes
+// (e.g. the SNTP-start dns0 probe and the network-ready helpers) above its definition.
+void ctrl_audit(const char *fmt, ...);
+
+// Network is usable for DNS-dependent traffic only once DHCP has assigned an IP
+// AND populated a DNS server. WL_CONNECTED (link) can be true before either lands,
+// which is exactly the window where MQTT/weather/SNTP-by-hostname fail to resolve.
+// On Waveshare the IP path is Ethernet (ETH.dnsIP); on the classic board it is WiFi STA.
+static bool ctrl_network_ready() {
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  return ctrl_ip_link_up()
+      && ETH.localIP() != IPAddress(0, 0, 0, 0)
+      && ETH.dnsIP(0) != IPAddress(0, 0, 0, 0);
+#else
+  return WiFi.status() == WL_CONNECTED
+      && WiFi.localIP() != IPAddress(0, 0, 0, 0)
+      && WiFi.dnsIP(0) != IPAddress(0, 0, 0, 0);
 #endif
 }
 
@@ -183,8 +204,43 @@ static void ctrl_write_system_time_to_rtc() {
 // Per-loop: start SNTP once the IP link is up; on a real NTP sync mark time valid (and,
 // on Waveshare, write the corrected time back to the RTC, hourly, so it survives reboots).
 static void ctrl_time_tick(uint32_t now_ms) {
+  // Visibility: if the link is up (WL_CONNECTED / ETH link) but DNS never gets populated,
+  // DNS-dependent services stay gated and the device looks "online but silent". Latch a
+  // single audit line ~20s after link-up if network-ready still hasn't been reached, so a
+  // diag run can distinguish "DNS arrives late" from "DNS never arrives".
+  {
+    static uint32_t link_up_since_ms = 0;
+    static bool dns_wait_logged = false;
+    if (ctrl_ip_link_up()) {
+      if (link_up_since_ms == 0) link_up_since_ms = now_ms;
+      if (!dns_wait_logged && !ctrl_network_ready() &&
+          static_cast<uint32_t>(now_ms - link_up_since_ms) >= 20000) {
+        dns_wait_logged = true;
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+        ctrl_audit("[net] waiting for DNS: ip=%s dns0=%s (%lus)",
+                   ETH.localIP().toString().c_str(), ETH.dnsIP(0).toString().c_str(),
+                   static_cast<unsigned long>((now_ms - link_up_since_ms) / 1000));
+#else
+        ctrl_audit("[net] waiting for DNS: ip=%s dns0=%s (%lus)",
+                   WiFi.localIP().toString().c_str(), WiFi.dnsIP(0).toString().c_str(),
+                   static_cast<unsigned long>((now_ms - link_up_since_ms) / 1000));
+#endif
+      }
+    } else {
+      // Link dropped: reset so a re-association re-arms the one-shot DNS-wait probe.
+      link_up_since_ms = 0;
+      dns_wait_logged = false;
+    }
+  }
+
   static bool sntp_started = false;
-  if (!sntp_started && ctrl_ip_link_up()) {
+  if (!sntp_started && ctrl_network_ready()) {
+    // Probe: log dns0/ip at the instant SNTP fires. The gate is now ctrl_network_ready()
+    // (IP + DNS populated), so dns0 must be non-zero here — if it ever isn't, the
+    // network-ready check itself is wrong. Previously this gate was WL_CONNECTED, which
+    // could fire before DHCP populated the lwIP DNS server (DNS-dependent services pre-DNS).
+    ctrl_audit("[time] SNTP start: dns0=%s ip=%s",
+               WiFi.dnsIP(0).toString().c_str(), WiFi.localIP().toString().c_str());
     g_ctrl_ntp_primary = ctrl_ip_gateway();  // LAN gateway often serves NTP
     sntp_set_time_sync_notification_cb(ctrl_sntp_sync_cb);
     configTime(0, 0, g_ctrl_ntp_primary.c_str(), "pool.ntp.org");  // UTC, no offset
@@ -962,7 +1018,7 @@ bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
 }
 
 // --- Weather polling (PirateWeather API) ---
-void ctrl_audit(const char *fmt, ...);  // forward declaration for weather logging
+// (ctrl_audit forward-declared near ctrl_network_ready at top of file)
 
 bool ctrl_fetch_zip_coordinates(const char *zip, float *lat_out, float *lon_out) {
   if (lat_out == nullptr || lon_out == nullptr || zip[0] == '\0') return false;
@@ -1042,7 +1098,9 @@ static void ctrl_weather_task(void *) {
         zip_raw  = g_cfg_ctrl_pirateweather_zip.c_str();
         xSemaphoreGive(g_ctrl_weather_mutex);
       }
-      if (ctrl_ip_link_up() && !api_key.empty() && !zip_raw.empty()) break;
+      // Geocode/forecast resolve api.zippopotam.us / api.pirateweather.net by hostname,
+      // so wait for full network-ready (DNS populated), not just link-up.
+      if (ctrl_network_ready() && !api_key.empty() && !zip_raw.empty()) break;
       ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
     }
 
@@ -1660,7 +1718,7 @@ void ctrl_web_handle_status_get() {
     snprintf(time_utc_str, sizeof(time_utc_str), "%04u-%02u-%02uT%02u:%02u:%02uZ",
              trt.year, trt.month, trt.day, trt.hour, trt.minute, trt.second);
   }
-  char buf[1200];
+  char buf[1700];  // sized for base + permanent dns/mac fields
   snprintf(buf, sizeof(buf),
     "{"
     "\"uptime_ms\":%lu,"
@@ -1733,6 +1791,26 @@ void ctrl_web_handle_status_get() {
     static_cast<unsigned long>(ESP.getFreeHeap()),
     THERMOSTAT_FIRMWARE_VERSION
   );
+  // Permanent diagnostics: the lwIP DNS servers (DHCP-provided) and the radio MAC.
+  // DNS lives in lwIP, not in any of the fields above; surfacing it over HTTP means a
+  // DNS-resolution failure (MQTT/weather by hostname) is diagnosable without MQTT. The
+  // MAC confirms identity (e.g. whether an id_mac override changed it). Spliced in before
+  // the closing brace, overwriting the trailing '}' the base format wrote.
+  {
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '}') {
+      len -= 1;
+      snprintf(buf + len, sizeof(buf) - len,
+        ","
+        "\"dns0\":\"%s\","
+        "\"dns1\":\"%s\","
+        "\"mac\":\"%s\""
+        "}",
+        WiFi.dnsIP(0).toString().c_str(),
+        WiFi.dnsIP(1).toString().c_str(),
+        WiFi.macAddress().c_str());
+    }
+  }
   g_ctrl_web.send(200, "application/json", buf);
 }
 
@@ -2587,7 +2665,12 @@ void ctrl_ensure_mqtt_connected(uint32_t now_ms) {
     g_ctrl_mqtt_recovery.on_disconnected();
   }
 
-  if (!ctrl_ip_link_up()) {
+  // The MQTT broker is reached by hostname (e.g. mqtt.lan), so a connect attempt before
+  // DNS is populated resolves to nothing and times out (mqtt_state -4). Gate on full
+  // network-ready, not just link-up. Returning here BEFORE poll()/on_connect_failed()
+  // means the recovery backoff/escalation clock does not advance during the DNS-wait
+  // window, so we never escalate (RestartSubsystem) over a not-yet-resolvable broker.
+  if (!ctrl_network_ready()) {
     return;
   }
   if (g_ctrl_mqtt.connected()) {
@@ -2944,11 +3027,19 @@ void setup() {
   xTaskCreatePinnedToCore(ctrl_web_server_task, "web", 8192,
                           nullptr, 1, nullptr, 0);
 
-  // MQTT task on Core 0: owns all g_ctrl_mqtt I/O (connect + receive) so a blocking
-  // connect/subscribe can never stall relay control on Core 1. Created after g_ctrl_mqtt
-  // is configured (setServer/setCallback) and the mutex/queue exist.
+  // MQTT task on Core 1: owns all g_ctrl_mqtt I/O (connect + receive). It is a SEPARATE
+  // task from loopTask, so a blocking connect/subscribe still never stalls relay control
+  // (loopTask only touches g_ctrl_mqtt via a try-lock(0) publish section). It MUST run on
+  // Core 1 — NOT Core 0 — because PubSubClient::connect()'s CONNACK wait is a no-yield busy
+  // spin on _client->available() (unlike readByte(), which yields). The lwIP TCP/IP task and
+  // WiFi task are pinned to Core 0 (CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0 / WIFI_TASK_PINNED_
+  // TO_CORE_0) under LWIP_TCPIP_CORE_LOCKING. Spinning on Core 0 starves the same-core tiT
+  // task of the lwIP core lock so the inbound CONNACK is never buffered within the 5s socket
+  // timeout -> mqtt_state -4 -> stop() -> 5s reconnect loop. On Core 1 the spin runs in true
+  // parallel with tiT/WiFi (the d551aa7 topology, where this ran inline in loopTask on Core 1).
+  // Created after g_ctrl_mqtt is configured (setServer/setCallback) and the mutex/queue exist.
   xTaskCreatePinnedToCore(ctrl_mqtt_task, "ctrl_mqtt", 8192,
-                          nullptr, 1, nullptr, 0);
+                          nullptr, 1, nullptr, thermostat::kCtrlMqttTaskCore);
 
   g_ctrl_weather_mutex = xSemaphoreCreateMutex();
   if (!g_ctrl_weather_mutex) {
@@ -3081,7 +3172,14 @@ void loop() {
       const uint32_t hb_ms = g_controller->app().runtime().heartbeat_last_seen_ms();
       const bool espnow_active = (hb_ms > 0) &&
           (static_cast<uint32_t>(now - hb_ms) < kCtrlIsolationRebootMs);
-      const bool isolated = !g_ctrl_mqtt_up.load() && !espnow_active;
+      // Don't count MQTT as "down" (and don't start the isolation/reboot clock) until the
+      // network has actually become usable for DNS at least once. While WL_CONNECTED is
+      // true but DNS is not yet populated, MQTT legitimately cannot connect; treating that
+      // as isolation would reboot-loop the device during a normal (if slow) DHCP/DNS bring-up.
+      static bool s_network_was_ready = false;
+      if (ctrl_network_ready()) s_network_was_ready = true;
+      const bool isolated =
+          s_network_was_ready && !g_ctrl_mqtt_up.load() && !espnow_active;
 
       if (!isolated) {
         g_ctrl_isolation_start_ms = 0;
