@@ -20,6 +20,9 @@
 #include <nvs.h>
 #endif
 #ifdef THERMOSTAT_BLE_PROVISIONING
+#ifndef IMPROV_WIFI_BLE_ENABLED
+#error "THERMOSTAT_BLE_PROVISIONING requires IMPROV_WIFI_BLE_ENABLED (the Improv module is guarded by it)"
+#endif
 #include "improv_ble_provisioning.h"
 #endif
 #include <PubSubClient.h>
@@ -2795,9 +2798,15 @@ static void run_provisioning_boot() {
   icfg.hardware_variant = "ESP32-S3";
   icfg.device_url = nullptr;  // we never connect here; no URL to advertise
   icfg.reboot_after_provision = true;
-  improv_ble_start(icfg, [](const char *ssid, const char *password) {
-    g_wifi.set_credentials(ssid, password);
-  });
+  if (!improv_ble_start(icfg, [](const char *ssid, const char *password) {
+        g_wifi.set_credentials(ssid, password);
+      })) {
+    // BLE failed to start — the loop below would otherwise spin forever waiting for a
+    // reboot that can only be scheduled from the (never-firing) Improv callback.
+    Serial.println("[provision] FATAL: improv_ble_start failed — rebooting");
+    delay(3000);
+    ESP.restart();
+  }
 
   if (disp_ok) {
     lv_obj_t *scr = lv_scr_act();
@@ -2850,7 +2859,7 @@ static void run_provisioning_boot() {
   }
 #endif
 
-  // Service the SoftAP portal until the user submits credentials, then reboot into
+  // Service the provisioning loop until the user submits credentials, then reboot into
   // normal mode (which reads the new NVS creds and connects).
   esp_task_wdt_add(NULL);
   uint32_t last_tick = millis();
