@@ -19,6 +19,9 @@
 #ifdef ARDUINO
 #include <nvs.h>
 #endif
+#ifdef THERMOSTAT_BLE_PROVISIONING
+#include "improv_ble_provisioning.h"
+#endif
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -2781,6 +2784,43 @@ static void run_provisioning_boot() {
   wifi_cfg.nvs = &g_cfg;
   wifi_cfg.retry_interval_ms = kNetworkRetryMs;
   g_wifi.begin(wifi_cfg);
+#ifdef THERMOSTAT_BLE_PROVISIONING
+  // BLE/Improv provisioning: persist creds via set_credentials (pure NVS write — does NOT
+  // bring up WiFi STA, so BLE keeps the internal RAM it needs), then reboot. On next boot
+  // creds are present, btInUse() returns false, BT memory is released, WiFi comes up.
+  ImprovBleConfig icfg = {};
+  icfg.device_name = "Thermostat";
+  icfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  icfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  icfg.hardware_variant = "ESP32-S3";
+  icfg.device_url = nullptr;  // we never connect here; no URL to advertise
+  icfg.reboot_after_provision = true;
+  improv_ble_start(icfg, [](const char *ssid, const char *password) {
+    g_wifi.set_credentials(ssid, password);
+  });
+
+  if (disp_ok) {
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "WiFi Setup");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title, &thermostat_font_montserrat_30, 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -50);
+
+    lv_obj_t *body = lv_label_create(scr);
+    lv_label_set_text(body, "Set up over Bluetooth using\nthe Improv app or improv-wifi.com");
+    lv_obj_set_style_text_color(body, lv_color_make(0xCC, 0xCC, 0xCC), 0);
+    lv_obj_set_style_text_font(body, &thermostat_font_montserrat_20, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
+
+    ledcWrite(kBacklightPin, 200);
+  } else {
+    Serial.println("[provision] Display unavailable — provisioning headless via BLE only");
+  }
+#else
   g_wifi.start_provisioning();
   const String ap_ssid = softap_provisioning_ap_ssid();
 
@@ -2808,6 +2848,7 @@ static void run_provisioning_boot() {
   } else {
     Serial.printf("[provision] Display unavailable — portal AP: %s\n", ap_ssid.c_str());
   }
+#endif
 
   // Service the SoftAP portal until the user submits credentials, then reboot into
   // normal mode (which reads the new NVS creds and connects).
@@ -2816,12 +2857,19 @@ static void run_provisioning_boot() {
   for (;;) {
     esp_task_wdt_reset();
     const uint32_t now = millis();
+#ifdef THERMOSTAT_BLE_PROVISIONING
+    if (improv_ble_reboot_pending()) {
+      Serial.println("[provision] Credentials received — rebooting");
+      ESP.restart();
+    }
+#else
     if (g_wifi.has_credentials()) {
       Serial.println("[provision] Credentials received — rebooting");
       delay(800);  // let the portal's "Saved" response flush to the browser
       ESP.restart();
     }
     g_wifi.ensure_connected(now);  // runs the DNS + portal web server
+#endif
     if (disp_ok && (now - last_tick) >= kUiTickMs) {
       lv_tick_inc(now - last_tick);
       last_tick = now;
