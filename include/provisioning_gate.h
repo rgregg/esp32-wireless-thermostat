@@ -11,7 +11,7 @@ namespace provisioning_gate {
 // Returns true when the device should enter WiFi provisioning.
 //   wifi_disabled : ESP-NOW-only mode never provisions (no SSID is needed).
 //   nvs_ssid      : SSID stored in NVS, or nullptr/"" if absent.
-//   baked_ssid    : compile-time baked default SSID, or "" if none.
+//   baked_ssid    : compile-time baked default SSID, or ""/nullptr if none.
 // The effective SSID is the NVS value if non-empty, else the baked default.
 // Provisioning is needed iff WiFi is enabled AND no effective SSID exists.
 inline bool needed(bool wifi_disabled, const char *nvs_ssid, const char *baked_ssid) {

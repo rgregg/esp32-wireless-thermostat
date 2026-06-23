@@ -33,4 +33,15 @@ TEST_CASE(provisioning_gate_null_nvs_ssid) {
   ASSERT_TRUE(!provisioning_gate::needed(false, nullptr, "BakedNet"));
 }
 
+// wifi_disabled short-circuits even when SSIDs are present.
+TEST_CASE(provisioning_gate_wifi_disabled_ignores_ssid) {
+  ASSERT_TRUE(!provisioning_gate::needed(true, "SomeNet", "BakedNet"));
+}
+
+// Null baked default behaves like empty: no effective SSID -> needed.
+TEST_CASE(provisioning_gate_null_baked_ssid) {
+  ASSERT_TRUE(provisioning_gate::needed(false, "", nullptr));
+  ASSERT_TRUE(provisioning_gate::needed(false, nullptr, nullptr));
+}
+
 #endif
