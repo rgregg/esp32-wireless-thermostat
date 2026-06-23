@@ -788,6 +788,11 @@ This is the Scenario-A measurement the experiment deferred. It **requires hardwa
 - Normal boot: WiFi connects; log free-heap delta vs. `-softap` build to confirm ~36 KB BT memory reclaimed.
 - Serial: confirm whether the app console enumerates on `/dev/ttyUSB0` (CH340) or `/dev/ttyACM1` (USB-JTAG) for this build.
 
+**BLE-behavior checks deferred from the Task 3 code review (verify on hardware):**
+- **ADV re-overflow on state changes (I-1):** `improv_ble_start()` fixes the initial advertising packet, but the ImprovWiFiBLE library's internal `advertiseNow()` (fired on wrong-password retry and on disconnect) rebuilds with the 128-bit UUID in the *primary* ADV (~33 B > 31 B). Verify whether the client (web.improv-wifi.com / HA) uses active scan (reads scan response → still discoverable) or passive scan (would fail re-discovery). If the failure/disconnect re-provision path breaks, fix at the library layer; otherwise leave as-is (this is previously-shipped behavior).
+- **Caps byte (I-2):** ADV service-data caps byte is `0x00` (no identify) while the library's GATT caps characteristic is `0x01`. Confirm the app reads caps from GATT (not ADV) and that there's no UI discrepancy; only change `svc_data[3]` to `0x01` if the device actually implements an identify action.
+- **Reboot timing:** confirm the ~2 s window is enough for the app to receive `STATE_PROVISIONED` + device-URL response before `ESP.restart()`.
+
 - [ ] **Step 4: Update project memory**
 
 Update `project_ble_provisioning_revival.md` to note implementation landed (branch/PR), Tier 1 trims applied, and that the on-bench Scenario-A measurement is the remaining acceptance gate. Update the `MEMORY.md` Active Work line accordingly.
