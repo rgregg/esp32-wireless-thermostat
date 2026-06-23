@@ -15,6 +15,10 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "wifi_provisioning_manager.h"
+#include "provisioning_gate.h"
+#ifdef ARDUINO
+#include <nvs.h>
+#endif
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -2711,6 +2715,44 @@ void poll_sensors(uint32_t now_ms) {
 
 }  // namespace
 
+#ifdef ARDUINO
+// Reads NVS directly via the C API so it is safe to call from initArduino()/btInUse(),
+// before the Arduino Preferences object (g_cfg) is opened. Mirrors the provisioning-entry
+// condition in thermostat_firmware_setup() exactly (see provisioning_gate::needed).
+static bool thermostat_provisioning_needed() {
+  bool wifi_disabled = (THERMOSTAT_WIFI_DISABLED != 0);
+  char ssid[64] = {0};
+  nvs_handle_t h;
+  // NVS_READONLY: namespace is absent on a truly fresh device -> open fails -> we keep the
+  // compile-time defaults (empty SSID, not disabled) -> provisioning needed. Fail-safe:
+  // if NVS is unreadable we retain BT memory (a wasted ~36 KB on a normal boot is
+  // recoverable; starving the provisioning boot of BT memory is not).
+  if (nvs_open("cfg_disp", NVS_READONLY, &h) == ESP_OK) {
+    uint8_t off = 0;
+    if (nvs_get_u8(h, "wifi_off", &off) == ESP_OK) {
+      wifi_disabled = (off != 0);
+    }
+    size_t len = sizeof(ssid);
+    if (nvs_get_str(h, "wifi_ssid", ssid, &len) != ESP_OK) {
+      ssid[0] = '\0';
+    }
+    nvs_close(h);
+  }
+  return provisioning_gate::needed(wifi_disabled, ssid, THERMOSTAT_WIFI_SSID);
+}
+
+#ifdef IMPROV_WIFI_BLE_ENABLED
+// Strong override of the Arduino core's weak btInUse() (esp32-hal-bt.c). Runs in
+// initArduino() after nvs_flash_init() and before esp_bt_controller_mem_release().
+// Provisioning boot (no creds) -> keep BT memory so NimBLE can start. Normal boot
+// (creds present) -> release ~36 KB. This replaces the old esp32-hal-bt-mem.h, which
+// pinned BT memory on every boot.
+extern "C" bool btInUse(void) {
+  return thermostat_provisioning_needed();
+}
+#endif  // IMPROV_WIFI_BLE_ENABLED
+#endif  // ARDUINO
+
 // ---------- SoftAP provisioning boot mode ----------
 // When no WiFi SSID is configured, we enter a minimal boot mode:
 // 1. Init the LCD + bring up the SoftAP captive portal (no Bluetooth, so no internal-RAM
@@ -2808,7 +2850,7 @@ void thermostat_firmware_setup() {
   // This must happen before display init to keep internal RAM free for BLE.
   // ESP-NOW-only mode skips this entirely — no SSID is needed and we must not
   // start BLE (it would fragment the internal RAM the LCD bounce buffer needs).
-  if (!g_cfg_wifi_disabled && g_cfg_wifi_ssid.isEmpty()) {
+  if (thermostat_provisioning_needed()) {
     run_provisioning_boot();
     return;  // never reached — run_provisioning_boot loops forever
   }
