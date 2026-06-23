@@ -5,7 +5,6 @@
 #include <NimBLEDevice.h>
 #include <WiFi.h>
 #include <Arduino.h>
-#include "esp_heap_caps.h"
 
 static ImprovWiFiBLE s_improv_ble;
 static bool s_active = false;
@@ -95,6 +94,8 @@ void improv_ble_stop() {
     NimBLEDevice::deinit(true);
     s_active = false;
     s_on_connected = nullptr;
+    s_reboot_pending = false;
+    s_reboot_at_ms = 0;
     Serial.println("[Improv] BLE stopped and memory released");
 }
 
