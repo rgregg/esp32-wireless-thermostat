@@ -2759,23 +2759,30 @@ extern "C" bool btInUse(void) {
 #endif  // IMPROV_WIFI_BLE_ENABLED
 #endif  // ARDUINO
 
-// ---------- SoftAP provisioning boot mode ----------
+// ---------- WiFi provisioning boot mode ----------
 // When no WiFi SSID is configured, we enter a minimal boot mode:
-// 1. Init the LCD + bring up the SoftAP captive portal (no Bluetooth, so no internal-RAM
-//    contention with the LCD framebuffers)
-// 2. Show the AP name to join on the LCD (or run headless if the LCD failed)
-// 3. Loop servicing the portal (DNS + web) until the user submits credentials → reboot
+// - BLE build (THERMOSTAT_BLE_PROVISIONING): advertise via Improv/NimBLE, persist creds on
+//   connection, then reboot. WiFi is never started (BLE needs the internal RAM; the two
+//   can't coexist). BT controller memory was retained this boot by the btInUse() override.
+// - SoftAP build: bring up the captive portal (no Bluetooth) and serve DNS + web until the
+//   user submits credentials, then reboot.
+// In both: init the LCD, show join instructions (or run headless if the LCD failed), and
+// loop until credentials arrive → reboot into normal mode (which reads the new NVS creds).
 static bool g_provisioning_boot_mode = false;
 
 extern "C" const lv_font_t thermostat_font_montserrat_20;
 extern "C" const lv_font_t thermostat_font_montserrat_30;
 
 static void run_provisioning_boot() {
+#ifdef THERMOSTAT_BLE_PROVISIONING
+  Serial.println("[provision] No WiFi configured — entering BLE/Improv provisioning mode");
+#else
   Serial.println("[provision] No WiFi configured — entering SoftAP portal mode");
+#endif
   g_provisioning_boot_mode = true;
 
-  // SoftAP provisioning uses only the WiFi stack (no Bluetooth), so the LCD comes up
-  // cleanly with no internal-DMA-RAM contention.
+  // Provisioning uses only one radio at a time (BLE-only or WiFi-AP-only, never both), so
+  // the LCD comes up cleanly with no internal-DMA-RAM contention.
   init_backlight();
   const bool disp_ok = init_display_and_lvgl();
 
