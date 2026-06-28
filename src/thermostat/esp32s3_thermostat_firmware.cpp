@@ -2866,6 +2866,13 @@ static void run_provisioning_boot() {
   }
 #endif
 
+  // Diagnostic: report internal-DMA-RAM headroom with the provisioning radio + LCD live.
+  // This is the resource that BLE/Improv was originally removed for starving; logging it
+  // here makes the headroom visible on a provisioning boot (one line, provisioning-only).
+  Serial.printf("[provision] internal-DMA RAM: free=%u largest-contiguous=%u\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+
   // Service the provisioning loop until the user submits credentials, then reboot into
   // normal mode (which reads the new NVS creds and connects).
   esp_task_wdt_add(NULL);
