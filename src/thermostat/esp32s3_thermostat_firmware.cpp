@@ -15,6 +15,16 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "wifi_provisioning_manager.h"
+#include "provisioning_gate.h"
+#ifdef ARDUINO
+#include <nvs.h>
+#endif
+#ifdef THERMOSTAT_BLE_PROVISIONING
+#ifndef IMPROV_WIFI_BLE_ENABLED
+#error "THERMOSTAT_BLE_PROVISIONING requires IMPROV_WIFI_BLE_ENABLED (the Improv module is guarded by it)"
+#endif
+#include "improv_ble_provisioning.h"
+#endif
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -2711,23 +2721,68 @@ void poll_sensors(uint32_t now_ms) {
 
 }  // namespace
 
-// ---------- SoftAP provisioning boot mode ----------
+#ifdef ARDUINO
+// Reads NVS directly via the C API so it is safe to call from initArduino()/btInUse(),
+// before the Arduino Preferences object (g_cfg) is opened. Mirrors the provisioning-entry
+// condition in thermostat_firmware_setup() exactly (see provisioning_gate::needed).
+static bool thermostat_provisioning_needed() {
+  bool wifi_disabled = (THERMOSTAT_WIFI_DISABLED != 0);
+  char ssid[64] = {0};
+  nvs_handle_t h;
+  // NVS_READONLY: namespace is absent on a truly fresh device -> open fails -> we keep the
+  // compile-time defaults (empty SSID, not disabled) -> provisioning needed. Fail-safe:
+  // if NVS is unreadable we retain BT memory (a wasted ~36 KB on a normal boot is
+  // recoverable; starving the provisioning boot of BT memory is not).
+  if (nvs_open("cfg_disp", NVS_READONLY, &h) == ESP_OK) {
+    uint8_t off = 0;
+    if (nvs_get_u8(h, "wifi_off", &off) == ESP_OK) {
+      wifi_disabled = (off != 0);
+    }
+    size_t len = sizeof(ssid);
+    if (nvs_get_str(h, "wifi_ssid", ssid, &len) != ESP_OK) {
+      ssid[0] = '\0';
+    }
+    nvs_close(h);
+  }
+  return provisioning_gate::needed(wifi_disabled, ssid, THERMOSTAT_WIFI_SSID);
+}
+
+#ifdef IMPROV_WIFI_BLE_ENABLED
+// Strong override of the Arduino core's weak btInUse() (esp32-hal-bt.c). Runs in
+// initArduino() after nvs_flash_init() and before esp_bt_controller_mem_release().
+// Provisioning boot (no creds) -> keep BT memory so NimBLE can start. Normal boot
+// (creds present) -> release ~36 KB. This replaces the old esp32-hal-bt-mem.h, which
+// pinned BT memory on every boot.
+extern "C" bool btInUse(void) {
+  return thermostat_provisioning_needed();
+}
+#endif  // IMPROV_WIFI_BLE_ENABLED
+#endif  // ARDUINO
+
+// ---------- WiFi provisioning boot mode ----------
 // When no WiFi SSID is configured, we enter a minimal boot mode:
-// 1. Init the LCD + bring up the SoftAP captive portal (no Bluetooth, so no internal-RAM
-//    contention with the LCD framebuffers)
-// 2. Show the AP name to join on the LCD (or run headless if the LCD failed)
-// 3. Loop servicing the portal (DNS + web) until the user submits credentials → reboot
+// - BLE build (THERMOSTAT_BLE_PROVISIONING): advertise via Improv/NimBLE, persist creds on
+//   connection, then reboot. WiFi is never started (BLE needs the internal RAM; the two
+//   can't coexist). BT controller memory was retained this boot by the btInUse() override.
+// - SoftAP build: bring up the captive portal (no Bluetooth) and serve DNS + web until the
+//   user submits credentials, then reboot.
+// In both: init the LCD, show join instructions (or run headless if the LCD failed), and
+// loop until credentials arrive → reboot into normal mode (which reads the new NVS creds).
 static bool g_provisioning_boot_mode = false;
 
 extern "C" const lv_font_t thermostat_font_montserrat_20;
 extern "C" const lv_font_t thermostat_font_montserrat_30;
 
 static void run_provisioning_boot() {
+#ifdef THERMOSTAT_BLE_PROVISIONING
+  Serial.println("[provision] No WiFi configured — entering BLE/Improv provisioning mode");
+#else
   Serial.println("[provision] No WiFi configured — entering SoftAP portal mode");
+#endif
   g_provisioning_boot_mode = true;
 
-  // SoftAP provisioning uses only the WiFi stack (no Bluetooth), so the LCD comes up
-  // cleanly with no internal-DMA-RAM contention.
+  // Provisioning uses only one radio at a time (BLE-only or WiFi-AP-only, never both), so
+  // the LCD comes up cleanly with no internal-DMA-RAM contention.
   init_backlight();
   const bool disp_ok = init_display_and_lvgl();
 
@@ -2739,6 +2794,49 @@ static void run_provisioning_boot() {
   wifi_cfg.nvs = &g_cfg;
   wifi_cfg.retry_interval_ms = kNetworkRetryMs;
   g_wifi.begin(wifi_cfg);
+#ifdef THERMOSTAT_BLE_PROVISIONING
+  // BLE/Improv provisioning: persist creds via set_credentials (pure NVS write — does NOT
+  // bring up WiFi STA, so BLE keeps the internal RAM it needs), then reboot. On next boot
+  // creds are present, btInUse() returns false, BT memory is released, WiFi comes up.
+  ImprovBleConfig icfg = {};
+  icfg.device_name = "Thermostat";
+  icfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  icfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  icfg.hardware_variant = "ESP32-S3";
+  icfg.device_url = nullptr;  // we never connect here; no URL to advertise
+  icfg.reboot_after_provision = true;
+  if (!improv_ble_start(icfg, [](const char *ssid, const char *password) {
+        g_wifi.set_credentials(ssid, password);
+      })) {
+    // BLE failed to start — the loop below would otherwise spin forever waiting for a
+    // reboot that can only be scheduled from the (never-firing) Improv callback.
+    Serial.println("[provision] FATAL: improv_ble_start failed — rebooting");
+    delay(3000);
+    ESP.restart();
+  }
+
+  if (disp_ok) {
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "WiFi Setup");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title, &thermostat_font_montserrat_30, 0);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -50);
+
+    lv_obj_t *body = lv_label_create(scr);
+    lv_label_set_text(body, "Set up over Bluetooth using\nthe Improv app or improv-wifi.com");
+    lv_obj_set_style_text_color(body, lv_color_make(0xCC, 0xCC, 0xCC), 0);
+    lv_obj_set_style_text_font(body, &thermostat_font_montserrat_20, 0);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, 20);
+
+    ledcWrite(kBacklightPin, 200);
+  } else {
+    Serial.println("[provision] Display unavailable — provisioning headless via BLE only");
+  }
+#else
   g_wifi.start_provisioning();
   const String ap_ssid = softap_provisioning_ap_ssid();
 
@@ -2766,20 +2864,35 @@ static void run_provisioning_boot() {
   } else {
     Serial.printf("[provision] Display unavailable — portal AP: %s\n", ap_ssid.c_str());
   }
+#endif
 
-  // Service the SoftAP portal until the user submits credentials, then reboot into
+  // Diagnostic: report internal-DMA-RAM headroom with the provisioning radio + LCD live.
+  // This is the resource that BLE/Improv was originally removed for starving; logging it
+  // here makes the headroom visible on a provisioning boot (one line, provisioning-only).
+  Serial.printf("[provision] internal-DMA RAM: free=%u largest-contiguous=%u\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+
+  // Service the provisioning loop until the user submits credentials, then reboot into
   // normal mode (which reads the new NVS creds and connects).
   esp_task_wdt_add(NULL);
   uint32_t last_tick = millis();
   for (;;) {
     esp_task_wdt_reset();
     const uint32_t now = millis();
+#ifdef THERMOSTAT_BLE_PROVISIONING
+    if (improv_ble_reboot_pending()) {
+      Serial.println("[provision] Credentials received — rebooting");
+      ESP.restart();
+    }
+#else
     if (g_wifi.has_credentials()) {
       Serial.println("[provision] Credentials received — rebooting");
       delay(800);  // let the portal's "Saved" response flush to the browser
       ESP.restart();
     }
     g_wifi.ensure_connected(now);  // runs the DNS + portal web server
+#endif
     if (disp_ok && (now - last_tick) >= kUiTickMs) {
       lv_tick_inc(now - last_tick);
       last_tick = now;
@@ -2808,7 +2921,7 @@ void thermostat_firmware_setup() {
   // This must happen before display init to keep internal RAM free for BLE.
   // ESP-NOW-only mode skips this entirely — no SSID is needed and we must not
   // start BLE (it would fragment the internal RAM the LCD bounce buffer needs).
-  if (!g_cfg_wifi_disabled && g_cfg_wifi_ssid.isEmpty()) {
+  if (thermostat_provisioning_needed()) {
     run_provisioning_boot();
     return;  // never reached — run_provisioning_boot loops forever
   }
