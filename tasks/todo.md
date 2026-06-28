@@ -88,3 +88,21 @@ Plan: docs/superpowers/plans/2026-06-23-display-ble-provisioning-revival.md
 - [ ] BLE-behavior checks deferred from Task 3 review (see plan): ADV re-overflow on
       failure/disconnect (I-1, active-scan likely mitigates), caps byte 0x00 vs GATT 0x01 (I-2),
       ~2s reboot-flush timing.
+
+## BENCH VALIDATION — PASSED (2026-06-28, bench ESP32-S3 via piserial5, MAC 80:B5:4E:D1:B8:04)
+Provisioned AUTOMATICALLY over BLE from piserial5's own Bluetooth (onboard hci0) using a
+D-Bus Improv client (/tmp/improv_provision.py on the pi) — no phone needed.
+- [x] Provisioning boot: no crash; LCD+LVGL+BLE coexist; advertises "Thermostat".
+      internal-DMA RAM: free=28331 largest-contiguous=26612 (in line with the firmware's
+      normal ~28KB free-heap budget; Phase 1's 159KB was an unrealistic isolated probe).
+- [x] BLE discoverable by a real central via active scan (name in scan response — I-1 OK for discovery).
+- [x] Auto-provision: STATE 02(AUTHORIZED) -> wrote SEND_WIFI_SETTINGS(IoTDevices) ->
+      STATE 04(PROVISIONED), RESULT 01010002, no ERROR.
+- [x] Reboot into normal mode (did NOT re-enter provisioning => creds persisted to NVS).
+- [x] BT memory released on normal boot: full WiFi+MQTT+web stack runs (impossible per Phase 2 if not released).
+- [x] WiFi associated: GET /status -> wifi_connected:true, ip 192.168.42.94, mqtt_connected:true,
+      firmware_version v0.10.2-116-gfcedc6b-dirty (confirms the branch build).
+
+Tier 2 NimBLE buffer trims: optional / low priority (headroom matches normal budget; flow works).
+Note: bench-ble build uses PRODUCTION MQTT defaults, so the bench device announced itself on the
+production broker/HA — clean up that phantom display entry if undesired, or re-flash -softap to retire it.
