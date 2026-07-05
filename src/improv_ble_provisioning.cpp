@@ -49,6 +49,14 @@ bool improv_ble_start(const ImprovBleConfig &config, ImprovBleConnectedCb on_con
     // connecting, persist the credentials (via on_connected) and reboot; on next boot the
     // firmware connects via the saved credentials without starting BLE.
     s_improv_ble.setCustomConnectWiFi([](const char *ssid, const char *password) -> bool {
+        // Reject an empty SSID: returning true persists creds (onImprovConnected) and
+        // reboots, but an empty SSID would just re-enter provisioning on next boot (or, with
+        // a baked default, silently mask it). Returning false makes the library report an
+        // error and keep advertising so the client can retry.
+        if (ssid == nullptr || ssid[0] == '\0') {
+            Serial.println("[Improv] Rejecting empty SSID");
+            return false;
+        }
         Serial.printf("[Improv] Received credentials for SSID: %s\n", ssid);
         return true;  // tell the library "connected"; we reboot momentarily
     });
@@ -87,20 +95,6 @@ bool improv_ble_start(const ImprovBleConfig &config, ImprovBleConnectedCb on_con
     s_active = true;
     Serial.printf("[Improv] BLE advertising as \"%s\"\n", config.device_name);
     return true;
-}
-
-void improv_ble_stop() {
-    if (!s_active) return;
-    NimBLEDevice::deinit(true);
-    s_active = false;
-    s_on_connected = nullptr;
-    s_reboot_pending = false;
-    s_reboot_at_ms = 0;
-    Serial.println("[Improv] BLE stopped and memory released");
-}
-
-bool improv_ble_is_active() {
-    return s_active;
 }
 
 bool improv_ble_reboot_pending() {

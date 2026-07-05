@@ -13,8 +13,6 @@ struct ImprovBleConfig {
 typedef void (*ImprovBleConnectedCb)(const char *ssid, const char *password);
 
 bool improv_ble_start(const ImprovBleConfig &config, ImprovBleConnectedCb on_connected);
-void improv_ble_stop();
-bool improv_ble_is_active();
 bool improv_ble_reboot_pending();
 
 #endif

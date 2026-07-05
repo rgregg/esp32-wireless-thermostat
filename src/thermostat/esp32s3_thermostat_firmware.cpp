@@ -16,6 +16,7 @@
 #include <WiFi.h>
 #include "wifi_provisioning_manager.h"
 #include "provisioning_gate.h"
+#include "thermostat_nvs_keys.h"
 #ifdef ARDUINO
 #include <nvs.h>
 #endif
@@ -391,9 +392,9 @@ void load_runtime_config() {
     }
   }
 
-  g_cfg_wifi_ssid = g_cfg.getString("wifi_ssid", g_cfg_wifi_ssid);
+  g_cfg_wifi_ssid = g_cfg.getString(thermostat_nvs::kWifiSsid, g_cfg_wifi_ssid);
   g_cfg_wifi_password = g_cfg.getString("wifi_pwd", g_cfg_wifi_password);
-  g_cfg_wifi_disabled = g_cfg.getBool("wifi_off", g_cfg_wifi_disabled);
+  g_cfg_wifi_disabled = g_cfg.getBool(thermostat_nvs::kWifiOff, g_cfg_wifi_disabled);
   g_cfg_mqtt_host = g_cfg.getString("mqtt_host", g_cfg_mqtt_host);
   g_cfg_mqtt_port = static_cast<uint16_t>(g_cfg.getUInt("mqtt_port", g_cfg_mqtt_port));
   g_cfg_mqtt_user = g_cfg.getString("mqtt_user", g_cfg_mqtt_user);
@@ -572,7 +573,7 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     g_cfg_reboot_required = true;
   } else if (key == "wifi_disabled") {
     g_cfg_wifi_disabled = (strcmp(raw_value, "1") == 0);
-    g_cfg.putBool("wifi_off", g_cfg_wifi_disabled);
+    g_cfg.putBool(thermostat_nvs::kWifiOff, g_cfg_wifi_disabled);
     g_cfg_reboot_required = true;
   } else if (key == "controller_timeout_ms") {
     const long parsed = atol(raw_value);
@@ -2733,13 +2734,13 @@ static bool thermostat_provisioning_needed() {
   // compile-time defaults (empty SSID, not disabled) -> provisioning needed. Fail-safe:
   // if NVS is unreadable we retain BT memory (a wasted ~36 KB on a normal boot is
   // recoverable; starving the provisioning boot of BT memory is not).
-  if (nvs_open("cfg_disp", NVS_READONLY, &h) == ESP_OK) {
+  if (nvs_open(thermostat_nvs::kNamespace, NVS_READONLY, &h) == ESP_OK) {
     uint8_t off = 0;
-    if (nvs_get_u8(h, "wifi_off", &off) == ESP_OK) {
+    if (nvs_get_u8(h, thermostat_nvs::kWifiOff, &off) == ESP_OK) {
       wifi_disabled = (off != 0);
     }
     size_t len = sizeof(ssid);
-    if (nvs_get_str(h, "wifi_ssid", ssid, &len) != ESP_OK) {
+    if (nvs_get_str(h, thermostat_nvs::kWifiSsid, ssid, &len) != ESP_OK) {
       ssid[0] = '\0';
     }
     nvs_close(h);
@@ -2866,12 +2867,14 @@ static void run_provisioning_boot() {
   }
 #endif
 
-  // Diagnostic: report internal-DMA-RAM headroom with the provisioning radio + LCD live.
-  // This is the resource that BLE/Improv was originally removed for starving; logging it
-  // here makes the headroom visible on a provisioning boot (one line, provisioning-only).
+#ifdef THERMOSTAT_BLE_PROVISIONING
+  // Diagnostic: report internal-DMA-RAM headroom with BLE + LCD live. This is the resource
+  // BLE/Improv was originally removed for starving, so it's only interesting on the BLE
+  // path; the SoftAP path already logs free internal RAM in start_provisioning().
   Serial.printf("[provision] internal-DMA RAM: free=%u largest-contiguous=%u\n",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+#endif
 
   // Service the provisioning loop until the user submits credentials, then reboot into
   // normal mode (which reads the new NVS creds and connects).
@@ -2909,7 +2912,7 @@ void thermostat_firmware_setup() {
     delay(3000);
     ESP.restart();
   }
-  g_cfg_ready = g_cfg.begin("cfg_disp", false);
+  g_cfg_ready = g_cfg.begin(thermostat_nvs::kNamespace, false);
   load_runtime_config();
   g_boot_count = g_cfg_ready ? (g_cfg.getUInt("boot_cnt", 0U) + 1U) : 0U;
   if (g_cfg_ready) {
