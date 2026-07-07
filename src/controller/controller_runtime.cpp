@@ -110,6 +110,17 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
     }
   }
 
+  // Sync requests bypass the stale-seq check: they are the explicit recovery
+  // path for a thermostat whose seq counter has reset (e.g. after a crash or
+  // reboot). Reseed our per-source counter from the incoming seq so the
+  // following commands flow normally.
+  if (cmd.sync_request) {
+    *last_seq = cmd.seq;
+    result.accepted = true;
+    result.sync_requested = true;
+    return result;
+  }
+
   if (*last_seq != 0) {
     if (!espnow_cmd::is_newer_seq(*last_seq, cmd.seq)) {
       result.stale_or_duplicate = true;
@@ -119,11 +130,6 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
 
   *last_seq = cmd.seq;
   result.accepted = true;
-
-  if (cmd.sync_request) {
-    result.sync_requested = true;
-    return result;
-  }
 
   const FurnaceMode old_mode = mode_;
   const FanMode old_fan = fan_mode_;
