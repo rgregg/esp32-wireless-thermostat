@@ -2833,7 +2833,7 @@ void setup() {
   // task_wdt panics that leave reboot_reason="none".
   ctrl_breadcrumb_recover_on_boot();
   {
-    char panic_buf[160];
+    char panic_buf[thermostat::kPanicBreadcrumbTextMax];
     thermostat::panic_breadcrumb_recover_on_boot(panic_buf, sizeof(panic_buf));
     g_ctrl_panic_pc = panic_buf;
   }

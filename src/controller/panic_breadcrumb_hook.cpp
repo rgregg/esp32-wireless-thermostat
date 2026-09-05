@@ -21,12 +21,34 @@ void on_panic(arduino_panic_info_t *info, void * /*arg*/) {
   g_panic_breadcrumb.core = static_cast<uint32_t>(info->core);
   g_panic_breadcrumb.pc = reinterpret_cast<uint32_t>(info->pc);
 
+  uint32_t flags = 0;
+  if (info->backtrace_corrupt) flags |= thermostat::kPanicFlagBacktraceCorrupt;
+  if (info->backtrace_continues) flags |= thermostat::kPanicFlagBacktraceContinues;
+  g_panic_breadcrumb.flags = flags;
+
   size_t depth = info->backtrace_len;
   if (depth > thermostat::kPanicBacktraceDepth) depth = thermostat::kPanicBacktraceDepth;
   g_panic_breadcrumb.depth = static_cast<uint32_t>(depth);
   for (size_t i = 0; i < depth; ++i) {
     g_panic_breadcrumb.backtrace[i] = static_cast<uint32_t>(info->backtrace[i]);
   }
+
+  // Copy the exception string LAST, and only after everything above is already
+  // committed to RTC_NOINIT. info->reason points at a .rodata literal, i.e. DROM
+  // reached through the flash cache — and one of the panics we want to identify
+  // is precisely "Cache disabled but cached memory region accessed". If reading
+  // it faults here, the pc/core/backtrace we already stamped still survive; only
+  // the reason is lost. Clearing it first means a partial copy reads as absent
+  // rather than as a stale string from an earlier panic.
+  g_panic_breadcrumb.reason[0] = '\0';
+  if (info->reason == nullptr) return;
+  char *dst = g_panic_breadcrumb.reason;
+  const char *src = info->reason;
+  size_t i = 0;
+  for (; i + 1 < thermostat::kPanicReasonLen && src[i] != '\0'; ++i) {
+    dst[i] = src[i];
+  }
+  dst[i] = '\0';
 }
 
 // We use the Arduino core's official extension point set_arduino_panic_handler()
