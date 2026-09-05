@@ -18,7 +18,14 @@ jobs:
 
       - name: Install PlatformIO
         run: |
-          pip install platformio
+          # Pinned: PlatformIO 6.2.0 resolves tool-scons to ~4.41101.0, but SCons
+          # 4.9 removed SCons.Tool.FortranCommon, which the pioarduino
+          # platform-espressif32 builder still imports -> every ESP32 env fails with
+          # "ModuleNotFoundError: No module named 'SCons.Tool.FortranCommon'".
+          # (Native envs are unaffected, which is why only the firmware steps broke.)
+          # 6.1.19 pulls tool-scons 4.40801.0 and matches the pinned platform.
+          # Revisit when pioarduino supports SCons >= 4.9.
+          pip install 'platformio==6.1.19'
           pio --version
 
       - name: Build controller firmware
