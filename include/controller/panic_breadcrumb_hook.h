@@ -2,6 +2,9 @@
 
 #include <stddef.h>
 
+// Callers size their output buffer with kPanicBreadcrumbTextMax.
+#include "controller/panic_breadcrumb.h"
+
 namespace thermostat {
 
 // Recover the panic breadcrumb left by the previous boot (if any), format it

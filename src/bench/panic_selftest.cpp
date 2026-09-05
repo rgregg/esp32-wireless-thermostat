@@ -25,7 +25,7 @@ void setup() {
   Serial.begin(115200);
   delay(2500);  // let the USB-CDC/JTAG console enumerate before we print
 
-  char buf[160];
+  char buf[thermostat::kPanicBreadcrumbTextMax];
   thermostat::panic_breadcrumb_recover_on_boot(buf, sizeof(buf));
   g_had_prior_panic = (std::strncmp(buf, "none", 4) != 0);
 
