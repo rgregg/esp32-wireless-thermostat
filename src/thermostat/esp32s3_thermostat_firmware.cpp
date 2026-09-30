@@ -831,13 +831,17 @@ void web_handle_status_get() {
   xSemaphoreGive(g_api_mutex);
 
   char buf[2048];
-  char remote_temp_str[16], remote_hum_str[16];
+  // remote_indoor_temp_c is always Celsius (API contract); the unit-converted
+  // value for the status page goes in remote_indoor_temp_text.
+  char remote_temp_str[16], remote_temp_text[16], remote_hum_str[16];
   if (std::isnan(remote_indoor_temp_c)) {
     strcpy(remote_temp_str, "null");
+    remote_temp_text[0] = '\0';
   } else {
-    double remote_temp_display = static_cast<double>(remote_indoor_temp_c);
-    if (temp_unit_f) remote_temp_display = remote_temp_display * 9.0 / 5.0 + 32.0;
-    snprintf(remote_temp_str, sizeof(remote_temp_str), "%.1f", remote_temp_display);
+    const double temp_c = static_cast<double>(remote_indoor_temp_c);
+    snprintf(remote_temp_str, sizeof(remote_temp_str), "%.1f", temp_c);
+    snprintf(remote_temp_text, sizeof(remote_temp_text), "%.1f\xc2\xb0%c",
+             temp_unit_f ? temp_c * 9.0 / 5.0 + 32.0 : temp_c, temp_unit_f ? 'F' : 'C');
   }
   if (std::isnan(remote_indoor_humidity)) {
     strcpy(remote_hum_str, "null");
@@ -855,6 +859,7 @@ void web_handle_status_get() {
     "\"aht_sensor_ready\":%s,"
     "\"sensor_type\":\"%s\","
     "\"remote_indoor_temp_c\":%s,"
+    "\"remote_indoor_temp_text\":\"%s\","
     "\"remote_indoor_humidity\":%s,"
     "\"indoor_temp_text\":\"%s\","
     "\"indoor_humidity_text\":\"%s\","
@@ -885,6 +890,7 @@ void web_handle_status_get() {
     sensor_type == SensorType::AHT ? "aht" :
     sensor_type == SensorType::Si7021 ? "si7021" : "none",
     remote_temp_str,
+    remote_temp_text,
     remote_hum_str,
     indoor_temp_text.c_str(),
     indoor_humidity_text.c_str(),
@@ -1071,7 +1077,7 @@ void web_handle_root() {
   status_item(html, "ESP-NOW", "espnow_connected");
   status_section(html, "Environment");
   status_item(html, "Sensor", "sensor_type");
-  status_item(html, temp_unit_f ? "Remote Temp (\xc2\xb0""F)" : "Remote Temp (\xc2\xb0""C)", "remote_indoor_temp_c");
+  status_item(html, "Remote Temp", "remote_indoor_temp_text");
   status_item(html, "Remote Humidity", "remote_indoor_humidity");
   status_item(html, "Indoor Temp", "indoor_temp_text");
   status_item(html, "Indoor Humidity", "indoor_humidity_text");
