@@ -29,7 +29,9 @@ bool ota_web_in_progress();
 /// flash writes.
 void ota_web_process_flash_ops();
 
-/// Call once at boot to start the rollback confirmation timer.
+/// Call once at boot to start the rollback confirmation timer. Only arms when
+/// the running image is unconfirmed (first boot after an OTA); an already-valid
+/// image never rolls back, so reboots during network outages keep the firmware.
 void ota_rollback_begin();
 
 /// Call each loop iteration. If healthy is true within 3 minutes, the firmware

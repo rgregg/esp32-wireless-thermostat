@@ -378,7 +378,20 @@ void ota_web_setup(WebServer &server) {
 
 void ota_rollback_begin() {
   s_rollback_start_ms = millis();
-  s_rollback_confirmed = false;
+  // Only arm on the first boot(s) of a freshly OTA'd image (NEW, or
+  // PENDING_VERIFY once the bootloader has marked it). An image that is
+  // already VALID must never roll back: esp_ota_mark_app_invalid_rollback_and_reboot()
+  // downgrades regardless of state, so arming on every boot meant any reboot
+  // during a >3 min network/broker outage swapped in the other slot's firmware.
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+  const esp_err_t err =
+      esp_ota_get_state_partition(esp_ota_get_running_partition(), &state);
+  const bool armed = err == ESP_OK && (state == ESP_OTA_IMG_NEW ||
+                                       state == ESP_OTA_IMG_PENDING_VERIFY);
+  s_rollback_confirmed = !armed;
+  Serial.printf("OTA rollback: %s (state=%d err=%d)\n",
+                armed ? "armed, awaiting health" : "not armed", static_cast<int>(state),
+                static_cast<int>(err));
 }
 
 void ota_rollback_check(bool healthy) {
