@@ -66,7 +66,7 @@ RGB data pins (`D0..D15`):
 - Firmware uses the Adafruit AHTX0 driver layer, so AHT10/AHT20-class devices are supported.
 
 ### Backlight
-- PWM backlight control on `GPIO2` (LEDC channel 0, 8-bit)
+- PWM backlight control on `GPIO2` (LEDC, 8-bit, 250 Hz). The driver needs ~30 µs per enable pulse, so ultrasonic PWM cannot dim (black below ~80% at 25 kHz); 800 Hz whined audibly at low duty.
 
 ## Shared Requirements (Both Units)
 - 2.4 GHz Wi-Fi coverage at install location.
