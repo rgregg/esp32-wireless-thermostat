@@ -58,7 +58,10 @@ constexpr uint32_t kSensorPollMs = 60000;
 constexpr uint32_t kUiRefreshMs = 500;
 
 constexpr int kBacklightPin = 2;
-constexpr int kBacklightFreq = 800;
+// The backlight driver needs ~30 us per enable pulse to start, so ultrasonic
+// PWM can't dim (25 kHz was black below ~80% duty). 800 Hz whined audibly at
+// screensaver brightness; 250 Hz sits where the ear is far less sensitive.
+constexpr int kBacklightFreq = 250;
 constexpr int kBacklightResolution = 8;
 
 constexpr uint8_t kGt911Addr = 0x5D;
