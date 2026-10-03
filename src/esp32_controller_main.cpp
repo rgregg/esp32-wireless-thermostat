@@ -84,6 +84,11 @@ constexpr int kEthCs = 16, kEthIrq = 12, kEthRst = -1;
 constexpr int kEthSck = 15, kEthMiso = 14, kEthMosi = 13;
 }  // namespace
 bool g_ctrl_eth_started = false;
+// Ethernet-primary with WiFi fallback: set true once Ethernet has failed to get an IP
+// within the grace window and we switch to WiFi. One-way for the session — once on WiFi
+// we stay there until a reboot (no link flapping); a reboot re-establishes Ethernet.
+bool g_ctrl_wifi_fallback_active = false;
+constexpr uint32_t kCtrlEthGraceMs = 45000;  // wait this long for an Ethernet IP first
 #endif
 
 // IP-link abstraction. The controller's IP services (MQTT, web, OTA, mDNS) are
@@ -93,7 +98,9 @@ bool g_ctrl_eth_started = false;
 // these reduce to exactly the prior WiFi.status()/WiFi.localIP() behavior (no change).
 static bool ctrl_ip_link_up() {
 #if defined(CONTROLLER_BOARD_WAVESHARE)
-  return g_ctrl_eth_started && ETH.hasIP();  // hasIP() => link up AND has an address
+  // Ethernet is primary; if we've fallen back, WiFi STA carries IP instead.
+  return (g_ctrl_eth_started && ETH.hasIP()) ||  // hasIP() => link up AND has an address
+         (g_ctrl_wifi_fallback_active && WiFi.status() == WL_CONNECTED);
 #else
   return WiFi.status() == WL_CONNECTED;
 #endif
@@ -121,7 +128,11 @@ static bool ctrl_network_ready() {
 
 static String ctrl_ip_local_addr() {
 #if defined(CONTROLLER_BOARD_WAVESHARE)
-  return ctrl_ip_link_up() ? ETH.localIP().toString() : String("");
+  if (g_ctrl_eth_started && ETH.hasIP()) return ETH.localIP().toString();
+  if (g_ctrl_wifi_fallback_active && WiFi.status() == WL_CONNECTED) {
+    return WiFi.localIP().toString();
+  }
+  return String("");
 #else
   return (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : String("");
 #endif
@@ -2909,17 +2920,31 @@ void setup() {
   // WiFi STA GOT_IP and (Waveshare) ETH GOT_IP.
   WiFi.onEvent(ctrl_wifi_event_handler);
 
+  // WiFi provisioning manager — initialized on BOTH boards (loads stored creds; ready to
+  // connect or run the SoftAP portal). Classic uses WiFi as the primary IP link; Waveshare
+  // keeps it idle and only brings it up as an Ethernet fallback (see loop()).
+  WifiProvisioningConfig wifi_cfg = {};
+  wifi_cfg.device_name = "Controller";
+  wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
+  wifi_cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
+  wifi_cfg.hardware_variant = "ESP32";
+  wifi_cfg.nvs = &g_ctrl_cfg;
+  wifi_cfg.hostname = g_cfg_ctrl_hostname.c_str();
+  wifi_cfg.retry_interval_ms = kCtrlNetworkRetryMs;
+  const bool has_wifi = g_ctrl_wifi.begin(wifi_cfg);
+
 #if defined(CONTROLLER_BOARD_WAVESHARE)
-  // Ethernet (W5500) is the primary IP link. WiFi does NOT associate to an AP — it is
-  // used for ESP-NOW only (the transport puts the radio in STA mode on a pinned channel
-  // in g_controller->begin() below). The WiFi-creds provisioning flow is therefore
-  // intentionally skipped on this board.
+  // Ethernet (W5500) is the primary IP link. WiFi does NOT associate here — the transport
+  // puts the radio in STA mode on a pinned channel for ESP-NOW (in g_controller->begin()
+  // below). If Ethernet never gets an IP, loop() falls back to WiFi (saved creds ->
+  // connect; none -> SoftAP portal).
+  (void)has_wifi;
   ETH.setHostname(g_cfg_ctrl_hostname.c_str());
   Serial.println("[eth] starting W5500 Ethernet (primary IP link)...");
-  // Bounded retry: a hard ETH.begin() failure would leave the board permanently
-  // IP-dark, and (because ESP-NOW still works) the isolation watchdog would NOT catch
-  // it — so recover transient SPI/PHY init failures here. If all attempts fail the
-  // W5500 is likely dead; we run ESP-NOW-only rather than reboot-loop on dead hardware.
+  // Bounded retry: a hard ETH.begin() failure would leave the board IP-dark on Ethernet,
+  // and (because ESP-NOW still works) the isolation watchdog would NOT catch it — so
+  // recover transient SPI/PHY init failures here. The WiFi fallback in loop() then covers
+  // a dead/disconnected Ethernet link.
   for (int attempt = 1; attempt <= 3 && !g_ctrl_eth_started; ++attempt) {
     g_ctrl_eth_started = ETH.begin(ETH_PHY_W5500, 1, kEthCs, kEthIrq, kEthRst,
                                    SPI2_HOST, kEthSck, kEthMiso, kEthMosi);
@@ -2929,18 +2954,9 @@ void setup() {
     }
   }
   Serial.printf("[eth] ETH.begin() -> %s\n",
-                g_ctrl_eth_started ? "ok" : "FAILED (running ESP-NOW-only)");
+                g_ctrl_eth_started ? "ok" : "FAILED (will fall back to WiFi)");
 #else
-  // Initialize WiFi provisioning manager — brings up the SoftAP portal if no creds.
-  WifiProvisioningConfig wifi_cfg = {};
-  wifi_cfg.device_name = "Controller";
-  wifi_cfg.firmware_name = THERMOSTAT_PROJECT_NAME;
-  wifi_cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
-  wifi_cfg.hardware_variant = "ESP32";
-  wifi_cfg.nvs = &g_ctrl_cfg;
-  wifi_cfg.hostname = g_cfg_ctrl_hostname.c_str();
-  wifi_cfg.retry_interval_ms = kCtrlNetworkRetryMs;
-  bool has_wifi = g_ctrl_wifi.begin(wifi_cfg);
+  // Classic: WiFi is the IP link — bring up the SoftAP portal if there are no creds.
   if (!has_wifi) {
     Serial.println("[provision] No WiFi configured — starting SoftAP portal");
     g_ctrl_wifi.start_provisioning();
@@ -3115,15 +3131,25 @@ void loop() {
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
 #if !defined(CONTROLLER_BOARD_WAVESHARE)
     // Classic board: WiFi STA is the IP link, so keep it connected and let the WiFi
-    // watchdog reboot on sustained WiFi loss. On Waveshare, WiFi never associates
-    // (ESP-NOW only) and Ethernet/lwIP self-recovers — the isolation watchdog below is
-    // the SOLE reboot authority (no IP-link-down reboot). See ethernet-primary plan.
-    // NOTE: this gate is what keeps the WiFi radio from ever associating on Waveshare.
-    // A stray `wifi_ssid` write only persists creds + sets reconnect_required (see
-    // WifiProvisioningManager::set_credentials); association happens ONLY in
-    // ensure_connected(), which is gated out here — so ESP-NOW channel pinning is safe.
+    // watchdog reboot on sustained WiFi loss.
     ctrl_ensure_wifi_connected(now);
     wifi_watchdog_tick(now, g_ctrl_mqtt_up.load());
+#else
+    // Waveshare: Ethernet is the primary IP link; while it's up WiFi never associates, so
+    // ESP-NOW keeps its pinned channel. If Ethernet hasn't obtained an IP within the grace
+    // window, fall back to WiFi ONCE (one-way until reboot) and then service it each loop —
+    // ctrl_ensure_wifi_connected() connects with stored creds, or brings up the SoftAP
+    // portal if there are none. NOTE: once WiFi associates, ESP-NOW rides the AP's channel
+    // (it no longer holds the pinned channel). The isolation watchdog below stays the
+    // reboot authority.
+    if (!g_ctrl_wifi_fallback_active && !(g_ctrl_eth_started && ETH.hasIP()) &&
+        now >= kCtrlEthGraceMs) {
+      g_ctrl_wifi_fallback_active = true;
+      Serial.println("[net] no Ethernet IP after grace — falling back to WiFi");
+    }
+    if (g_ctrl_wifi_fallback_active) {
+      ctrl_ensure_wifi_connected(now);
+    }
 #endif
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();

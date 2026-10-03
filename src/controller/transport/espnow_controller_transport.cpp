@@ -21,7 +21,15 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   heartbeat_toggle_ = false;
 
 #if defined(ARDUINO)
-  WiFi.mode(WIFI_STA);
+  // Enable STA *additively* — do NOT use WiFi.mode(WIFI_STA), which is exclusive and
+  // tears down a running SoftAP. On the classic board an unprovisioned boot brings up
+  // the SoftAP captive portal (WIFI_AP_STA) just before this; mode(WIFI_STA) would
+  // disable the AP interface (esp_wifi_set_mode -> AP.onDisable), leaving the portal
+  // dead with no way to enter credentials. enableSTA() ORs in the STA bit and preserves
+  // the AP if present. With no AP up (the normal provisioned case) it is equivalent to
+  // mode(WIFI_STA). ESP-NOW only needs STA enabled on a channel — it works whether or
+  // not the AP coexists.
+  WiFi.enableSTA(true);
 
   // Set the radio to the configured ESP-NOW channel so peers match the home
   // channel.  Without this the STA defaults to channel 1 and peer sends fail
