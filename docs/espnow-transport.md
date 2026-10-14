@@ -89,6 +89,9 @@ probes or enforces while associated.
 - WiFi rejoin attempts slow from every 5 s to every 60 s while ESP-NOW carries the link.
 - Unicast peer required: with a broadcast or empty peer MAC the link is not trusted for
   reboot decisions and WiFi is never suspended for it.
+- The controller's channel search assumes a single unicast peer in `devices` (production
+  has exactly one, the display). With several, the link follows whichever peer acks a
+  probe first.
 - The WiFi watchdog (`include/wifi_watchdog.h`) never reboots. After 2 minutes of
   gateway unreachability it forces a reconnect through a hook that points at
   `WifiProvisioningManager::request_reconnect()`, so the join is tracked and ESP-NOW

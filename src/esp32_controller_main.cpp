@@ -3070,6 +3070,9 @@ void setup() {
   }
   g_ctrl_last_espnow_error = ok ? "none" : (g_cfg_ctrl_espnow_enabled ? "begin_failed" : "disabled");
   {
+    // The channel search assumes a single unicast peer in `devices` (production: the
+    // display's MAC only). With several, probes and peer_heard() cover every authorized
+    // unicast peer, so the link follows whichever one acks first.
     thermostat::EspNowChannelConfig link_cfg;
     link_cfg.role = thermostat::LinkRole::Controller;
     link_cfg.rendezvous_channel = g_cfg_ctrl_espnow_channel;
