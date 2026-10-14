@@ -72,6 +72,9 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   bool has_unicast_peer() const;
   ProbeStatus probe_status() const { return probe_tracker_.status(); }
   void clear_probe() { probe_tracker_.clear(); }
+  // Resyncs probe attribution if a send callback was lost (main loop; see
+  // EspNowProbeTracker::check_lost_callbacks()).
+  void check_lost_send_callbacks(uint32_t now_ms) { probe_tracker_.check_lost_callbacks(now_ms); }
 
   // ESP-NOW send-callback entry point (runs in the WiFi task). Public so host tests can
   // deliver send callbacks; firmware reaches it only through the registered callback.

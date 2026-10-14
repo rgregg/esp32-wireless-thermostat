@@ -18,8 +18,8 @@ enum class ProbeStatus : uint8_t { None = 0, Pending = 1, Acked = 2, Failed = 3 
 // transport calls on_send_accepted() after every esp_now_send that returns ESP_OK and
 // on_send_complete() once per send callback.
 //
-// Threading: on_send_complete() runs in the WiFi task; everything else runs in the task
-// that sends frames (the main loop). Every field the callback touches is atomic. A
+// Threading: on_send_complete() runs in the WiFi task; everything else (including
+// check_lost_callbacks()) runs in the task that sends frames (the main loop). Every field the callback touches is atomic. A
 // callback delivered before the sender has counted its send is still attributed
 // correctly, because the probe's range stays open-ended until end_probe().
 class EspNowProbeTracker {
@@ -75,10 +75,32 @@ class EspNowProbeTracker {
   void resync() {
     clear();
     sends_completed_.store(sends_issued_.load());
+    lagging_ = false;
+  }
+
+  // Lost-callback guard; call regularly from the sending task. A send callback that never
+  // arrives would leave every later callback attributed one send too early, so a probe's
+  // own callback would never complete it. If no probe is outstanding and completions have
+  // stayed behind issued sends for more than kLostCallbackMs (callbacks normally arrive
+  // within milliseconds), resync(). Time with a probe outstanding does not count.
+  void check_lost_callbacks(uint32_t now_ms) {
+    const bool behind =
+        static_cast<int32_t>(sends_issued_.load() - sends_completed_.load()) > 0;
+    if (!behind || probe_pending_.load()) {
+      lagging_ = false;
+      return;
+    }
+    if (!lagging_) {
+      lagging_ = true;
+      lag_since_ms_ = now_ms;
+      return;
+    }
+    if (static_cast<uint32_t>(now_ms - lag_since_ms_) > kLostCallbackMs) resync();
   }
 
  private:
   static constexpr uint32_t kOpenSpan = 0x7FFFFFFFu;
+  static constexpr uint32_t kLostCallbackMs = 1000;
 
   // Wraparound-safe first <= n <= last.
   bool in_probe_range(uint32_t n) const {
@@ -95,6 +117,9 @@ class EspNowProbeTracker {
   // Sequence number of an acknowledged probe frame. Acked iff it lies inside the current
   // probe's range, so a late write for an earlier probe can never ack a later one.
   std::atomic<uint32_t> probe_ack_seq_{0};
+  // Lost-callback guard state; touched only by the sending task.
+  bool lagging_ = false;
+  uint32_t lag_since_ms_ = 0;
 };
 
 }  // namespace thermostat

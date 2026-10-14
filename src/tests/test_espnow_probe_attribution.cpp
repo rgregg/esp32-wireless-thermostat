@@ -193,4 +193,71 @@ TEST_CASE(espnow_disp_stray_callback_is_clamped_at_probe_start) {
   ASSERT_TRUE(t.probe_status() == ProbeStatus::Acked);
 }
 
+// --- Lost send callback guard (EspNowProbeTracker::check_lost_callbacks) ---
+
+TEST_CASE(espnow_probe_tracker_resyncs_after_lost_callback) {
+  thermostat::EspNowProbeTracker tr;
+  tr.on_send_accepted();  // its callback never arrives
+  tr.check_lost_callbacks(10000);
+  tr.check_lost_callbacks(11000);  // behind for exactly 1 s: not yet
+  tr.check_lost_callbacks(11001);  // more than 1 s: resync
+  tr.begin_probe();
+  tr.on_send_accepted();
+  ASSERT_TRUE(tr.end_probe());
+  tr.on_send_complete(true);  // the probe's own callback
+  ASSERT_TRUE(tr.status() == ProbeStatus::Acked);
+}
+
+TEST_CASE(espnow_probe_tracker_without_guard_lost_callback_blocks_probe) {
+  // Documents why the guard exists: the probe's callback is miscounted as the lost one.
+  thermostat::EspNowProbeTracker tr;
+  tr.on_send_accepted();
+  tr.begin_probe();
+  tr.on_send_accepted();
+  ASSERT_TRUE(tr.end_probe());
+  tr.on_send_complete(true);
+  ASSERT_TRUE(tr.status() == ProbeStatus::Pending);
+}
+
+TEST_CASE(espnow_probe_tracker_no_resync_while_probe_outstanding) {
+  thermostat::EspNowProbeTracker tr;
+  tr.begin_probe();
+  tr.on_send_accepted();
+  ASSERT_TRUE(tr.end_probe());
+  for (uint32_t t = 0; t <= 3000; t += 100) tr.check_lost_callbacks(t);
+  ASSERT_TRUE(tr.status() == ProbeStatus::Pending);  // probe kept, not resynced away
+  tr.on_send_complete(true);
+  ASSERT_TRUE(tr.status() == ProbeStatus::Acked);
+}
+
+TEST_CASE(espnow_probe_tracker_lag_clock_restarts_when_caught_up) {
+  thermostat::EspNowProbeTracker tr;
+  tr.on_send_accepted();
+  tr.check_lost_callbacks(0);
+  tr.on_send_complete(true);       // arrived: caught up
+  tr.check_lost_callbacks(500);
+  tr.on_send_accepted();           // a new send, behind again from 900 ms
+  tr.check_lost_callbacks(900);
+  tr.check_lost_callbacks(1500);   // 600 ms behind (1.5 s since the first lag): no resync
+  tr.begin_probe();
+  tr.on_send_accepted();
+  ASSERT_TRUE(tr.end_probe());
+  // The late callback is still attributed to its own send, so it cannot ack the probe
+  // (after a wrong resync it would).
+  tr.on_send_complete(true);
+  tr.on_send_complete(false);      // the probe's own callback
+  ASSERT_TRUE(tr.status() == ProbeStatus::Failed);
+}
+
+TEST_CASE(espnow_ctrl_lost_callback_guard_runs_via_transport) {
+  EspNowControllerTransport t;
+  ASSERT_TRUE(t.begin(controller_config(1)));
+  t.publish_time(1800000000UL);  // callback lost
+  t.check_lost_send_callbacks(1000);
+  t.check_lost_send_callbacks(2001);
+  ASSERT_TRUE(t.send_probe());
+  ctrl_cb(kOk);
+  ASSERT_TRUE(t.probe_status() == ProbeStatus::Acked);
+}
+
 #endif

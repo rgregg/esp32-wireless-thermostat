@@ -12,8 +12,8 @@ namespace thermostat {
 
 // Runs EspNowChannelPolicy against the real radio. Shared by the controller and the
 // display; Transport is EspNowControllerTransport or EspNowThermostatTransport and must
-// provide peer_heard(), last_peer_rx_ms(), send_probe() (returns bool), probe_status()
-// and clear_probe().
+// provide peer_heard(), last_peer_rx_ms(), send_probe() (returns bool), probe_status(),
+// clear_probe() and check_lost_send_callbacks(now_ms).
 //
 // Call tick() from the main loop task only (it sends frames and sets the channel).
 //
@@ -45,6 +45,7 @@ class EspNowLinkManager {
   // tracks the AP's channel and the display's MQTT-down suspend clock.
   void tick(uint32_t now_ms, bool mqtt_up, bool enabled, bool wifi_joining) {
     if (transport_ == nullptr) return;
+    transport_->check_lost_send_callbacks(now_ms);
 
     ChannelInputs in;
     in.now_ms = now_ms;

@@ -64,7 +64,9 @@ probes or enforces while associated.
 - A probe is a unicast heartbeat sent on the candidate channel. It counts as acknowledged
   only if the ESP-NOW send callback reports success within 200 ms. Results are attributed
   by send sequence (`include/transport/espnow_probe_tracker.h`), so a late callback for an
-  earlier frame never acknowledges a later probe.
+  earlier frame never acknowledges a later probe. If a send callback is lost (no probe
+  outstanding and completions behind issued sends for more than 1 s), the tracker resyncs
+  so later probes are still attributed correctly.
 - All ESP-NOW sends happen on the main loop task, which the probe attribution relies on.
   Command-triggered telemetry on the controller and the display's controller ACK are
   deferred to the loop tick rather than sent from the receive callback.
