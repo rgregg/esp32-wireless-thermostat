@@ -62,14 +62,22 @@ ChannelAction EspNowChannelPolicy::poll(const ChannelInputs &in) {
     resumed_ = false;
   }
 
-  // The MQTT-down clock only runs while associated, so it restarts on every
-  // (re)association and a suspend needs a full window of association with MQTT down.
-  if (in.mqtt_up || !in.wifi_associated) {
+  // The MQTT-down clock starts at the first associated poll with MQTT down and stops when
+  // MQTT comes up. Short gaps in association keep it running: with the AP up and DHCP
+  // down, each join is dropped after 20 s associated without IP and retried seconds
+  // later, and those failed joins must add up to a suspend. A gap of at least
+  // mqtt_down_reset_gap_ms is a real WiFi outage, so the next association restarts the
+  // clock and gets a full window for MQTT.
+  if (in.mqtt_up) {
     mqtt_down_ = false;
-  } else if (!mqtt_down_) {
-    mqtt_down_ = true;
-    mqtt_down_since_ms_ = now;
+  } else if (in.wifi_associated) {
+    if (!mqtt_down_ ||
+        static_cast<uint32_t>(now - last_associated_ms_) >= config_.mqtt_down_reset_gap_ms) {
+      mqtt_down_ = true;
+      mqtt_down_since_ms_ = now;
+    }
   }
+  if (in.wifi_associated) last_associated_ms_ = now;
 
   if (wifi_suspended_ &&
       static_cast<uint32_t>(now - suspended_at_ms_) >= config_.wifi_resume_interval_ms) {

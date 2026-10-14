@@ -90,8 +90,8 @@ production devices for these scenarios.
       channel; display commands still move the relays.
 - [ ] **F4 Display alone loses WiFi.** Mirror of F3.
 - [ ] **F5 Broker down, different AP channels.** Lock the two devices to APs on different
-      2.4 GHz channels in UniFi. Stop the test broker. The display suspends WiFi only
-      after 60 s continuously associated with MQTT down, so within about 2 minutes its
+      2.4 GHz channels in UniFi. Stop the test broker. The display suspends WiFi once it
+      is associated and MQTT has been down for 60 s, so within about 2 minutes its
       `/status` shows `wifi_suspended` true (it also logs the suspend), it links over
       ESP-NOW, and display commands move the relays. Start the
       broker: within 6 minutes the display is back on WiFi and MQTT.
@@ -115,8 +115,10 @@ production devices for these scenarios.
 
 Bench watch-items:
 - arduino-esp32 makes one automatic reconnect after the first disconnect since boot, and
-  a tracked join is capped at 10 s (the link manager pauses during it). Channel moves
-  during a join show as `set_channel` failure logs.
+  a tracked join is capped at 10 s until it associates (the link manager pauses during
+  it), then 20 s associated without an IP (`[wifi] associated without IP for 20 s` is
+  logged when one is dropped). Channel moves during a join show as `set_channel` failure
+  logs.
 - Classic board in-place recovery (F8) must really restore WiFi, not only ESP-NOW.
 - While the display is suspended and linked over ESP-NOW, the 5-minute ResumeWifi cycle
   costs a link gap each cycle when the AP channel differs from the controller's.

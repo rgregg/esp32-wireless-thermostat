@@ -49,7 +49,10 @@ Both adapters include native-build-safe no-op behavior so host tests still compi
 
 ESP-NOW only works when both radios are on the same channel. While a device is associated
 to WiFi its channel is the access point's, so the configured `espnow_channel` applies
-only when neither device is on WiFi.
+only when neither device is on WiFi. "Associated" here means associated with the AP at
+L2 (`esp_wifi_sta_get_ap_info()` succeeds), with or without an IP: an STA waiting for
+DHCP is already on the AP's channel, so the link manager never changes the channel,
+probes or enforces while associated.
 
 - A device that is **not** associated follows its peer. The peer counts as linked if an
   authorized frame arrived within 30 s. When it goes quiet, the device runs a search
@@ -65,22 +68,32 @@ only when neither device is on WiFi.
 - All ESP-NOW sends happen on the main loop task, which the probe attribution relies on.
   Command-triggered telemetry on the controller and the display's controller ACK are
   deferred to the loop tick rather than sent from the receive callback.
-- The link manager pauses while a tracked WiFi join is running (`join_in_progress`, at
-  most 10 s per attempt): no channel change, probe or enforcement, and any outstanding
-  probe is dropped. When a join ends unassociated, the radio is put back on the wanted
-  channel (checked once a second). Tracking: `include/wifi_join_tracker.h`.
+- The link manager pauses while a tracked WiFi join is scanning (`join_in_progress`,
+  not yet associated): no channel change, probe or enforcement, and any outstanding probe
+  is dropped. When a join ends unassociated, the radio is put back on the wanted channel
+  (checked once a second). Tracking: `include/wifi_join_tracker.h`.
+- A join is in progress from its start until GOT_IP, a disconnect reporting its failure,
+  10 s without associating, or 20 s associated without an IP. Associated without an IP
+  (AP up, DHCP or gateway down) is a failed join: after 20 s the STA is disconnected and
+  the normal retry interval applies. No connect is issued while the STA is associated
+  inside that window (arduino-esp32's `STA.connect()` would first tear the association
+  down, blocking up to 1 s, and re-associate).
 - When neither device is on WiFi they meet on `espnow_channel`.
-- The display leaves WiFi only after 60 s of continuous association with MQTT down and
-  the controller not linked. The MQTT-down clock only runs while associated and restarts
-  on every (re)association, so a suspend needs a full 60 s window on one association. It then keeps the STA disconnected and retries WiFi every
-  5 minutes, giving each retry a 60 s window before it may suspend again.
+- The display leaves WiFi once it is associated, MQTT has been down for 60 s and the
+  controller is not linked. The MQTT-down clock starts on the first association with MQTT
+  down and keeps running across short gaps in association, so the 20 s failed joins of a
+  DHCP outage add up to a suspend. A gap of 2 minutes or more off WiFi restarts it, so a
+  fresh association after a real WiFi outage gets a full 60 s for MQTT. While suspended
+  the display keeps the STA disconnected and retries WiFi every 5 minutes, giving each
+  retry a 60 s window before it may suspend again.
 - WiFi rejoin attempts slow from every 5 s to every 60 s while ESP-NOW carries the link.
 - Unicast peer required: with a broadcast or empty peer MAC the link is not trusted for
   reboot decisions and WiFi is never suspended for it.
 - The WiFi watchdog (`include/wifi_watchdog.h`) never reboots. After 2 minutes of
   gateway unreachability it forces a reconnect through a hook that points at
   `WifiProvisioningManager::request_reconnect()`, so the join is tracked and ESP-NOW
-  leaves the channel alone.
+  leaves the channel alone. It only acts while the STA has an IP, so it never re-bounces
+  an STA that is associated without one.
 
 Logic: `include/transport/espnow_channel_policy.h` (unit-tested). Radio glue:
 `include/transport/espnow_link_manager.h`.

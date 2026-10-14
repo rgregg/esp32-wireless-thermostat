@@ -357,4 +357,45 @@ TEST_CASE(channel_display_suspend_clock_restarts_on_association) {
   ASSERT_TRUE(s.now - associated_at >= 60000u && s.now - associated_at < 61000u);
 }
 
+
+TEST_CASE(channel_display_suspends_across_associated_without_ip_cycles) {
+  // AP up, DHCP down: each join associates for 20 s, is dropped as a failed join and
+  // retried 7 s later. The MQTT-down clock must run across those short gaps.
+  Sim s(cfg(LinkRole::Display, 5000));
+  s.in.mqtt_up = false;
+  s.in.wifi_channel = 1;
+  const uint32_t start = s.now;
+  bool suspended = false;
+  while (!suspended && s.now - start < 200000u) {
+    s.in.wifi_associated = true;
+    for (int i = 0; i < 2000 && !suspended; ++i) {  // 20 s associated
+      suspended = s.step().type == ChannelActionType::SuspendWifi;
+    }
+    s.in.wifi_associated = false;
+    if (!suspended) s.run(7000);
+  }
+  ASSERT_TRUE(suspended);
+  ASSERT_TRUE(s.now - start >= 60000u && s.now - start < 90000u);
+}
+
+TEST_CASE(channel_display_suspend_clock_restarts_after_long_wifi_gap) {
+  // Off WiFi longer than mqtt_down_reset_gap_ms (a real WiFi outage, not a join retry):
+  // the next association gets a full 60 s for MQTT again.
+  Sim s(cfg(LinkRole::Display, 5000));
+  s.in.mqtt_up = false;
+  s.in.wifi_channel = 1;
+  s.in.wifi_associated = true;
+  s.run(50000);
+  s.in.wifi_associated = false;
+  s.run(130000);
+  s.in.wifi_associated = true;
+  const uint32_t associated_at = s.now;
+  bool suspended = false;
+  while (!suspended && s.now - associated_at < 70000u) {
+    suspended = s.step().type == ChannelActionType::SuspendWifi;
+  }
+  ASSERT_TRUE(suspended);
+  ASSERT_TRUE(s.now - associated_at >= 60000u && s.now - associated_at < 61000u);
+}
+
 #endif

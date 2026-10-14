@@ -10,7 +10,9 @@
 // The forced reconnect goes through the hook set by wifi_watchdog_set_reconnect_hook()
 // (the firmware points it at WifiProvisioningManager::request_reconnect(), so the join is
 // tracked and ESP-NOW leaves the channel alone). Without a hook the forced reconnect does
-// nothing but log once: the watchdog never starts an untracked join itself.
+// nothing but log once: the watchdog never starts an untracked join itself. The watchdog
+// only runs while WiFi.status() == WL_CONNECTED (the STA has an IP), so it never acts on
+// an STA that is associated without an IP; WifiJoinTracker's 20 s window handles that.
 
 #include <WiFi.h>
 #include <atomic>

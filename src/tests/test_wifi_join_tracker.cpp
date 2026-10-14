@@ -131,4 +131,79 @@ TEST_CASE(wifi_join_try_begin_refuses_while_join_in_progress) {
   ASSERT_TRUE(starts == 2);
 }
 
+// --- Associated at L2 but no IP (AP up, DHCP/gateway down) ---
+
+TEST_CASE(wifi_join_associated_without_ip_ends_the_join_at_20s) {
+  WifiJoinTracker j;
+  ASSERT_TRUE(j.try_begin(1000, start_ok) == WifiJoinTracker::Start::Started);
+  // Associates 3 s in; the 10 s cap no longer applies, the 20 s no-IP window does.
+  ASSERT_TRUE(j.on_no_ip(4000, true) == WifiJoinTracker::NoIp::Waiting);
+  ASSERT_TRUE(j.in_progress(11000));
+  ASSERT_TRUE(j.on_no_ip(23999, true) == WifiJoinTracker::NoIp::Waiting);
+  ASSERT_TRUE(j.in_progress(23999));
+  ASSERT_TRUE(!j.in_progress(24000));
+  ASSERT_TRUE(j.on_no_ip(24000, true) == WifiJoinTracker::NoIp::TimedOut);
+  ASSERT_TRUE(!j.in_progress(24001));
+  // The caller's disconnect is a local leave; it must not start or revive a join.
+  j.on_disconnected(kAssocLeave, 24050);
+  ASSERT_TRUE(j.on_no_ip(24100, false) == WifiJoinTracker::NoIp::NotAssociated);
+  ASSERT_TRUE(!j.in_progress(24100));
+}
+
+TEST_CASE(wifi_join_no_rebegin_while_associated_inside_the_window) {
+  WifiJoinTracker j;
+  int starts = 0;
+  auto start = [&starts]() {
+    ++starts;
+    return true;
+  };
+  ASSERT_TRUE(j.try_begin(1000, start) == WifiJoinTracker::Start::Started);
+  ASSERT_TRUE(j.on_no_ip(2000, true) == WifiJoinTracker::NoIp::Waiting);
+  for (uint32_t t = 2000; t < 22000; t += 500) {
+    ASSERT_TRUE(j.on_no_ip(t, true) == WifiJoinTracker::NoIp::Waiting);
+    ASSERT_TRUE(j.try_begin(t, start) == WifiJoinTracker::Start::Busy);
+  }
+  ASSERT_EQ(starts, 1);
+  ASSERT_TRUE(j.on_no_ip(22000, true) == WifiJoinTracker::NoIp::TimedOut);
+  // Disconnected: the next attempt may start (after the caller's retry interval).
+  ASSERT_TRUE(j.on_no_ip(27000, false) == WifiJoinTracker::NoIp::NotAssociated);
+  ASSERT_TRUE(j.try_begin(27000, start) == WifiJoinTracker::Start::Started);
+  ASSERT_EQ(starts, 2);
+}
+
+TEST_CASE(wifi_join_association_outside_a_join_still_gets_the_window) {
+  // e.g. the IP lease is lost while the STA stays associated, or a join that hit its
+  // 10 s cap associates late: no connect may be issued until the window expires.
+  WifiJoinTracker j;
+  ASSERT_TRUE(j.on_no_ip(50000, true) == WifiJoinTracker::NoIp::Waiting);
+  ASSERT_TRUE(j.try_begin(55000, start_ok) == WifiJoinTracker::Start::Busy);
+  ASSERT_TRUE(j.on_no_ip(70000, true) == WifiJoinTracker::NoIp::TimedOut);
+}
+
+TEST_CASE(wifi_join_got_ip_ends_associated_join) {
+  WifiJoinTracker j;
+  ASSERT_TRUE(j.try_begin(1000, start_ok) == WifiJoinTracker::Start::Started);
+  ASSERT_TRUE(j.on_no_ip(2000, true) == WifiJoinTracker::NoIp::Waiting);
+  j.on_got_ip();
+  ASSERT_TRUE(!j.in_progress(2001));
+  // Losing the IP later while still associated starts a fresh window.
+  ASSERT_TRUE(j.on_no_ip(600000, true) == WifiJoinTracker::NoIp::Waiting);
+  ASSERT_TRUE(j.on_no_ip(619999, true) == WifiJoinTracker::NoIp::Waiting);
+  ASSERT_TRUE(j.on_no_ip(620000, true) == WifiJoinTracker::NoIp::TimedOut);
+}
+
+TEST_CASE(wifi_join_disconnect_clears_association) {
+  WifiJoinTracker j;
+  use_framework_retry(j);
+  ASSERT_TRUE(j.try_begin(1000, start_ok) == WifiJoinTracker::Start::Started);
+  ASSERT_TRUE(j.on_no_ip(2000, true) == WifiJoinTracker::NoIp::Waiting);
+  j.on_disconnected(kBeaconTimeout, 5000);  // AP lost: the join failed
+  ASSERT_TRUE(!j.in_progress(5001));
+  ASSERT_TRUE(j.try_begin(10000, start_ok) == WifiJoinTracker::Start::Started);
+  // A new association gets a full window of its own.
+  ASSERT_TRUE(j.on_no_ip(12000, true) == WifiJoinTracker::NoIp::Waiting);
+  ASSERT_TRUE(j.on_no_ip(31999, true) == WifiJoinTracker::NoIp::Waiting);
+  ASSERT_TRUE(j.on_no_ip(32000, true) == WifiJoinTracker::NoIp::TimedOut);
+}
+
 #endif

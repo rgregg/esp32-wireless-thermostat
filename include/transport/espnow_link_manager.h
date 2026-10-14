@@ -21,6 +21,11 @@ namespace thermostat {
 // (ESP-IDF forbids it and it can abort the join): tick() is told so via wifi_joining,
 // and then only tracks the link state. When the join ends unassociated, the once-a-second
 // enforcement below puts the radio back on the wanted channel.
+//
+// "Associated" means associated with the AP at L2 (esp_wifi_sta_get_ap_info() succeeds),
+// not "has an IP": an STA that associated but has no IP yet (or never gets one, e.g. DHCP
+// down) is still on the AP's channel, and the AP owns it. While associated the policy
+// sees the AP's channel and issues no SetChannel or Probe, and no enforcement runs.
 template <typename Transport>
 class EspNowLinkManager {
  public:
@@ -33,23 +38,26 @@ class EspNowLinkManager {
   // link state is still tracked, but the channel is left alone.
   // wifi_joining: a WiFi join started by the WiFi manager is in progress
   // (WifiProvisioningManager::join_in_progress(); false on a board that never joins).
-  // While true, any outstanding probe is dropped and the policy is not polled, so no
-  // channel change, probe or enforcement happens and no policy timeout runs down against
-  // a radio that cannot follow it.
+  // While true and not yet associated, any outstanding probe is dropped and the policy
+  // is not polled, so no channel change, probe or enforcement happens and no policy
+  // timeout runs down against a radio that cannot follow it. Once the join has
+  // associated (waiting for an IP) the policy is polled again: associated, it only
+  // tracks the AP's channel and the display's MQTT-down suspend clock.
   void tick(uint32_t now_ms, bool mqtt_up, bool enabled, bool wifi_joining) {
     if (transport_ == nullptr) return;
 
     ChannelInputs in;
     in.now_ms = now_ms;
-    in.wifi_associated = WiFi.status() == WL_CONNECTED;
-    in.wifi_channel = in.wifi_associated ? static_cast<uint8_t>(WiFi.channel()) : 0;
+    wifi_ap_record_t ap = {};
+    in.wifi_associated = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    in.wifi_channel = in.wifi_associated ? ap.primary : 0;
     in.mqtt_up = mqtt_up;
     in.peer_heard = transport_->peer_heard();
     in.last_peer_rx_ms = transport_->last_peer_rx_ms();
     linked_ = policy_.linked(in);
     if (!enabled) return;
 
-    if (wifi_joining) {
+    if (wifi_joining && !in.wifi_associated) {
       transport_->clear_probe();
       return;
     }

@@ -132,7 +132,9 @@ void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
   }
 
   if (m_suspended) {
-    if (WiFi.status() == WL_CONNECTED) {
+    // L2 association, not WL_CONNECTED (has IP): an STA associated without an IP still
+    // holds the radio on the AP's channel.
+    if (WiFi.STA.connected()) {
       WiFi.disconnect();  // keeps the radio on (ESP-NOW still works)
     }
     return;
@@ -143,6 +145,22 @@ void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
   // If we have credentials, keep trying to connect
   if (has_credentials()) {
     ensure_wifi_radio();
+    // No IP. Associated at L2 without one (AP up, DHCP/gateway down) is a failed join
+    // after 20 s; until then the STA is left alone, because STA.connect() on an
+    // associated STA first tears the association down (blocking up to 1 s) and
+    // re-associates.
+    switch (m_join.on_no_ip(now_ms, WiFi.STA.connected())) {
+      case WifiJoinTracker::NoIp::Waiting:
+        return;
+      case WifiJoinTracker::NoIp::TimedOut:
+        Serial.println("[wifi] associated without IP for 20 s; dropping the join");
+        WiFi.disconnect();  // a local leave: the tracker ignores it
+        m_last_attempt_ms = now_ms;  // the normal retry interval applies
+        return;
+      case WifiJoinTracker::NoIp::NotAssociated:
+      default:
+        break;
+    }
     if ((now_ms - m_last_attempt_ms) < m_config.retry_interval_ms) return;
     // One attempt at a time: while a join runs (10 s cap as backstop) nothing is issued.
     // WiFi.begin() is STA.begin() + STA.connect(), but its wl_status_t result cannot say
