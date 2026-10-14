@@ -32,7 +32,9 @@ void WifiProvisioningManager::ensure_wifi_radio() {
   if (m_config.hostname && m_config.hostname[0]) {
     WiFi.setHostname(m_config.hostname);
   }
-  WiFi.setAutoReconnect(true);
+  // This manager owns every join attempt. With driver auto-reconnect on, the radio
+  // would scan on its own and pull an ESP-NOW link off its channel.
+  WiFi.setAutoReconnect(false);
 }
 
 void WifiProvisioningManager::start_provisioning() {
@@ -83,6 +85,14 @@ void WifiProvisioningManager::clear_credentials() {
   }
 }
 
+void WifiProvisioningManager::set_suspended(bool suspended) {
+  if (m_suspended == suspended) return;
+  m_suspended = suspended;
+  if (!suspended) {
+    m_last_attempt_ms = 0;  // retry on the next ensure_connected()
+  }
+}
+
 void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
   if (m_reconnect_required) {
     m_reconnect_required = false;
@@ -101,6 +111,13 @@ void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
   // While the SoftAP portal is up, just service it — don't fight it with WiFi.begin().
   if (m_provisioning_started) {
     softap_provisioning_loop();
+    return;
+  }
+
+  if (m_suspended) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.disconnect();  // keeps the radio on (ESP-NOW still works)
+    }
     return;
   }
 

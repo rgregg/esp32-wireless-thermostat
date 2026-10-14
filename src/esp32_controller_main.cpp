@@ -2852,7 +2852,6 @@ void setup() {
   }
   Serial.printf("Reset reason: %s | last reboot cause: %s\n",
                 g_ctrl_reset_reason.c_str(), g_ctrl_reboot_reason.c_str());
-  wifi_watchdog_set_reboot_hook(&ctrl_persist_reboot_reason);
 
   // Make the Task Watchdog config deterministic regardless of the Arduino
   // default: 15s timeout, watch both cores' idle tasks, panic on timeout. Every

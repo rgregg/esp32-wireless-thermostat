@@ -68,6 +68,14 @@ public:
   // Mark that a reconnect is needed (e.g. after credentials changed).
   void request_reconnect() { m_reconnect_required = true; }
 
+  // Change how often ensure_connected() retries WiFi.begin() while disconnected.
+  void set_retry_interval_ms(uint32_t ms) { m_config.retry_interval_ms = ms; }
+
+  // While suspended, ensure_connected() keeps the STA disconnected and makes no join
+  // attempts, leaving the radio free for ESP-NOW. Clearing it retries immediately.
+  void set_suspended(bool suspended);
+  bool suspended() const { return m_suspended; }
+
   bool provisioning_active() const { return m_provisioning_started; }
 
 private:
@@ -78,6 +86,7 @@ private:
   bool m_reconnect_required = false;
   bool m_provisioning_started = false;
   bool m_wifi_radio_started = false;
+  bool m_suspended = false;
 
   void ensure_wifi_radio();
 };
