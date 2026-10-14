@@ -51,6 +51,41 @@ TEST_CASE(controller_app_auto_hvac_from_indoor_temp) {
   ASSERT_TRUE(tx.count > 0);
 }
 
+TEST_CASE(controller_app_command_telemetry_deferred_to_next_tick) {
+  // on_command_word may run on the ESP-NOW receive task; its telemetry must be sent by
+  // the next tick() on the loop task, exactly once.
+  FakeControllerTransport tx;
+  thermostat::ControllerApp app(tx);
+
+  // Settle in Heat with the room above setpoint, so later ticks change nothing.
+  CommandWord cmd;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.fan = FanMode::Automatic;
+  cmd.setpoint_decic = 200;
+  cmd.seq = 1;
+  ASSERT_TRUE(app.on_command_word(espnow_cmd::encode(cmd)).accepted);
+  app.on_heartbeat(1000);
+  app.on_indoor_temperature_c(25.0f);
+  app.tick(1000);
+  app.on_heartbeat(2000);
+  app.tick(2000);
+  const int baseline = tx.count;
+
+  cmd.setpoint_decic = 215;
+  cmd.seq = 2;
+  ASSERT_TRUE(app.on_command_word(espnow_cmd::encode(cmd)).accepted);
+  ASSERT_EQ(tx.count, baseline);  // nothing sent from the command path
+
+  app.on_heartbeat(3000);
+  app.tick(3000);
+  ASSERT_EQ(tx.count, baseline + 1);
+  ASSERT_TRUE(tx.last.setpoint_c > 21.4f && tx.last.setpoint_c < 21.6f);
+
+  app.on_heartbeat(4000);
+  app.tick(4000);
+  ASSERT_EQ(tx.count, baseline + 1);  // no repeat once sent
+}
+
 TEST_CASE(controller_app_uses_fallback_indoor_temperature_without_remote_updates) {
   FakeControllerTransport tx;
   thermostat::ControllerConfig cfg;
