@@ -79,6 +79,9 @@ probes or enforces while associated.
   inside that window (arduino-esp32's `STA.connect()` would first tear the association
   down, blocking up to 1 s, and re-associate).
 - When neither device is on WiFi they meet on `espnow_channel`.
+- While the SoftAP provisioning portal is up (no WiFi credentials), the link manager
+  leaves the channel to the portal: it tracks link state but never changes channel or
+  probes.
 - The display leaves WiFi once it is associated, MQTT has been down for 60 s and the
   controller is not linked. The MQTT-down clock starts on the first association with MQTT
   down and keeps running across short gaps in association, so the 20 s failed joins of a

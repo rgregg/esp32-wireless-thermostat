@@ -3135,7 +3135,9 @@ void thermostat_firmware_loop() {
   // Runs on this (loop) task, like every ESP-NOW send on the display, which the link
   // manager's probe attribution relies on.
   if (g_runtime != nullptr) {
-    g_link.tick(now, g_mqtt.connected(), espnow_link_usable,
+    // While the SoftAP provisioning portal is up the radio's channel is the portal's:
+    // the link manager only tracks link state (no channel change or probe).
+    g_link.tick(now, g_mqtt.connected(), espnow_link_usable && !g_wifi.provisioning_active(),
                 !g_cfg_wifi_disabled && g_wifi.join_in_progress());
     // Polled every pass (not only when publishing over MQTT) so failures are stamped
     // when they happen.

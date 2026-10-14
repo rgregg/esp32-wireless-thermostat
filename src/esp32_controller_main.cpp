@@ -3253,8 +3253,11 @@ void loop() {
 #else
     const bool ctrl_wifi_joining = g_ctrl_wifi.join_in_progress();
 #endif
+    // While the SoftAP provisioning portal is up the radio's channel is the portal's:
+    // the link manager only tracks link state (no channel change or probe).
     g_ctrl_link.tick(now, g_ctrl_mqtt_up.load(),
-                     g_cfg_ctrl_espnow_enabled && g_controller->transport().has_unicast_peer(),
+                     g_cfg_ctrl_espnow_enabled && g_controller->transport().has_unicast_peer() &&
+                         !g_ctrl_wifi.provisioning_active(),
                      ctrl_wifi_joining);
     // Polled every pass (not only when publishing over MQTT) so failures are stamped
     // when they happen.
