@@ -29,6 +29,7 @@ namespace {
 std::atomic<int> g_status{-1};        // -1 pending, 0 fail, 1 success
 std::atomic<uint32_t> g_cb_us{0};
 uint8_t g_peer[6] = {0};
+bool g_ready = false;  // setup() completed; loop() does nothing otherwise
 
 bool parse_mac(const char *s, uint8_t out[6]) {
   unsigned v[6];
@@ -77,9 +78,18 @@ void setup() {
   Serial.printf("[spike] my_mac=%s peer=%s encrypt=%d add_peer=%d\n",
                 WiFi.macAddress().c_str(), SPIKE_PEER_MAC, peer.encrypt ? 1 : 0,
                 static_cast<int>(add_err));
+  if (add_err != ESP_OK) {
+    Serial.println("[spike] esp_now_add_peer failed");
+    return;
+  }
+  g_ready = true;
 }
 
 void loop() {
+  if (!g_ready) {
+    delay(1000);  // setup() failed (see its log); never send
+    return;
+  }
   static const uint8_t kChannels[] = {1, 6, 11};
   for (uint8_t ch : kChannels) {
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
