@@ -10,6 +10,8 @@
 // Host builds treat every esp_now_send as accepted, so each send issued by a transport
 // takes the next sequence number and the tests deliver the matching send callbacks by
 // calling the static callback entry point directly, in send order (as ESP-NOW does).
+// Each transport is a local of its test; its destructor releases the static callback
+// instance, so no later test can reach a dangling pointer through on_send_static().
 
 using thermostat::EspNowControllerConfig;
 using thermostat::EspNowControllerTransport;
@@ -166,6 +168,29 @@ TEST_CASE(espnow_disp_probe_needs_unicast_peer) {
   ASSERT_TRUE(zero.begin(EspNowThermostatConfig()));
   ASSERT_TRUE(!zero.has_unicast_peer());
   ASSERT_TRUE(!zero.send_probe());
+}
+
+TEST_CASE(espnow_ctrl_stray_callback_is_clamped_at_probe_start) {
+  EspNowControllerTransport t;
+  ASSERT_TRUE(t.begin(controller_config(1)));
+  ctrl_cb(kOk);  // stray callback with no send outstanding
+  ASSERT_TRUE(t.send_probe());
+  ASSERT_TRUE(t.probe_status() == ProbeStatus::Pending);  // not completed by the stray
+  ctrl_cb(kOk);
+  ASSERT_TRUE(t.probe_status() == ProbeStatus::Acked);
+}
+
+TEST_CASE(espnow_disp_stray_callback_is_clamped_at_probe_start) {
+  EspNowThermostatTransport t;
+  EspNowThermostatConfig cfg;
+  memcpy(cfg.peer_mac, kPeerA, 6);
+  ASSERT_TRUE(t.begin(cfg));
+  disp_cb(kOk);
+  disp_cb(kFail);
+  ASSERT_TRUE(t.send_probe());
+  ASSERT_TRUE(t.probe_status() == ProbeStatus::Pending);
+  disp_cb(kOk);
+  ASSERT_TRUE(t.probe_status() == ProbeStatus::Acked);
 }
 
 #endif

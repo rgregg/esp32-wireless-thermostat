@@ -16,6 +16,11 @@ namespace thermostat {
 // and clear_probe().
 //
 // Call tick() from the main loop task only (it sends frames and sets the channel).
+//
+// The radio channel is never touched while a WiFi join is scanning or associating
+// (ESP-IDF forbids it and it can abort the join): tick() is told so via wifi_joining,
+// and then only tracks the link state. When the join ends unassociated, the once-a-second
+// enforcement below puts the radio back on the wanted channel.
 template <typename Transport>
 class EspNowLinkManager {
  public:
@@ -26,7 +31,12 @@ class EspNowLinkManager {
 
   // enabled: ESP-NOW is initialised and has a unicast peer to probe. When false the
   // link state is still tracked, but the channel is left alone.
-  void tick(uint32_t now_ms, bool mqtt_up, bool enabled) {
+  // wifi_joining: a WiFi join started by the WiFi manager is in progress
+  // (WifiProvisioningManager::join_in_progress(); false on a board that never joins).
+  // While true, any outstanding probe is dropped and the policy is not polled, so no
+  // channel change, probe or enforcement happens and no policy timeout runs down against
+  // a radio that cannot follow it.
+  void tick(uint32_t now_ms, bool mqtt_up, bool enabled, bool wifi_joining) {
     if (transport_ == nullptr) return;
 
     ChannelInputs in;
@@ -39,6 +49,11 @@ class EspNowLinkManager {
     linked_ = policy_.linked(in);
     if (!enabled) return;
 
+    if (wifi_joining) {
+      transport_->clear_probe();
+      return;
+    }
+
     // Report a finished probe. The transport attributes send callbacks to the probe's
     // own frames, so a late ack for an earlier frame can never count.
     const ProbeStatus status = transport_->probe_status();
@@ -49,17 +64,30 @@ class EspNowLinkManager {
 
     const ChannelAction action = policy_.poll(in);
     switch (action.type) {
-      case ChannelActionType::SetChannel:
+      case ChannelActionType::SetChannel: {
         transport_->clear_probe();
-        esp_wifi_set_channel(action.channel, WIFI_SECOND_CHAN_NONE);
+        const esp_err_t err = esp_wifi_set_channel(action.channel, WIFI_SECOND_CHAN_NONE);
+        if (err != ESP_OK) {
+          // The next Probe sees the radio is not on its channel and reports a nack; the
+          // enforcement below keeps retrying while WiFi is not associated.
+          log_w("[espnow-link] set_channel(%u) failed: %s", action.channel,
+                esp_err_to_name(err));
+        }
         break;
-      case ChannelActionType::Probe:
+      }
+      case ChannelActionType::Probe: {
         probe_channel_ = action.channel;
-        if (!transport_->send_probe()) {
+        uint8_t primary = 0;
+        wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+        const bool on_channel = esp_wifi_get_channel(&primary, &second) == ESP_OK &&
+                                primary == probe_channel_;
+        // A probe sent from the wrong channel would ack (or fail) for the wrong one.
+        if (!on_channel || !transport_->send_probe()) {
           policy_.on_probe_result(probe_channel_, false);
           transport_->clear_probe();
         }
         break;
+      }
       case ChannelActionType::SuspendWifi:
       case ChannelActionType::ResumeWifi:
       case ChannelActionType::None:

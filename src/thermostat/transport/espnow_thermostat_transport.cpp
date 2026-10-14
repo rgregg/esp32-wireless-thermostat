@@ -28,6 +28,12 @@ constexpr int kSendSuccess = 0;  // ESP_NOW_SEND_SUCCESS
 
 EspNowThermostatTransport *EspNowThermostatTransport::instance_ = nullptr;
 
+EspNowThermostatTransport::~EspNowThermostatTransport() {
+  if (instance_ == this) {
+    instance_ = nullptr;
+  }
+}
+
 bool EspNowThermostatTransport::begin(const EspNowThermostatConfig &config) {
   config_ = config;
   last_heartbeat_sent_ms_ = 0;

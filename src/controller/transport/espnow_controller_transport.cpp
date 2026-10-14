@@ -28,6 +28,12 @@ constexpr int kSendSuccess = 0;  // ESP_NOW_SEND_SUCCESS
 
 EspNowControllerTransport *EspNowControllerTransport::instance_ = nullptr;
 
+EspNowControllerTransport::~EspNowControllerTransport() {
+  if (instance_ == this) {
+    instance_ = nullptr;
+  }
+}
+
 bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   config_ = config;
   last_heartbeat_sent_ms_ = 0;

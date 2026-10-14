@@ -54,11 +54,23 @@ void WifiProvisioningManager::start_provisioning() {
   m_provisioning_started = true;
 }
 
+static_assert(WifiJoinTracker::kReasonAssocLeave == WIFI_REASON_ASSOC_LEAVE,
+              "WifiJoinTracker must ignore locally initiated leaves");
+
 void WifiProvisioningManager::on_wifi_connected() {
+  m_join.on_got_ip();
   if (softap_provisioning_is_active()) {
     softap_provisioning_stop();
   }
   m_provisioning_started = false;
+}
+
+void WifiProvisioningManager::on_wifi_disconnected(uint8_t reason) {
+  m_join.on_disconnected(reason);
+}
+
+bool WifiProvisioningManager::join_in_progress() const {
+  return !m_suspended && m_join.in_progress(millis());
 }
 
 bool WifiProvisioningManager::reboot_pending() const {
@@ -88,7 +100,11 @@ void WifiProvisioningManager::clear_credentials() {
 void WifiProvisioningManager::set_suspended(bool suspended) {
   if (m_suspended == suspended) return;
   m_suspended = suspended;
-  if (!suspended) {
+  if (suspended) {
+    // Cancel any in-flight join as well as an established association.
+    m_join.cancel();
+    WiFi.disconnect();  // keeps the radio on (ESP-NOW still works)
+  } else {
     m_last_attempt_ms = 0;  // retry on the next ensure_connected()
   }
 }
@@ -104,6 +120,7 @@ void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
     m_provisioning_started = false;
     m_wifi_radio_started = false;
     ensure_wifi_radio();
+    m_join.cancel();
     WiFi.disconnect();
     m_last_attempt_ms = 0;
   }
@@ -128,6 +145,7 @@ void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
     ensure_wifi_radio();
     if ((now_ms - m_last_attempt_ms) < m_config.retry_interval_ms) return;
     m_last_attempt_ms = now_ms;
+    m_join.on_begin(now_ms);  // before begin(): its events may arrive at once
     WiFi.begin(m_ssid.c_str(), m_password.c_str());
     return;
   }

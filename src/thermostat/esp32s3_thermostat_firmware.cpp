@@ -1839,6 +1839,8 @@ void wifi_event_handler(arduino_event_t *event) {
   if (event == nullptr) return;
   if (event->event_id == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
     g_wifi.on_wifi_connected();
+  } else if (event->event_id == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    g_wifi.on_wifi_disconnected(event->event_info.wifi_sta_disconnected.reason);
   }
 }
 

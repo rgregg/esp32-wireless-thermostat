@@ -40,6 +40,10 @@ using ThermostatWeatherCallback =
 
 class EspNowThermostatTransport final : public IThermostatTransport {
  public:
+  EspNowThermostatTransport() = default;
+  // Releases the static send/recv callback instance if it is this object.
+  ~EspNowThermostatTransport() override;
+
   bool begin(const EspNowThermostatConfig &config);
   // Tear down and re-initialise ESP-NOW with the stored config. Re-pins the radio to the
   // configured channel; the link manager restores the wanted channel afterwards.

@@ -2627,6 +2627,9 @@ void ctrl_wifi_event_handler(arduino_event_t *event) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       g_ctrl_wifi.on_wifi_connected();
       break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      g_ctrl_wifi.on_wifi_disconnected(event->event_info.wifi_sta_disconnected.reason);
+      break;
 #if defined(CONTROLLER_BOARD_WAVESHARE)
     case ARDUINO_EVENT_ETH_GOT_IP:
       Serial.printf("[eth] GOT_IP %s link=%dMbps %s\n",

@@ -36,6 +36,12 @@ class EspNowProbeTracker {
   // Call immediately before sending the probe's frames.
   void begin_probe() {
     probe_pending_.store(false);
+    // No send of ours is outstanding here, so completions ahead of issued sends can only
+    // be stray callbacks; drop them so they cannot complete this probe.
+    const uint32_t issued = sends_issued_.load();
+    if (static_cast<int32_t>(sends_completed_.load() - issued) > 0) {
+      sends_completed_.store(issued);
+    }
     const uint32_t first = sends_issued_.load() + 1;
     probe_first_seq_.store(first);
     probe_last_seq_.store(first + kOpenSpan);  // open until end_probe()

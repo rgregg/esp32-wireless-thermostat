@@ -29,6 +29,8 @@ using ThermostatAckCallback = void (*)(uint16_t seq, void *ctx);
 class EspNowControllerTransport final : public IControllerTransport {
  public:
   EspNowControllerTransport() = default;
+  // Releases the static send/recv callback instance if it is this object.
+  ~EspNowControllerTransport() override;
 
   bool begin(const EspNowControllerConfig &config);
   // Tear down and re-initialize the ESP-NOW stack with the same config (deinit ->
