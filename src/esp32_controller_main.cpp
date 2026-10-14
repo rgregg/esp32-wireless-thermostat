@@ -2683,8 +2683,10 @@ void ctrl_wifi_event_handler(arduino_event_t *event) {
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       // Failed join attempts also raise this event (reason 201, every retry). Record
-      // only the drop of an association that was actually up.
-      if (g_ctrl_wifi_was_connected.exchange(false)) {
+      // only the drop of an association that was actually up, and not our own leave
+      // (ASSOC_LEAVE, e.g. in-place recovery), so it cannot mask the real cause.
+      if (g_ctrl_wifi_was_connected.exchange(false) &&
+          event->event_info.wifi_sta_disconnected.reason != WIFI_REASON_ASSOC_LEAVE) {
         g_ctrl_wifi_drop_reason.store(event->event_info.wifi_sta_disconnected.reason);
         g_ctrl_wifi_drop_audit_pending.store(true);
       }
@@ -2716,22 +2718,26 @@ const char *ctrl_connection_path() {
 // working link to disturb.
 void ctrl_recover_network_in_place() {
   bool espnow_ok = true;
+  bool mode_ok = true;
 #if defined(CONTROLLER_BOARD_WAVESHARE)
   // WiFi is never associated on this board; Ethernet/lwIP self-recovers.
   if (g_cfg_ctrl_espnow_enabled) espnow_ok = g_controller->transport().restart();
 #else
   // Classic board: WiFi carries IP and shares the radio with ESP-NOW. Power-cycle the
-  // radio, bring ESP-NOW back, and let the WiFi manager rejoin. transport().restart()
-  // does its own esp_now_deinit() before re-initialising.
+  // radio, bring ESP-NOW back, and let the WiFi manager rejoin. ESP-IDF requires
+  // esp_now_deinit() before Wi-Fi is stopped/deinitialised, so tear ESP-NOW down first;
+  // the second deinit inside transport().restart() is then a harmless no-op.
+  esp_now_deinit();
   WiFi.disconnect(true);
   delay(100);
-  WiFi.mode(WIFI_STA);
+  mode_ok = WiFi.mode(WIFI_STA);
   if (g_cfg_ctrl_espnow_enabled) espnow_ok = g_controller->transport().restart();
   g_ctrl_wifi.request_reconnect();
 #endif
   g_ctrl_mqtt_recovery.on_disconnected();   // reset backoff -> immediate reconnect
   g_ctrl_mqtt_reconfigure_required = true;  // MQTT task disconnects + reconnects cleanly
-  ctrl_audit("isolation: recovered in place (espnow_reinit=%d)", espnow_ok ? 1 : 0);
+  ctrl_audit("isolation: recovered in place (espnow_reinit=%d, wifi_mode=%d)",
+             espnow_ok ? 1 : 0, mode_ok ? 1 : 0);
 }
 
 void ctrl_ensure_wifi_connected(uint32_t now_ms) {
