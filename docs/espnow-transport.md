@@ -113,10 +113,23 @@ reboots a device for network reasons. A device is isolated when MQTT is down and
 ESP-NOW peer is not linked (not heard for 30 s). After 2 minutes isolated it
 re-initialises the network in place: ESP-NOW is deinitialised before Wi-Fi is stopped,
 then Wi-Fi mode, ESP-NOW and MQTT are brought back (on Waveshare only ESP-NOW is
-restarted). It reboots after 10 minutes isolated, then 1 hour, then 4 hours, then at most
-once per 24 hours. The count is stored in NVS (`net_rb_cnt`) and resets after 10 healthy
-minutes. While the stored count is 0, isolation is not counted until the IP network has
-been usable once this boot.
+restarted). The in-place recovery repeats every 30 minutes while isolation lasts (2, 32,
+62 ... minutes), so a device at a high reboot count does not wait a day between
+recoveries. It reboots after 10 minutes isolated, then 1 hour, then 4 hours, then at most
+once per 24 hours; a reboot due at the same moment as a recovery wins. The count is
+stored in NVS (`net_rb_cnt`) and resets after 10 healthy (not isolated) minutes. While
+the stored count is 0, isolation is not counted until the IP network has been usable once
+this boot.
+
+MQTT down while the ESP-NOW peer is linked is not isolation: the furnace is still
+controlled, only Home Assistant loses the device. A wedged WiFi stack would never recover
+from that by itself, so after 60 minutes of continuous MQTT-down the governor recovers in
+place (same procedure), and again at 120, 180 ... minutes. It never reboots on this path.
+MQTT counts as up when it is not expected: MQTT disabled, no host configured, the display
+in ESP-NOW-only mode, or the display's WiFi intentionally suspended by the link policy (a
+suspend/resume cycle restarts the 60-minute clock). The same network-ready gate applies.
+`net_reboot_in_s` is 0 when isolation is not being counted, when the reboot is due, and
+after it was issued.
 
 ## Remaining Work
 - ~~Bind real display/UI events and local sensor sources into `ThermostatApp` methods.~~ Done.

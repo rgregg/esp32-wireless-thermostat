@@ -21,6 +21,16 @@ bool NetworkRebootGovernor::take_count_reset() {
   return pending;
 }
 
+// True when `period` has passed since `mark`; then moves `mark` forward by whole periods
+// so it stays within one period of now (due times stay on the original grid, and the
+// arithmetic stays wraparound-safe however long the condition lasts).
+bool NetworkRebootGovernor::take_due(uint32_t now_ms, uint32_t &mark, uint32_t period) {
+  const uint32_t since = static_cast<uint32_t>(now_ms - mark);
+  if (period == 0 || since < period) return false;
+  mark += period * (since / period);
+  return true;
+}
+
 uint32_t NetworkRebootGovernor::ms_until_reboot(uint32_t now_ms) const {
   if (!isolating_ || reboot_issued_) return 0;
   const uint32_t elapsed = static_cast<uint32_t>(now_ms - isolation_start_ms_);
@@ -28,11 +38,27 @@ uint32_t NetworkRebootGovernor::ms_until_reboot(uint32_t now_ms) const {
   return elapsed >= threshold ? 0 : threshold - elapsed;
 }
 
-GovernorAction NetworkRebootGovernor::poll(uint32_t now_ms, bool isolated,
+GovernorAction NetworkRebootGovernor::poll(uint32_t now_ms, bool isolated, bool mqtt_up,
                                            bool network_was_ready) {
+  // Neither clock runs on a boot that has never had a usable network, unless we already
+  // know we are in an outage (a previous isolation reboot was recorded).
+  const bool gated = !network_was_ready && reboot_count_ == 0;
+
+  // MQTT-down recovery schedule. A due time is consumed whether or not it fires, so one
+  // that falls while isolated is skipped rather than delivered late.
+  bool mqtt_recover_due = false;
+  if (mqtt_up || gated) {
+    mqtt_down_ = false;
+  } else {
+    if (!mqtt_down_) {
+      mqtt_down_ = true;
+      mqtt_recover_mark_ms_ = now_ms;
+    }
+    mqtt_recover_due = take_due(now_ms, mqtt_recover_mark_ms_, config_.mqtt_down_recover_ms);
+  }
+
   if (!isolated) {
     isolating_ = false;
-    recovered_ = false;
     reboot_issued_ = false;
     if (!healthy_) {
       healthy_ = true;
@@ -42,14 +68,12 @@ GovernorAction NetworkRebootGovernor::poll(uint32_t now_ms, bool isolated,
       reboot_count_ = 0;
       count_reset_pending_ = true;
     }
-    return GovernorAction::None;
+    return mqtt_recover_due ? GovernorAction::RecoverInPlace : GovernorAction::None;
   }
 
   healthy_ = false;
 
-  // Do not count isolation on a boot that has never had a usable network, unless we
-  // already know we are in an outage (a previous isolation reboot was recorded).
-  if (!network_was_ready && reboot_count_ == 0) {
+  if (gated) {
     isolating_ = false;
     return GovernorAction::None;
   }
@@ -57,22 +81,24 @@ GovernorAction NetworkRebootGovernor::poll(uint32_t now_ms, bool isolated,
   if (!isolating_) {
     isolating_ = true;
     isolation_start_ms_ = now_ms;
-    recovered_ = false;
+    recover_mark_ms_ = now_ms;
+    recover_wait_ms_ = config_.recover_after_ms;
     reboot_issued_ = false;
   }
 
-  const uint32_t elapsed = static_cast<uint32_t>(now_ms - isolation_start_ms_);
+  // Once the reboot is issued the device is restarting; nothing more to do.
+  if (reboot_issued_) return GovernorAction::None;
 
-  if (!reboot_issued_ && elapsed >= reboot_threshold_ms()) {
+  const uint32_t elapsed = static_cast<uint32_t>(now_ms - isolation_start_ms_);
+  const bool recover_due = take_due(now_ms, recover_mark_ms_, recover_wait_ms_);
+  if (recover_due) recover_wait_ms_ = config_.recover_repeat_ms;
+
+  if (elapsed >= reboot_threshold_ms()) {
     reboot_issued_ = true;
     ++reboot_count_;
-    return GovernorAction::Reboot;
+    return GovernorAction::Reboot;  // wins over a recovery due at the same poll
   }
-  if (!recovered_ && elapsed >= config_.recover_after_ms) {
-    recovered_ = true;
-    return GovernorAction::RecoverInPlace;
-  }
-  return GovernorAction::None;
+  return recover_due ? GovernorAction::RecoverInPlace : GovernorAction::None;
 }
 
 }  // namespace thermostat

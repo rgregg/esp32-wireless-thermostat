@@ -103,7 +103,9 @@ production devices for these scenarios.
       healthy minutes `net_reboot_count` returns to 0.
 - [ ] **F8 In-place recovery.** Run during the F7 setup (display off, controller blocked).
       Two minutes after isolation begins, the controller's audit log shows
-      `isolation: recovered in place`. On the classic
+      `isolation: recovered in place`, and again 30 minutes later (32 min) if the
+      controller is still isolated and has not rebooted (needs `net_rb_cnt` of 1 or more,
+      so the reboot is not due at 10 min). On the classic
       board confirm WiFi is actually restored afterwards (ESP-NOW is deinitialised before
       Wi-Fi is stopped).
 - [ ] **F9 Cold boot in an outage.** With both blocked in UniFi, power-cycle both. They

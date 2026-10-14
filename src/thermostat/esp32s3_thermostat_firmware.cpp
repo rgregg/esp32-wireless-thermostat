@@ -1921,8 +1921,10 @@ void wifi_event_handler(arduino_event_t *event) {
 }
 
 // Re-initialise the network subsystems without rebooting. Called by the reboot governor
-// only when the display is isolated (no MQTT, no ESP-NOW peer).
-void recover_network_in_place() {
+// while the display is isolated (no MQTT, no ESP-NOW peer: 2 min in, then every 30 min),
+// and after each 60 min of MQTT down while the controller is linked over ESP-NOW and
+// WiFi is not intentionally suspended (a possibly wedged WiFi stack).
+void recover_network_in_place(const char *why) {
   if (g_runtime == nullptr) return;
   bool espnow_ok = true;
   bool mode_ok = true;
@@ -1941,7 +1943,7 @@ void recover_network_in_place() {
     g_cfg_mqtt_reconfigure_required = true;
   }
   xSemaphoreGive(g_api_mutex);
-  Serial.printf("[watchdog] isolation: recovered in place (espnow_reinit=%d, wifi_mode=%d)\n",
+  Serial.printf("[watchdog] %s: recovered in place (espnow_reinit=%d, wifi_mode=%d)\n", why,
                 espnow_ok ? 1 : 0, mode_ok ? 1 : 0);
 }
 
@@ -3125,6 +3127,9 @@ void thermostat_firmware_loop() {
   // reboot governor, and WiFi is never suspended for it.
   const bool espnow_link_usable = g_runtime != nullptr && g_cfg_espnow_enabled &&
                                   g_runtime->transport().has_unicast_peer();
+  // A broker is expected only on WiFi with MQTT enabled and a host configured.
+  const bool mqtt_expected =
+      !g_cfg_wifi_disabled && g_cfg_mqtt_enabled && g_cfg_mqtt_host.length() > 0;
   // Runs in both normal and ESP-NOW-only mode: when the radio is not associated it
   // follows the controller's channel (searching 1/6/11 if the controller goes quiet).
   // Runs on this (loop) task, like every ESP-NOW send on the display, which the link
@@ -3216,12 +3221,19 @@ void thermostat_firmware_loop() {
     // The governor tries an in-place recovery first, then reboots on a backed-off
     // ladder (10 min, 1 h, 4 h, then daily) so a long outage cannot loop. Polled on every
     // loop pass from the first one.
-    const bool isolated =
-        !g_mqtt.connected() && !(espnow_link_usable && g_link.linked());
+    // MQTT down with the controller linked gets an in-place recovery every 60 min. The
+    // governor is told MQTT is up whenever it is not expected to be: MQTT disabled, no
+    // host, ESP-NOW-only mode, or WiFi intentionally suspended by the link policy (not a
+    // wedge; the policy resumes WiFi itself every 5 min). Reporting "up" while suspended
+    // restarts the 60 min clock, so a suspend/resume cycle never adds up to a recovery,
+    // while a stack that cannot associate (never suspended) still gets one.
+    const bool mqtt_connected = g_mqtt.connected();
+    const bool isolated = !mqtt_connected && !(espnow_link_usable && g_link.linked());
+    const bool mqtt_up_for_governor = mqtt_connected || !mqtt_expected || g_wifi.suspended();
     const bool network_was_ready = g_wifi_connected_once.load() || g_cfg_wifi_disabled;
-    switch (g_reboot_gov.poll(now, isolated, network_was_ready)) {
+    switch (g_reboot_gov.poll(now, isolated, mqtt_up_for_governor, network_was_ready)) {
       case thermostat::GovernorAction::RecoverInPlace:
-        recover_network_in_place();
+        recover_network_in_place(isolated ? "isolation" : "mqtt down, espnow linked");
         break;
       case thermostat::GovernorAction::Reboot: {
         const uint32_t count = g_reboot_gov.reboot_count();

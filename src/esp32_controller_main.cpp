@@ -2714,9 +2714,11 @@ const char *ctrl_connection_path() {
 }
 
 // Re-initialise the network subsystems without rebooting. Called by the reboot
-// governor only when the device is isolated (no MQTT, no ESP-NOW peer), so there is no
-// working link to disturb.
-void ctrl_recover_network_in_place() {
+// governor while the device is isolated (no MQTT, no ESP-NOW peer: 2 min in, then every
+// 30 min), so there is no working link to disturb, and after each 60 min of MQTT down
+// while the ESP-NOW peer is linked (a possibly wedged WiFi stack): that briefly drops
+// ESP-NOW too, but the peer stays linked unless it is silent for 30 s.
+void ctrl_recover_network_in_place(const char *why) {
   bool espnow_ok = true;
   bool mode_ok = true;
 #if defined(CONTROLLER_BOARD_WAVESHARE)
@@ -2736,7 +2738,7 @@ void ctrl_recover_network_in_place() {
 #endif
   g_ctrl_mqtt_recovery.on_disconnected();   // reset backoff -> immediate reconnect
   g_ctrl_mqtt_reconfigure_required = true;  // MQTT task disconnects + reconnects cleanly
-  ctrl_audit("isolation: recovered in place (espnow_reinit=%d, wifi_mode=%d)",
+  ctrl_audit("%s: recovered in place (espnow_reinit=%d, wifi_mode=%d)", why,
              espnow_ok ? 1 : 0, mode_ok ? 1 : 0);
 }
 
@@ -3297,16 +3299,22 @@ void loop() {
     ctrl_poll_weather(now);
 
     // Network isolation: neither MQTT nor the ESP-NOW peer is reachable. The governor
-    // tries an in-place recovery first, then reboots on a backed-off ladder (10 min,
-    // 1 h, 4 h, then daily) so a long outage cannot become a reboot loop. Polled on every
-    // loop pass from the first one.
+    // recovers in place at 2 min and every 30 min after, and reboots on a backed-off
+    // ladder (10 min, 1 h, 4 h, then daily) so a long outage cannot become a reboot loop.
+    // MQTT down with the peer linked gets an in-place recovery every 60 min instead.
+    // Polled on every loop pass from the first one.
     {
       static bool s_network_was_ready = false;
       if (ctrl_network_ready()) s_network_was_ready = true;
-      const bool isolated = !g_ctrl_mqtt_up.load() && !g_ctrl_link.linked();
-      switch (g_ctrl_reboot_gov.poll(now, isolated, s_network_was_ready)) {
+      const bool mqtt_up = g_ctrl_mqtt_up.load();
+      const bool isolated = !mqtt_up && !g_ctrl_link.linked();
+      // With MQTT disabled or no host there is no broker to wait for: report it as up so
+      // the MQTT-down recovery never fires (isolation then depends on ESP-NOW alone).
+      const bool mqtt_expected = g_cfg_ctrl_mqtt_enabled && g_cfg_ctrl_mqtt_host.length() > 0;
+      switch (g_ctrl_reboot_gov.poll(now, isolated, mqtt_up || !mqtt_expected,
+                                     s_network_was_ready)) {
         case thermostat::GovernorAction::RecoverInPlace:
-          ctrl_recover_network_in_place();
+          ctrl_recover_network_in_place(isolated ? "isolation" : "mqtt down, espnow linked");
           break;
         case thermostat::GovernorAction::Reboot: {
           const uint32_t count = g_ctrl_reboot_gov.reboot_count();
