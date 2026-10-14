@@ -217,7 +217,14 @@ void ThermostatApp::mark_local_interaction(uint32_t now_ms) {
 }
 
 void ThermostatApp::ack_controller_seq(uint16_t seq) {
-  transport_.publish_controller_ack(seq);
+  pending_ack_.store(kAckPending | seq);
+}
+
+void ThermostatApp::send_pending_ack() {
+  const uint32_t pending = pending_ack_.exchange(0);
+  if ((pending & kAckPending) != 0) {
+    transport_.publish_controller_ack(static_cast<uint16_t>(pending & 0xFFFFu));
+  }
 }
 
 void ThermostatApp::send_command(const SendOptions &opts) {

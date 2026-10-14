@@ -52,12 +52,14 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   telem.setpoint_c = 18.0f;
 
   app.on_controller_telemetry(2000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 22.5f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 1);
   ASSERT_EQ(tx.ack_count, 1);
 
   telem.seq = 2;
   app.on_controller_telemetry(7000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 18.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 2);
   ASSERT_EQ(tx.ack_count, 2);
@@ -88,20 +90,51 @@ TEST_CASE(thermostat_app_ignores_duplicate_and_stale_controller_seq) {
   telem.mode_code = 1;
   telem.setpoint_c = 20.0f;
   app.on_controller_telemetry(1000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
 
   telem.seq = 10;  // duplicate
   telem.setpoint_c = 25.0f;
   app.on_controller_telemetry(2000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
 
   telem.seq = 9;  // stale
   telem.setpoint_c = 15.0f;
   app.on_controller_telemetry(3000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
+}
+
+// The ACK is not sent from on_controller_telemetry() (the ESP-NOW receive task) but by
+// send_pending_ack() on the loop task; only the latest owed ACK goes out, once.
+TEST_CASE(thermostat_app_telemetry_ack_deferred_to_send_pending_ack) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 5;
+  app.on_controller_telemetry(1000, telem);
+  ASSERT_EQ(tx.ack_count, 0);
+  telem.seq = 6;
+  app.on_controller_telemetry(1100, telem);
+  ASSERT_EQ(tx.ack_count, 0);
+
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 1);
+  ASSERT_EQ(tx.last_ack_seq, 6);
+
+  app.send_pending_ack();  // nothing owed
+  ASSERT_EQ(tx.ack_count, 1);
+
+  telem.seq = 0;  // seq 0 is a valid ACK (stale -> re-ACKs the last accepted seq 6)
+  app.on_controller_telemetry(1200, telem);
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 2);
+  ASSERT_EQ(tx.last_ack_seq, 6);
 }
 
 TEST_CASE(thermostat_app_reset_local_command_sequence_restarts_at_one) {

@@ -299,6 +299,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     telemetry.filter_runtime_seconds = s_filter_seconds;
 
     g_therm_app->on_controller_telemetry(now, telemetry);
+    g_therm_app->send_pending_ack();  // single-threaded sim: ACK right away
     g_display_app->sync_from_app();
   }
 }

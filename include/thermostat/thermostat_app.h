@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include <atomic>
+
 #include "espnow_cmd_word.h"
 #include "thermostat/thermostat_transport.h"
 #include "thermostat_types.h"
@@ -23,8 +25,14 @@ class ThermostatApp {
                 const ThermostatAppConfig &config = ThermostatAppConfig());
 
   void on_controller_heartbeat(uint32_t now_ms);
+  // Applies the telemetry immediately but does NOT send the ACK: on the firmware this is
+  // called from the ESP-NOW receive callback (WiFi task), and every ESP-NOW send must
+  // happen on the loop task (channel-probe attribution). The ACK is sent by the next
+  // send_pending_ack().
   void on_controller_telemetry(uint32_t now_ms,
                                const ThermostatControllerTelemetry &telemetry);
+  // Sends the ACK owed for the latest telemetry, if any. Call from the loop task.
+  void send_pending_ack();
   void on_controller_state_update(uint32_t now_ms,
                                   FurnaceStateCode state,
                                   bool lockout,
@@ -105,6 +113,11 @@ class ThermostatApp {
   uint32_t last_controller_heartbeat_ms_ = 0;
   bool has_controller_seq_ = false;
   uint16_t last_controller_seq_ = 0;
+
+  // ACK owed to the controller: kAckPending | seq. Set by on_controller_telemetry()
+  // (possibly on another task); consumed by send_pending_ack().
+  static constexpr uint32_t kAckPending = 0x10000u;
+  std::atomic<uint32_t> pending_ack_{0};
 };
 
 }  // namespace thermostat
