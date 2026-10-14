@@ -51,9 +51,11 @@ class EspNowChannelPolicy {
   explicit EspNowChannelPolicy(const EspNowChannelConfig &config = EspNowChannelConfig());
 
   ChannelAction poll(const ChannelInputs &in);
-  // Report the outcome of the most recent Probe action. Ignored unless a probe is
-  // still awaited.
-  void on_probe_result(bool acked);
+  // Report the outcome of a Probe action; pass ChannelAction::channel of that Probe.
+  // Ignored when no probe is outstanding or when `channel` is not the channel of the
+  // outstanding probe (a late result for an earlier candidate). A nack advances to the
+  // next candidate on the next poll; the probe timeout is the fallback if no result comes.
+  void on_probe_result(uint8_t channel, bool acked);
 
   bool linked(const ChannelInputs &in) const;
   uint8_t current_channel() const { return current_channel_; }
@@ -81,6 +83,7 @@ class EspNowChannelPolicy {
   bool pass_started_ = false;
   uint32_t last_pass_start_ms_ = 0;
   uint32_t probe_sent_ms_ = 0;
+  uint8_t probe_channel_ = 0;
   bool holding_ = false;
   uint32_t hold_start_ms_ = 0;
   uint32_t search_count_ = 0;

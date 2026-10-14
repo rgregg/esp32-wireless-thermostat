@@ -46,8 +46,9 @@ void EspNowChannelPolicy::build_candidates() {
   for (uint8_t c : kSearchChannels) add_candidate(c);
 }
 
-void EspNowChannelPolicy::on_probe_result(bool acked) {
-  if (state_ == State::ProbeWait && probe_result_ == ProbeResult::Pending) {
+void EspNowChannelPolicy::on_probe_result(uint8_t channel, bool acked) {
+  if (state_ == State::ProbeWait && probe_result_ == ProbeResult::Pending &&
+      channel == probe_channel_) {
     probe_result_ = acked ? ProbeResult::Acked : ProbeResult::Failed;
   }
 }
@@ -56,7 +57,14 @@ ChannelAction EspNowChannelPolicy::poll(const ChannelInputs &in) {
   const uint32_t now = in.now_ms;
   const bool is_linked = linked(in);
 
-  if (in.mqtt_up) {
+  if (resumed_ &&
+      static_cast<uint32_t>(now - resumed_at_ms_) >= config_.wifi_resume_window_ms) {
+    resumed_ = false;
+  }
+
+  // The MQTT-down clock only runs while associated, so it restarts on every
+  // (re)association and a suspend needs a full window of association with MQTT down.
+  if (in.mqtt_up || !in.wifi_associated) {
     mqtt_down_ = false;
   } else if (!mqtt_down_) {
     mqtt_down_ = true;
@@ -138,6 +146,7 @@ ChannelAction EspNowChannelPolicy::poll(const ChannelInputs &in) {
     state_ = State::ProbeWait;
     probe_result_ = ProbeResult::Pending;
     probe_sent_ms_ = now;
+    probe_channel_ = current_channel_;
     return {ChannelActionType::Probe, current_channel_};
   }
 

@@ -45,7 +45,7 @@ struct Sim {
       sets.push_back(a.channel);
     } else if (a.type == ChannelActionType::Probe) {
       probes.push_back(radio);
-      if (answer_probes) policy.on_probe_result(peer_channel != 0 && radio == peer_channel);
+      if (answer_probes) policy.on_probe_result(a.channel, peer_channel != 0 && radio == peer_channel);
     }
     return a;
   }
@@ -197,12 +197,10 @@ TEST_CASE(channel_late_ack_is_ignored) {
   s.answer_probes = false;
   s.run(450);  // probe on 6 timed out; policy has moved on to channel 1
   ASSERT_TRUE(s.probes.size() >= 2);
-  const uint8_t before = s.policy.current_channel();
   s.run(1000);  // pass finishes
-  s.policy.on_probe_result(true);  // stale ack, no probe awaited
+  s.policy.on_probe_result(6, true);  // stale ack, no probe awaited
   s.run(100);
   ASSERT_EQ(static_cast<int>(s.policy.current_channel()), 6);  // parked on rendezvous
-  (void)before;
   // The stale ack must not have started a hold: the next pass still runs on schedule.
   const uint32_t count = s.policy.search_count();
   s.run(6000);
@@ -210,10 +208,48 @@ TEST_CASE(channel_late_ack_is_ignored) {
 }
 
 TEST_CASE(channel_search_survives_millis_wraparound) {
-  Sim s(cfg(LinkRole::Display, 5000), 0xFFFFF000u);
-  s.peer_channel = 11;
-  s.run(20000);  // crosses the wrap
-  ASSERT_EQ(static_cast<int>(s.policy.current_channel()), 11);
+  // Peer absent: passes must keep running on the 5 s interval across the wrap.
+  Sim s(cfg(LinkRole::Display, 5000), 0xFFFFFFFFu - 100u);
+  s.run(20000);
+  ASSERT_EQ(s.policy.search_count(), 4u);  // t=10 ms, 5 s, 10 s, 15 s
+
+  // A find made after the wrap holds for the full 30 s.
+  Sim f(cfg(LinkRole::Display, 5000), 0xFFFFFFFFu - 100u);
+  f.peer_channel = 11;
+  f.run(500);  // first pass wraps and finds the peer
+  ASSERT_EQ(static_cast<int>(f.policy.current_channel()), 11);
+  const size_t sets = f.sets.size();
+  const size_t probes = f.probes.size();
+  f.run(29000);
+  ASSERT_EQ(f.sets.size(), sets);
+  ASSERT_EQ(f.probes.size(), probes);
+  f.run(2000);  // hold expired
+  ASSERT_TRUE(f.probes.size() > probes);
+}
+
+TEST_CASE(channel_probe_result_for_other_channel_is_ignored) {
+  Sim s(cfg(LinkRole::Display, 5000));
+  s.answer_probes = false;
+  // Step until the probe on channel 1 (second candidate) is outstanding.
+  while (s.probes.size() < 2) s.step();
+  ASSERT_EQ(static_cast<int>(s.probes[1]), 1);
+  s.policy.on_probe_result(6, true);  // late ack for the previous candidate
+  s.run(2000);
+  ASSERT_TRUE(s.probes.size() >= 3);
+  ASSERT_EQ(static_cast<int>(s.probes[2]), 11);  // did not hold on channel 1
+  ASSERT_EQ(static_cast<int>(s.policy.current_channel()), 6);
+}
+
+TEST_CASE(channel_matching_nack_advances_immediately) {
+  Sim s(cfg(LinkRole::Display, 5000));
+  s.answer_probes = false;
+  while (s.probes.empty()) s.step();
+  s.policy.on_probe_result(s.radio, false);
+  const ChannelAction next = s.step();  // 10 ms later, far below the 200 ms timeout
+  ASSERT_TRUE(next.type == ChannelActionType::None);
+  const ChannelAction after = s.step();
+  ASSERT_TRUE(after.type == ChannelActionType::SetChannel);
+  ASSERT_EQ(static_cast<int>(after.channel), 1);
 }
 
 TEST_CASE(channel_invalid_rendezvous_falls_back_to_6) {
@@ -303,6 +339,22 @@ TEST_CASE(channel_display_does_not_suspend_when_mqtt_returns) {
   for (int i = 0; i < 5000; ++i) {  // 50 s
     ASSERT_TRUE(s.step().type == ChannelActionType::None);
   }
+}
+
+TEST_CASE(channel_display_suspend_clock_restarts_on_association) {
+  Sim s(cfg(LinkRole::Display, 5000));
+  s.in.wifi_associated = false;
+  s.in.mqtt_up = false;
+  s.run(120000);
+  s.in.wifi_associated = true;
+  s.in.wifi_channel = 1;
+  const uint32_t associated_at = s.now;
+  bool suspended = false;
+  while (!suspended && s.now - associated_at < 70000u) {
+    suspended = s.step().type == ChannelActionType::SuspendWifi;
+  }
+  ASSERT_TRUE(suspended);
+  ASSERT_TRUE(s.now - associated_at >= 60000u && s.now - associated_at < 61000u);
 }
 
 #endif
