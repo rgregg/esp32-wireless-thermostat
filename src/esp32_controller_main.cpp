@@ -25,6 +25,9 @@
 #include "device_registry.h"
 #include "discovery_topics.h"
 #include "wifi_watchdog.h"
+#include "network_reboot_governor.h"
+#include "transport/espnow_fail_window.h"
+#include "transport/espnow_link_manager.h"
 
 #if defined(ARDUINO)
 #include <Arduino.h>
@@ -41,6 +44,7 @@
 #include <PubSubClient.h>
 #include <WebServer.h>
 #include <esp_mac.h>
+#include <esp_now.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <time.h>
@@ -306,8 +310,17 @@ String g_ctrl_reset_reason = "unknown";
 String g_ctrl_reboot_reason = "none";
 bool g_ctrl_reboot_requested = false;
 uint32_t g_ctrl_reboot_at_ms = 0;
-uint32_t g_ctrl_isolation_start_ms = 0;  // 0 = not isolated
-bool g_ctrl_isolation_recovery_done = false;  // in-place subsystem recovery already tried this episode
+// ESP-NOW channel agreement + network reboot ladder. See
+// docs/superpowers/specs/2026-10-13-espnow-wifi-outage-fallback-design.md.
+thermostat::EspNowLinkManager<thermostat::EspNowControllerTransport> g_ctrl_link;
+thermostat::NetworkRebootGovernor g_ctrl_reboot_gov;
+thermostat::RecentFailWindow g_ctrl_espnow_fail_window;
+// Reason code of the most recent drop of an established WiFi association (0 = none).
+std::atomic<uint8_t> g_ctrl_wifi_drop_reason{0};
+std::atomic<bool> g_ctrl_wifi_was_connected{false};
+std::atomic<bool> g_ctrl_wifi_drop_audit_pending{false};
+// "mqtt+esp-now" | "mqtt" | "esp-now" | "disconnected" (defined near the WiFi helpers).
+const char *ctrl_connection_path();
 
 // Inbound MQTT command queue. The PubSubClient callback (which runs on the MQTT task once
 // MQTT is moved off the control loop) only PARSES + enqueues; the control loop drains and
@@ -414,14 +427,6 @@ constexpr uint32_t kCtrlTaskWdtTimeoutMs = 15000;
 // PubSubClient socket timeout (seconds). Below the watchdog so a stuck MQTT
 // connect/read aborts before a panic.
 constexpr uint8_t kCtrlMqttSocketTimeoutS = 5;
-// Reboot if both MQTT and ESP-NOW have been silent for this long.
-// Covers wedged network-stack states that the WiFi watchdog ping doesn't catch.
-constexpr uint32_t kCtrlIsolationRebootMs = 15UL * 60UL * 1000UL;
-// On the Waveshare board, after kCtrlIsolationRebootMs of isolation we first try an
-// in-place subsystem recovery (re-init ESP-NOW + force MQTT reconnect) instead of
-// rebooting. This is the grace window we give that recovery to restore connectivity
-// before falling back to a reboot as the true last resort.
-constexpr uint32_t kCtrlIsolationRecoveryGraceMs = 3UL * 60UL * 1000UL;
 struct CtrlWeatherResult {
   float temp_c = 0.0f;
   thermostat::WeatherIcon icon = thermostat::WeatherIcon::Unknown;
@@ -1407,6 +1412,30 @@ void ctrl_publish_discovery() {
            dev_id.c_str(), base.c_str(), dev_id.c_str());
   g_ctrl_mqtt.publish(err_espnow_topic.c_str(), payload, true);
 
+  {
+    struct Diag {
+      const char *key;
+      const char *name;
+      const char *state;
+    };
+    static const Diag kLinkDiags[] = {
+        {"espnow_channel", "Controller ESP-NOW Channel", "espnow_channel"},
+        {"connection_path", "Controller Connection Path", "connection_path"},
+        {"espnow_search_count", "Controller ESP-NOW Search Count", "espnow_search_count"},
+        {"net_reboot_count", "Controller Network Reboot Count", "net_reboot_count"},
+        {"wifi_disconnect_reason", "Controller WiFi Disconnect Reason", "wifi_disconnect_reason"},
+    };
+    for (const Diag &d : kLinkDiags) {
+      const String topic = dp + "sensor/" + dev_id + "_controller_" + d.key + "/config";
+      snprintf(payload, sizeof(payload),
+               "{\"name\":\"%s\",\"uniq_id\":\"%s_controller_%s\","
+               "\"stat_t\":\"%s/state/%s\",\"entity_category\":\"diagnostic\","
+               "\"dev\":{\"ids\":[\"%s\"]}}",
+               d.name, dev_id.c_str(), d.key, base.c_str(), d.state, dev_id.c_str());
+      g_ctrl_mqtt.publish(topic.c_str(), payload, true);
+    }
+  }
+
   snprintf(payload, sizeof(payload),
            "{\"name\":\"Controller Reset Command Sequence\","
            "\"uniq_id\":\"%s_controller_reset_sequence\","
@@ -1773,7 +1802,7 @@ void ctrl_web_handle_status_get() {
     rt.hvac_lockout() ? "true" : "false",
     rt.windows_open() ? "true" : "false",
     rt.failsafe_active() ? "true" : "false",
-    (rt.heartbeat_last_seen_ms() > 0 && (now - rt.heartbeat_last_seen_ms()) < 30000UL) ? "true" : "false",
+    g_ctrl_link.linked() ? "true" : "false",
     static_cast<unsigned long>(rt.heartbeat_last_seen_ms()),
     static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms),
     g_cfg_ctrl_allow_ha ? "true" : "false",
@@ -1804,11 +1833,23 @@ void ctrl_web_handle_status_get() {
         ","
         "\"dns0\":\"%s\","
         "\"dns1\":\"%s\","
-        "\"mac\":\"%s\""
+        "\"mac\":\"%s\","
+        "\"espnow_channel\":%u,"
+        "\"connection_path\":\"%s\","
+        "\"espnow_search_count\":%lu,"
+        "\"net_reboot_count\":%lu,"
+        "\"net_reboot_in_s\":%lu,"
+        "\"wifi_disconnect_reason\":%u"
         "}",
         WiFi.dnsIP(0).toString().c_str(),
         WiFi.dnsIP(1).toString().c_str(),
-        WiFi.macAddress().c_str());
+        WiFi.macAddress().c_str(),
+        static_cast<unsigned>(g_ctrl_link.channel()),
+        ctrl_connection_path(),
+        static_cast<unsigned long>(g_ctrl_link.search_count()),
+        static_cast<unsigned long>(g_ctrl_reboot_gov.reboot_count()),
+        static_cast<unsigned long>(g_ctrl_reboot_gov.ms_until_reboot(millis()) / 1000UL),
+        static_cast<unsigned>(g_ctrl_wifi_drop_reason.load()));
     }
   }
   g_ctrl_web.send(200, "application/json", buf);
@@ -2203,7 +2244,7 @@ void ctrl_publish_runtime_state() {
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
   g_ctrl_mqtt.publish(self_topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu",
-           static_cast<unsigned long>(rt.heartbeat_last_seen_ms()));
+           static_cast<unsigned long>(g_controller->transport().last_peer_rx_ms()));
   g_ctrl_mqtt.publish(self_topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_controller->transport().send_ok_count()));
@@ -2211,10 +2252,22 @@ void ctrl_publish_runtime_state() {
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_controller->transport().send_fail_count()));
   g_ctrl_mqtt.publish(self_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
+  // g_ctrl_espnow_fail_window is updated on every loop pass; only read it here.
   if (g_ctrl_last_espnow_error != "begin_failed") {
     g_ctrl_last_espnow_error =
-        g_controller->transport().send_fail_count() > 0 ? "send_failed" : "none";
+        g_ctrl_espnow_fail_window.recent(millis()) ? "send_failed" : "none";
   }
+  snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_ctrl_link.channel()));
+  g_ctrl_mqtt.publish(self_topic_for("state/espnow_channel").c_str(), buf, true);
+  g_ctrl_mqtt.publish(self_topic_for("state/connection_path").c_str(),
+                      ctrl_connection_path(), true);
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_link.search_count()));
+  g_ctrl_mqtt.publish(self_topic_for("state/espnow_search_count").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%lu",
+           static_cast<unsigned long>(g_ctrl_reboot_gov.reboot_count()));
+  g_ctrl_mqtt.publish(self_topic_for("state/net_reboot_count").c_str(), buf, true);
+  snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_ctrl_wifi_drop_reason.load()));
+  g_ctrl_mqtt.publish(self_topic_for("state/wifi_disconnect_reason").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(esp_get_free_heap_size()));
   g_ctrl_mqtt.publish(self_topic_for("state/free_heap_bytes").c_str(), buf, true);
@@ -2625,9 +2678,16 @@ void ctrl_wifi_event_handler(arduino_event_t *event) {
   if (event == nullptr) return;
   switch (event->event_id) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      g_ctrl_wifi_was_connected.store(true);
       g_ctrl_wifi.on_wifi_connected();
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      // Failed join attempts also raise this event (reason 201, every retry). Record
+      // only the drop of an association that was actually up.
+      if (g_ctrl_wifi_was_connected.exchange(false)) {
+        g_ctrl_wifi_drop_reason.store(event->event_info.wifi_sta_disconnected.reason);
+        g_ctrl_wifi_drop_audit_pending.store(true);
+      }
       g_ctrl_wifi.on_wifi_disconnected(event->event_info.wifi_sta_disconnected.reason);
       break;
 #if defined(CONTROLLER_BOARD_WAVESHARE)
@@ -2643,6 +2703,35 @@ void ctrl_wifi_event_handler(arduino_event_t *event) {
     default:
       break;
   }
+}
+
+const char *ctrl_connection_path() {
+  const bool mqtt = g_ctrl_mqtt_up.load();
+  const bool espnow = g_ctrl_link.linked();
+  return mqtt && espnow ? "mqtt+esp-now" : mqtt ? "mqtt" : espnow ? "esp-now" : "disconnected";
+}
+
+// Re-initialise the network subsystems without rebooting. Called by the reboot
+// governor only when the device is isolated (no MQTT, no ESP-NOW peer), so there is no
+// working link to disturb.
+void ctrl_recover_network_in_place() {
+  bool espnow_ok = true;
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+  // WiFi is never associated on this board; Ethernet/lwIP self-recovers.
+  if (g_cfg_ctrl_espnow_enabled) espnow_ok = g_controller->transport().restart();
+#else
+  // Classic board: WiFi carries IP and shares the radio with ESP-NOW. Power-cycle the
+  // radio, bring ESP-NOW back, and let the WiFi manager rejoin. transport().restart()
+  // does its own esp_now_deinit() before re-initialising.
+  WiFi.disconnect(true);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  if (g_cfg_ctrl_espnow_enabled) espnow_ok = g_controller->transport().restart();
+  g_ctrl_wifi.request_reconnect();
+#endif
+  g_ctrl_mqtt_recovery.on_disconnected();   // reset backoff -> immediate reconnect
+  g_ctrl_mqtt_reconfigure_required = true;  // MQTT task disconnects + reconnects cleanly
+  ctrl_audit("isolation: recovered in place (espnow_reinit=%d)", espnow_ok ? 1 : 0);
 }
 
 void ctrl_ensure_wifi_connected(uint32_t now_ms) {
@@ -2855,6 +2944,14 @@ void setup() {
   }
   Serial.printf("Reset reason: %s | last reboot cause: %s\n",
                 g_ctrl_reset_reason.c_str(), g_ctrl_reboot_reason.c_str());
+  {
+    const uint32_t net_reboots =
+        g_ctrl_cfg_ready ? g_ctrl_cfg.getUInt("net_rb_cnt", 0U) : 0U;
+    g_ctrl_reboot_gov =
+        thermostat::NetworkRebootGovernor(thermostat::NetworkRebootConfig(), net_reboots);
+    Serial.printf("[boot] consecutive network reboots=%lu\n",
+                  static_cast<unsigned long>(net_reboots));
+  }
   // The watchdog's forced reconnect goes through the WiFi manager so the join is tracked
   // (ESP-NOW keeps off the channel while it runs). Runs on this loop task, like the tick.
   wifi_watchdog_set_reconnect_hook([]() { g_ctrl_wifi.request_reconnect(); });
@@ -2964,6 +3061,13 @@ void setup() {
     ok = g_controller->begin();
   }
   g_ctrl_last_espnow_error = ok ? "none" : (g_cfg_ctrl_espnow_enabled ? "begin_failed" : "disabled");
+  {
+    thermostat::EspNowChannelConfig link_cfg;
+    link_cfg.role = thermostat::LinkRole::Controller;
+    link_cfg.rendezvous_channel = g_cfg_ctrl_espnow_channel;
+    link_cfg.search_interval_ms = 20000;
+    g_ctrl_link.begin(link_cfg, &g_controller->transport());
+  }
   // The MAC the controller presents on the ESP-NOW radio (WiFi STA). With an identity
   // override active this is the assumed MAC; otherwise the factory MAC. Logged so the
   // display's peer MAC can be confirmed/matched during cutover.
@@ -3127,9 +3231,27 @@ void loop() {
     // A stray `wifi_ssid` write only persists creds + sets reconnect_required (see
     // WifiProvisioningManager::set_credentials); association happens ONLY in
     // ensure_connected(), which is gated out here — so ESP-NOW channel pinning is safe.
+    g_ctrl_wifi.set_retry_interval_ms(g_ctrl_link.wifi_retry_interval_ms());
     ctrl_ensure_wifi_connected(now);
     wifi_watchdog_tick(now, g_ctrl_mqtt_up.load());
 #endif
+    // Runs on this (loop) task: every ESP-NOW send on the controller happens here, which
+    // the link manager's probe attribution relies on. Waveshare never joins WiFi.
+#if defined(CONTROLLER_BOARD_WAVESHARE)
+    const bool ctrl_wifi_joining = false;
+#else
+    const bool ctrl_wifi_joining = g_ctrl_wifi.join_in_progress();
+#endif
+    g_ctrl_link.tick(now, g_ctrl_mqtt_up.load(),
+                     g_cfg_ctrl_espnow_enabled && g_controller->transport().has_unicast_peer(),
+                     ctrl_wifi_joining);
+    // Polled every pass (not only when publishing over MQTT) so failures are stamped
+    // when they happen.
+    g_ctrl_espnow_fail_window.update(now, g_controller->transport().send_fail_count());
+    if (g_ctrl_wifi_drop_audit_pending.exchange(false)) {
+      ctrl_audit("wifi: association dropped, reason=%u",
+                 static_cast<unsigned>(g_ctrl_wifi_drop_reason.load()));
+    }
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
     // ---- MQTT connect + receive runs on the dedicated ctrl_mqtt task (ctrl_mqtt_task).
@@ -3168,82 +3290,36 @@ void loop() {
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
     ctrl_poll_weather(now);
 
-    // Isolation reboot: if both MQTT and ESP-NOW have been down continuously
-    // for kCtrlIsolationRebootMs, the network stack is likely wedged. The WiFi
-    // watchdog handles outright WiFi loss; this catches the case where WiFi
-    // appears up (ping passes) but TCP/MQTT is stuck and the display is also
-    // unreachable.
+    // Network isolation: neither MQTT nor the ESP-NOW peer is reachable. The governor
+    // tries an in-place recovery first, then reboots on a backed-off ladder (10 min,
+    // 1 h, 4 h, then daily) so a long outage cannot become a reboot loop. Polled on every
+    // loop pass from the first one.
     {
-      const uint32_t hb_ms = g_controller->app().runtime().heartbeat_last_seen_ms();
-      const bool espnow_active = (hb_ms > 0) &&
-          (static_cast<uint32_t>(now - hb_ms) < kCtrlIsolationRebootMs);
-      // Don't count MQTT as "down" (and don't start the isolation/reboot clock) until the
-      // network has actually become usable for DNS at least once. While WL_CONNECTED is
-      // true but DNS is not yet populated, MQTT legitimately cannot connect; treating that
-      // as isolation would reboot-loop the device during a normal (if slow) DHCP/DNS bring-up.
       static bool s_network_was_ready = false;
       if (ctrl_network_ready()) s_network_was_ready = true;
-      const bool isolated =
-          s_network_was_ready && !g_ctrl_mqtt_up.load() && !espnow_active;
-
-      if (!isolated) {
-        g_ctrl_isolation_start_ms = 0;
-        g_ctrl_isolation_recovery_done = false;
-      } else if (g_ctrl_isolation_start_ms == 0) {
-        g_ctrl_isolation_start_ms = now;
-        Serial.printf("[watchdog] isolation_start: mqtt=%d espnow_hb=%lu ago=%lums\n",
-                      g_ctrl_mqtt_up.load() ? 1 : 0,
-                      static_cast<unsigned long>(hb_ms),
-                      hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
-      } else {
-        // After the recovery attempt the clock is restarted, so the threshold to act
-        // shrinks to the (shorter) grace window.
-        const uint32_t isolated_for = static_cast<uint32_t>(now - g_ctrl_isolation_start_ms);
-        const uint32_t threshold = g_ctrl_isolation_recovery_done
-                                       ? kCtrlIsolationRecoveryGraceMs
-                                       : kCtrlIsolationRebootMs;
-        if (isolated_for >= threshold) {
-#if defined(CONTROLLER_BOARD_WAVESHARE)
-          if (!g_ctrl_isolation_recovery_done) {
-            // Try to recover the network subsystems IN PLACE before rebooting. Safe on
-            // this board: ESP-NOW is on a pinned channel and WiFi is not associated, so
-            // re-pinning the channel during re-init can't disrupt an IP link (Ethernet).
-            ctrl_audit("isolation: %lus isolated — recovering in place (esp-now re-init + mqtt reconnect)",
-                       static_cast<unsigned long>(isolated_for / 1000));
-            const bool espnow_ok = g_controller->transport().restart();
-            g_ctrl_mqtt_recovery.on_disconnected();   // reset backoff -> immediate reconnect
-            g_ctrl_mqtt_reconfigure_required = true;  // MQTT task disconnects + reconnects cleanly
-            g_ctrl_isolation_recovery_done = true;
-            g_ctrl_isolation_start_ms = now;          // restart clock; grace window now applies
-            ctrl_audit("isolation: recovery attempted (espnow_reinit=%d), grace %lus before reboot",
-                       espnow_ok ? 1 : 0,
-                       static_cast<unsigned long>(kCtrlIsolationRecoveryGraceMs / 1000));
-          } else {
-            // Recovery did not restore connectivity — reboot as the true last resort.
-            ctrl_audit("isolation_reboot: still isolated %lus after in-place recovery, mqtt=%d espnow_hb=%lu",
-                       static_cast<unsigned long>(isolated_for / 1000),
-                       g_ctrl_mqtt_up.load() ? 1 : 0,
-                       static_cast<unsigned long>(hb_ms));
-            ctrl_persist_reboot_reason("isolation: mqtt+espnow down, recovery failed");
-            ESP.restart();
-          }
-#else
-          // Classic board: ESP-NOW shares the WiFi home channel (WiFi associated), so an
-          // in-place re-init could disrupt the association. Keep the simple reboot; the
-          // WiFi watchdog also covers outright WiFi loss.
-          ctrl_audit("isolation_reboot: isolated for %lus, mqtt=%d espnow_hb=%lu",
-                     static_cast<unsigned long>(isolated_for / 1000),
-                     g_ctrl_mqtt_up.load() ? 1 : 0,
-                     static_cast<unsigned long>(hb_ms));
-          {
-            char reason[80];
-            snprintf(reason, sizeof(reason), "isolation: mqtt+espnow down %lus",
-                     static_cast<unsigned long>(isolated_for / 1000));
-            ctrl_persist_reboot_reason(reason);
-          }
+      const bool isolated = !g_ctrl_mqtt_up.load() && !g_ctrl_link.linked();
+      switch (g_ctrl_reboot_gov.poll(now, isolated, s_network_was_ready)) {
+        case thermostat::GovernorAction::RecoverInPlace:
+          ctrl_recover_network_in_place();
+          break;
+        case thermostat::GovernorAction::Reboot: {
+          const uint32_t count = g_ctrl_reboot_gov.reboot_count();
+          if (g_ctrl_cfg_ready) g_ctrl_cfg.putUInt("net_rb_cnt", count);
+          char reason[80];
+          snprintf(reason, sizeof(reason), "isolation: mqtt+espnow down, net_reboot=%lu",
+                   static_cast<unsigned long>(count));
+          ctrl_audit("isolation_reboot: %s", reason);
+          ctrl_persist_reboot_reason(reason);
           ESP.restart();
-#endif
+          break;
         }
+        case thermostat::GovernorAction::None:
+        default:
+          break;
+      }
+      if (g_ctrl_reboot_gov.take_count_reset() && g_ctrl_cfg_ready) {
+        g_ctrl_cfg.putUInt("net_rb_cnt", 0U);
+        ctrl_audit("isolation: network healthy 10 min, reboot count reset");
       }
     }
 
