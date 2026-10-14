@@ -13,12 +13,27 @@
 
 namespace thermostat {
 
+namespace {
+bool is_unicast_mac(const uint8_t mac[6]) {
+  static const uint8_t kBroadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  return !espnow_peer_filter::is_all_zero_mac(mac) && memcmp(mac, kBroadcast, 6) != 0;
+}
+
+#if defined(ARDUINO)
+constexpr int kSendSuccess = static_cast<int>(ESP_NOW_SEND_SUCCESS);
+#else
+constexpr int kSendSuccess = 0;  // ESP_NOW_SEND_SUCCESS
+#endif
+}  // namespace
+
 EspNowControllerTransport *EspNowControllerTransport::instance_ = nullptr;
 
 bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   config_ = config;
   last_heartbeat_sent_ms_ = 0;
   heartbeat_toggle_ = false;
+  // Any callbacks still owed from before a deinit may never arrive.
+  probe_tracker_.resync();
 
 #if defined(ARDUINO)
   WiFi.mode(WIFI_STA);
@@ -68,6 +83,7 @@ bool EspNowControllerTransport::begin(const EspNowControllerConfig &config) {
   return true;
 #else
   (void)config_;
+  instance_ = this;  // host tests drive on_send_static()
   initialized_ = true;
   return true;
 #endif
@@ -124,15 +140,27 @@ void EspNowControllerTransport::send_to_all_peers(const uint8_t *data, size_t le
     return;  // Throttle: too soon since last send
   }
   last_send_ms_ = now;
+#endif
   for (int i = 0; i < config_.peer_count; ++i) {
     if (!espnow_peer_filter::is_all_zero_mac(config_.peer_macs[i])) {
-      esp_now_send(config_.peer_macs[i], data, len);
+      send_frame(config_.peer_macs[i], data, len);
     }
   }
+}
+
+bool EspNowControllerTransport::send_frame(const uint8_t *mac, const uint8_t *data,
+                                           size_t len) {
+#if defined(ARDUINO)
+  if (esp_now_send(mac, data, len) != ESP_OK) {
+    return false;  // rejected: no send callback will follow
+  }
 #else
+  (void)mac;
   (void)data;
-  (void)len;
+  (void)len;  // host build: every send is accepted
 #endif
+  probe_tracker_.on_send_accepted();
+  return true;
 }
 
 void EspNowControllerTransport::publish_telemetry(
@@ -213,15 +241,15 @@ void EspNowControllerTransport::on_send_static(const uint8_t * /*mac_addr*/, int
   if (instance_ == nullptr) {
     return;
   }
+  const bool ok = status == kSendSuccess;
 #if defined(ARDUINO)
-  if (status == static_cast<int>(ESP_NOW_SEND_SUCCESS)) {
+  if (ok) {
     ++instance_->send_ok_count_;
   } else {
     ++instance_->send_fail_count_;
   }
-#else
-  (void)status;
 #endif
+  instance_->probe_tracker_.on_send_complete(ok);
 }
 
 void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
@@ -249,6 +277,11 @@ void EspNowControllerTransport::on_recv(const uint8_t *src_mac,
   if (!is_compatible_protocol_version(header->version)) {
     return;
   }
+
+#if defined(ARDUINO)
+  last_peer_rx_ms_.store(millis());
+#endif
+  peer_heard_.store(true);
 
   const auto packet_type = static_cast<PacketType>(header->type);
   switch (packet_type) {
@@ -306,6 +339,31 @@ void EspNowControllerTransport::send_heartbeat(uint32_t now_ms) {
   pkt.toggle = heartbeat_toggle_ ? 1 : 0;
 
   send_to_all_peers(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+}
+
+bool EspNowControllerTransport::has_unicast_peer() const {
+  for (int i = 0; i < config_.peer_count; ++i) {
+    if (is_unicast_mac(config_.peer_macs[i])) return true;
+  }
+  return false;
+}
+
+bool EspNowControllerTransport::send_probe() {
+  if (!initialized_ || !has_unicast_peer()) {
+    return false;
+  }
+  HeartbeatPacket pkt;
+  pkt.header.type = static_cast<uint8_t>(PacketType::Heartbeat);
+  pkt.header.version = kEspNowProtocolVersion;
+  pkt.toggle = heartbeat_toggle_ ? 1 : 0;
+
+  probe_tracker_.begin_probe();
+  for (int i = 0; i < config_.peer_count; ++i) {
+    if (is_unicast_mac(config_.peer_macs[i])) {
+      send_frame(config_.peer_macs[i], reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+    }
+  }
+  return probe_tracker_.end_probe();
 }
 
 }  // namespace thermostat

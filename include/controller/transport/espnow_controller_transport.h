@@ -3,7 +3,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <atomic>
+
 #include "controller/controller_app.h"
+#include "transport/espnow_probe_tracker.h"
 
 namespace thermostat {
 
@@ -32,8 +35,8 @@ class EspNowControllerTransport final : public IControllerTransport {
   // re-init -> re-register callbacks -> re-add peers -> re-pin channel). Used to recover
   // a wedged ESP-NOW link in place instead of rebooting. Preserves the command callbacks
   // set via set_callbacks(). Returns false if re-init fails.
-  // NOTE: re-pins the radio channel, so only safe when WiFi is NOT associated to an AP
-  // (i.e. the ESP-NOW-only / Ethernet-primary board) — the caller must enforce that.
+  // NOTE: re-pins the radio to the configured channel. On a WiFi-associated board call
+  // it only when the device is isolated; the link manager restores the wanted channel.
   bool restart();
   void loop(uint32_t now_ms);
 
@@ -57,12 +60,31 @@ class EspNowControllerTransport final : public IControllerTransport {
   uint32_t rx_count() const { return rx_count_; }
   const uint8_t *last_rx_mac() const { return last_rx_mac_; }
 
+  // True ESP-NOW liveness: set only when a frame from an authorized peer with a
+  // compatible protocol version arrives over the radio. Unlike the app-level
+  // heartbeat, this is never refreshed by MQTT.
+  bool peer_heard() const { return peer_heard_.load(); }
+  uint32_t last_peer_rx_ms() const { return last_peer_rx_ms_.load(); }
+  // Send one heartbeat to every unicast peer immediately, bypassing the send throttle.
+  // Used as a channel probe. Returns true when at least one probe frame was accepted by
+  // esp_now_send; the outcome is then reported by probe_status(). The probe counts as
+  // acked if ANY of its frames is acknowledged.
+  bool send_probe();
+  bool has_unicast_peer() const;
+  ProbeStatus probe_status() const { return probe_tracker_.status(); }
+  void clear_probe() { probe_tracker_.clear(); }
+
+  // ESP-NOW send-callback entry point (runs in the WiFi task). Public so host tests can
+  // deliver send callbacks; firmware reaches it only through the registered callback.
+  static void on_send_static(const uint8_t *mac_addr, int status);
+
  private:
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
-  static void on_send_static(const uint8_t *mac_addr, int status);
   void on_recv(const uint8_t *src_mac, const uint8_t *data, int len);
   void send_heartbeat(uint32_t now_ms);
   void send_to_all_peers(const uint8_t *data, size_t len);
+  // esp_now_send plus send-sequence accounting. Returns true when the frame was accepted.
+  bool send_frame(const uint8_t *mac, const uint8_t *data, size_t len);
 
   EspNowControllerConfig config_{};
   bool initialized_ = false;
@@ -81,6 +103,11 @@ class EspNowControllerTransport final : public IControllerTransport {
   uint32_t send_fail_count_ = 0;
   uint32_t rx_count_ = 0;
   uint8_t last_rx_mac_[6] = {0};
+  // Written by the receive callback (WiFi task), read by the main loop.
+  std::atomic<bool> peer_heard_{false};
+  std::atomic<uint32_t> last_peer_rx_ms_{0};
+  // Exact probe attribution (send sequence numbers; callback side runs in the WiFi task).
+  EspNowProbeTracker probe_tracker_;
   uint32_t last_send_ms_ = 0;
   static constexpr uint32_t kMinSendIntervalMs = 50;
 };
