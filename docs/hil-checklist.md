@@ -69,6 +69,19 @@ production devices for these scenarios.
         `f0e1d2c3b4a596870718293a4b5c6d7e` and add the spike MAC to the controller's
         device list. Same selectivity; note whether the controller's `[espnow] rx=`
         counter increases.
+      - Production radio settings: the firmware never calls `WiFi.setSleep(false)`, so a
+        peer joined to WiFi runs in the default modem sleep. Run cases B and C with the
+        peer associated in that default (no sleep change on either side).
+      - At least 100 probes per case. Record the ack RATE (acked / sent) on the peer's
+        channel and on each of the other channels, not only whether any ack arrived.
+      - Encrypted sender to unencrypted receiver: build the spike with an LMK while the
+        receiving peer has no key for it. Record whether `status=1` still appears and
+        whether the receiver's `[espnow] rx=` counter moves. A MAC-layer ACK can arrive
+        even when ESP-NOW then drops the frame for a key mismatch; if so, probes are false
+        positives against a mis-keyed peer. Note it in the spec.
+      - If the ack rate on the correct channel is low (well under 100 %), the follow-ups
+        are disabling modem sleep on the mains-powered devices or sending 2-3 frames per
+        probe. Record which, if any, is needed before production.
       - Pass: all three show `status=1` only on the peer's channel and max latency under
         100 ms. Timed-out sends print `latency_us=0` with `status=-1`; tally those
         separately. If results look odd, add a short settle delay after
@@ -95,12 +108,18 @@ production devices for these scenarios.
       `/status` shows `wifi_suspended` true (it also logs the suspend), it links over
       ESP-NOW, and display commands move the relays. Start the
       broker: within 6 minutes the display is back on WiFi and MQTT.
+      - Timing: record when the display detects MQTT down versus the controller, and when
+        the controller first logs `recovered in place` relative to the display's
+        `[espnow] controller CONNECTED`. The controller should not recover in place before
+        the display has linked; record it if it does.
 - [ ] **F6 Furnace failsafe not tripped.** During F2-F5 the controller's `failsafe_active`
       stays false.
 - [ ] **F7 Reboot ladder.** Power off the display, block the controller in UniFi, leave it
-      24 h. Unblock. `net_reboot_count` is 3 or less; `boot_count` rose by the same
-      amount; reboot reasons read `isolation: mqtt+espnow down, net_reboot=N`. After 10
-      healthy minutes `net_reboot_count` returns to 0.
+      24 h. Read `net_reboot_count` (NVS `net_rb_cnt`) after each reboot: 1 at 10 min, 2
+      at 1 h 10 min, 3 at 5 h 10 min, and no more than 3 reboots in the first 24 h.
+      Unblock. `boot_count` rose by the same amount; reboot reasons read
+      `isolation: mqtt+espnow down, net_reboot=N`. After 10 healthy minutes
+      `net_reboot_count` returns to 0.
 - [ ] **F8 In-place recovery.** Run during the F7 setup (display off, controller blocked).
       Two minutes after isolation begins, the controller's audit log shows
       `isolation: recovered in place`, and again 30 minutes later (32 min) if the
@@ -108,12 +127,28 @@ production devices for these scenarios.
       so the reboot is not due at 10 min). On the classic
       board confirm WiFi is actually restored afterwards (ESP-NOW is deinitialised before
       Wi-Fi is stopped).
+      - Classic board, MQTT task mid-connect: trigger the recovery while the controller's
+        MQTT task is inside a connect attempt (broker host reachable at IP level but not
+        answering, e.g. a firewall drop on 1883). No task watchdog reset, and WiFi rejoins
+        afterwards.
 - [ ] **F9 Cold boot in an outage.** With both blocked in UniFi, power-cycle both. They
       link over ESP-NOW within 60 s and neither reboots in 30 minutes.
 - [ ] **F10 Waveshare.** Repeat F2 and F7 with the Waveshare controller, unplugging
-      Ethernet instead of blocking WiFi.
+      Ethernet instead of blocking WiFi. For F7, read `net_reboot_count` after each reboot
+      (no more than 3 reboots in the first 24 h).
 - [ ] **F11 Disconnect reason.** After F3, once the controller is unblocked,
       `wifi_disconnect_reason` on `/status` is non-zero.
+- [ ] **F12 AP up, DHCP/gateway down.** Use a test SSID with no DHCP server (or block the
+      gateway for both clients), devices on APs with different channels, for more than 6
+      minutes. Expected: each join that associates without an IP is dropped after 20 s
+      (`[wifi] associated without IP for 20 s`) and retried after the normal interval, not
+      re-bounced every 10 s; the display suspends WiFi (`wifi_suspended` true) and links
+      over ESP-NOW; the controller searches and follows the display's channel between its
+      joins; display commands move the relays; `failsafe_active` stays false.
+- [ ] **F13 Mixed versions.** New controller with the old display, then old controller
+      with the new display. Run F2 and F5 with each pair: neither is worse than today
+      (old firmware on both), the furnace failsafe does not trip, and no device reboots
+      more often than before.
 
 Bench watch-items:
 - arduino-esp32 makes one automatic reconnect after the first disconnect since boot, and
@@ -125,6 +160,17 @@ Bench watch-items:
 - While the display is suspended and linked over ESP-NOW, the 5-minute ResumeWifi cycle
   costs a link gap each cycle when the AP channel differs from the controller's.
 - `error_espnow` reports send failures in the last 5 minutes and clears itself.
+- MQTT down while ESP-NOW is linked (F5 left running past 60 minutes): the controller logs
+  `mqtt down, espnow linked: recovered in place` every 60 minutes and never reboots; the
+  display logs none while `wifi_suspended` is true.
+
+## Pre-flash checks (production)
+
+- [ ] The production controller's `devices` list has exactly one unicast peer (the
+      display's MAC). The channel search assumes a single unicast peer.
+- [ ] Both production devices show an advancing `state/last_espnow_rx_ms` over MQTT (the
+      "Last ESP-NOW RX" sensors in Home Assistant), proving true ESP-NOW receive, before
+      the fallback is relied on.
 
 ## Result
 - Status: PASS / FAIL

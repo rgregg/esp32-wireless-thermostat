@@ -10,6 +10,13 @@ Plan: `docs/superpowers/plans/2026-10-13-espnow-wifi-outage-fallback.md`
       in the spec.
 - [ ] Production rollout to the live controller and display needs Ryan's go-ahead after
       the bench list passes. Flash both devices together.
+      Pre-flash checks (also in `docs/hil-checklist.md`):
+      - [ ] The production controller's `devices` has a single unicast peer (the display's
+            MAC; true as of 2026-10-14).
+      - [ ] Both production devices show an advancing `state/last_espnow_rx_ms` (true
+            ESP-NOW receive) before relying on the fallback.
+      - [ ] F0 ack rate under default modem sleep is acceptable, or the follow-up (modem
+            sleep off on mains-powered devices, or 2-3 frames per probe) is done.
 
 ## SoftAP captive-portal provisioning (replace BLE/NimBLE)
 
