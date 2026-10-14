@@ -2642,6 +2642,9 @@ void init_network() {
   wifi_cfg.retry_interval_ms = kNetworkRetryMs;
   g_wifi.begin(wifi_cfg);
   WiFi.onEvent(wifi_event_handler);
+  // The watchdog's forced reconnect goes through the WiFi manager so the join is tracked
+  // (ESP-NOW keeps off the channel while it runs). Runs on the loop task, like the tick.
+  wifi_watchdog_set_reconnect_hook([]() { g_wifi.request_reconnect(); });
 
   g_mqtt.setBufferSize(1024);
   g_mqtt.setServer(g_cfg_mqtt_host.c_str(), g_cfg_mqtt_port);

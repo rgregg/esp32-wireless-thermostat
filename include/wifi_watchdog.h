@@ -9,8 +9,8 @@
 //
 // The forced reconnect goes through the hook set by wifi_watchdog_set_reconnect_hook()
 // (the firmware points it at WifiProvisioningManager::request_reconnect(), so the join is
-// tracked and ESP-NOW leaves the channel alone). Without a hook it falls back to
-// WiFi.disconnect() + WiFi.reconnect().
+// tracked and ESP-NOW leaves the channel alone). Without a hook the forced reconnect does
+// nothing but log once: the watchdog never starts an untracked join itself.
 
 #include <WiFi.h>
 #include <atomic>
@@ -42,8 +42,9 @@ struct State {
 
 static State g_state;
 
-// Performs the forced reconnect; see the header comment. nullptr = direct WiFi calls.
+// Performs the forced reconnect; see the header comment. nullptr = no reconnect.
 static void (*g_reconnect_hook)() = nullptr;
+static bool g_missing_hook_logged = false;
 
 static void on_ping_success(esp_ping_handle_t hdl, void *args) {
     static_cast<State *>(args)->ping_got_reply = true;
@@ -164,9 +165,9 @@ static void handle_ping_result(uint32_t now_ms) {
         log_state("forcing_wifi_reconnect", now_ms);
         if (g_reconnect_hook) {
             g_reconnect_hook();
-        } else {
-            WiFi.disconnect();
-            WiFi.reconnect();
+        } else if (!g_missing_hook_logged) {
+            g_missing_hook_logged = true;
+            Serial.println("[watchdog] no reconnect hook set; forced reconnect skipped");
         }
     }
 }
