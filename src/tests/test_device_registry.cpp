@@ -124,7 +124,7 @@ TEST_CASE(discovery_controller_entity_count) {
 }
 
 TEST_CASE(discovery_display_entity_count) {
-  ASSERT_EQ(kDisplayDiscoveryCount, static_cast<size_t>(19));
+  ASSERT_EQ(kDisplayDiscoveryCount, static_cast<size_t>(23));
 }
 
 TEST_CASE(discovery_entities_for_role_controller) {

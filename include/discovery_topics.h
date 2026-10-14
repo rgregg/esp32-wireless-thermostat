@@ -51,7 +51,7 @@ static constexpr DiscoveryEntity kControllerDiscoveryEntities[] = {
 static constexpr size_t kControllerDiscoveryCount =
     sizeof(kControllerDiscoveryEntities) / sizeof(kControllerDiscoveryEntities[0]);
 
-// Display entities (19 total) — must match mqtt_publish_discovery()
+// Display entities (23 total) — must match mqtt_publish_discovery()
 static constexpr DiscoveryEntity kDisplayDiscoveryEntities[] = {
     {"number", "_display_timeout"},
     {"number", "_display_backlight_active"},
@@ -68,6 +68,10 @@ static constexpr DiscoveryEntity kDisplayDiscoveryEntities[] = {
     {"sensor", "_display_error_mqtt"},
     {"sensor", "_display_error_ota"},
     {"sensor", "_display_error_espnow"},
+    {"sensor", "_display_espnow_channel"},
+    {"sensor", "_display_espnow_search_count"},
+    {"sensor", "_display_net_reboot_count"},
+    {"sensor", "_display_wifi_disconnect_reason"},
     {"button", "_display_reset_sequence"},
     {"button", "_display_reboot"},
     {"sensor", "_indoor_temperature"},
