@@ -3127,7 +3127,11 @@ void thermostat_firmware_loop() {
   // reboot governor, and WiFi is never suspended for it.
   const bool espnow_link_usable = g_runtime != nullptr && g_cfg_espnow_enabled &&
                                   g_runtime->transport().has_unicast_peer();
-  // A broker is expected only on WiFi with MQTT enabled and a host configured.
+  // A broker is expected only on WiFi with MQTT enabled and a host configured. When it
+  // is not, the link policy and the governor's MQTT-down recovery are told MQTT is up:
+  // the policy must never suspend WiFi waiting for a broker that is not configured. The
+  // governor's isolation still uses the real MQTT state, so it then depends on ESP-NOW
+  // alone, as before.
   const bool mqtt_expected =
       !g_cfg_wifi_disabled && g_cfg_mqtt_enabled && g_cfg_mqtt_host.length() > 0;
   // Runs in both normal and ESP-NOW-only mode: when the radio is not associated it
@@ -3137,7 +3141,8 @@ void thermostat_firmware_loop() {
   if (g_runtime != nullptr) {
     // While the SoftAP provisioning portal is up the radio's channel is the portal's:
     // the link manager only tracks link state (no channel change or probe).
-    g_link.tick(now, g_mqtt.connected(), espnow_link_usable && !g_wifi.provisioning_active(),
+    g_link.tick(now, g_mqtt.connected() || !mqtt_expected,
+                espnow_link_usable && !g_wifi.provisioning_active(),
                 !g_cfg_wifi_disabled && g_wifi.join_in_progress());
     // Polled every pass (not only when publishing over MQTT) so failures are stamped
     // when they happen.

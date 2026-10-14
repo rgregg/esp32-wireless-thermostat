@@ -88,7 +88,8 @@ probes or enforces while associated.
   DHCP outage add up to a suspend. A gap of 2 minutes or more off WiFi restarts it, so a
   fresh association after a real WiFi outage gets a full 60 s for MQTT. While suspended
   the display keeps the STA disconnected and retries WiFi every 5 minutes, giving each
-  retry a 60 s window before it may suspend again.
+  retry a 60 s window before it may suspend again. A display with MQTT disabled or no
+  MQTT host never suspends WiFi (there is no broker to wait for).
 - WiFi rejoin attempts slow from every 5 s to every 60 s while ESP-NOW carries the link.
 - Unicast peer required: with a broadcast or empty peer MAC the link is not trusted for
   reboot decisions and WiFi is never suspended for it.
