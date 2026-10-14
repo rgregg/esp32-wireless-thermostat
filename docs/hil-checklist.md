@@ -145,6 +145,10 @@ production devices for these scenarios.
       re-bounced every 10 s; the display suspends WiFi (`wifi_suspended` true) and links
       over ESP-NOW; the controller searches and follows the display's channel between its
       joins; display commands move the relays; `failsafe_active` stays false.
+      - If the display links over ESP-NOW between its own joins, the policy keeps it on
+        WiFi (it never suspends while linked), so instead of suspending it cycles about
+        60 s off WiFi and about 22 s associated. Record which happened, and confirm the
+        link (`espnow_connected`) survives each associated stretch.
 - [ ] **F13 Mixed versions.** New controller with the old display, then old controller
       with the new display. Run F2 and F5 with each pair: neither is worse than today
       (old firmware on both), the furnace failsafe does not trip, and no device reboots
