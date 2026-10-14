@@ -78,7 +78,9 @@ production devices for these scenarios.
         production flash.
 
 - [ ] **F1 Baseline.** Both on WiFi, same AP. `/status` on both: `espnow_connected` true,
-      `connection_path` `mqtt+esp-now`, `espnow_search_count` 0.
+      `espnow_search_count` 0. Controller `/status`: `connection_path` `mqtt+esp-now`. The
+      display's `/status` has no `connection_path`; read its MQTT topic
+      `state/connection_path` instead.
 - [ ] **F2 Both lose WiFi.** Block both clients in UniFi. Within 60 s both report
       `espnow_connected` true again (`[espnow] controller CONNECTED` on serial), on the
       rendezvous channel (11 in the test builds, 6 in production). Change the setpoint on
@@ -89,8 +91,9 @@ production devices for these scenarios.
 - [ ] **F4 Display alone loses WiFi.** Mirror of F3.
 - [ ] **F5 Broker down, different AP channels.** Lock the two devices to APs on different
       2.4 GHz channels in UniFi. Stop the test broker. The display suspends WiFi only
-      after 60 s associated with MQTT down, so within about 2 minutes it logs a WiFi
-      suspend, links over ESP-NOW, and display commands move the relays. Start the
+      after 60 s continuously associated with MQTT down, so within about 2 minutes its
+      `/status` shows `wifi_suspended` true (it also logs the suspend), it links over
+      ESP-NOW, and display commands move the relays. Start the
       broker: within 6 minutes the display is back on WiFi and MQTT.
 - [ ] **F6 Furnace failsafe not tripped.** During F2-F5 the controller's `failsafe_active`
       stays false.
@@ -98,8 +101,9 @@ production devices for these scenarios.
       24 h. Unblock. `net_reboot_count` is 3 or less; `boot_count` rose by the same
       amount; reboot reasons read `isolation: mqtt+espnow down, net_reboot=N`. After 10
       healthy minutes `net_reboot_count` returns to 0.
-- [ ] **F8 In-place recovery.** At the start of F7, the controller's audit log shows
-      `isolation: recovered in place` 2 minutes after isolation begins. On the classic
+- [ ] **F8 In-place recovery.** Run during the F7 setup (display off, controller blocked).
+      Two minutes after isolation begins, the controller's audit log shows
+      `isolation: recovered in place`. On the classic
       board confirm WiFi is actually restored afterwards (ESP-NOW is deinitialised before
       Wi-Fi is stopped).
 - [ ] **F9 Cold boot in an outage.** With both blocked in UniFi, power-cycle both. They

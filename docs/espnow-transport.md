@@ -70,8 +70,9 @@ only when neither device is on WiFi.
   probe is dropped. When a join ends unassociated, the radio is put back on the wanted
   channel (checked once a second). Tracking: `include/wifi_join_tracker.h`.
 - When neither device is on WiFi they meet on `espnow_channel`.
-- The display leaves WiFi only after it has been associated for 60 s with MQTT down and
-  the controller not heard. It then keeps the STA disconnected and retries WiFi every
+- The display leaves WiFi only after 60 s of continuous association with MQTT down and
+  the controller not linked. The MQTT-down clock only runs while associated and restarts
+  on every (re)association, so a suspend needs a full 60 s window on one association. It then keeps the STA disconnected and retries WiFi every
   5 minutes, giving each retry a 60 s window before it may suspend again.
 - WiFi rejoin attempts slow from every 5 s to every 60 s while ESP-NOW carries the link.
 - Unicast peer required: with a broadcast or empty peer MAC the link is not trusted for
@@ -84,8 +85,11 @@ only when neither device is on WiFi.
 Logic: `include/transport/espnow_channel_policy.h` (unit-tested). Radio glue:
 `include/transport/espnow_link_manager.h`.
 
-`/status` fields: `espnow_channel`, `connection_path`, `espnow_search_count`,
+`/status` fields (both devices): `espnow_channel`, `espnow_search_count`,
 `net_reboot_count`, `net_reboot_in_s`, `wifi_disconnect_reason`, `espnow_connected`.
+The controller's `/status` also has `connection_path`; the display's `/status` instead has
+`wifi_suspended`, and its connection path is only published on MQTT
+(`state/connection_path`).
 `error_espnow` reports `send_failed` only for send failures in the last 5 minutes
 (`include/transport/espnow_fail_window.h`), and clears itself.
 
