@@ -66,7 +66,7 @@ void WifiProvisioningManager::on_wifi_connected() {
 }
 
 void WifiProvisioningManager::on_wifi_disconnected(uint8_t reason) {
-  m_join.on_disconnected(reason);
+  m_join.on_disconnected(reason, millis());
 }
 
 bool WifiProvisioningManager::join_in_progress() const {
@@ -144,9 +144,18 @@ void WifiProvisioningManager::ensure_connected(uint32_t now_ms) {
   if (has_credentials()) {
     ensure_wifi_radio();
     if ((now_ms - m_last_attempt_ms) < m_config.retry_interval_ms) return;
-    m_last_attempt_ms = now_ms;
-    m_join.on_begin(now_ms);  // before begin(): its events may arrive at once
-    WiFi.begin(m_ssid.c_str(), m_password.c_str());
+    // One attempt at a time: while a join runs (10 s cap as backstop) nothing is issued.
+    // WiFi.begin() is STA.begin() + STA.connect(), but its wl_status_t result cannot say
+    // whether the connect started (on success it returns the possibly stale
+    // STA.status()). STA.connect() returns false exactly when esp_wifi_connect was never
+    // called (bad SSID/passphrase length, set_config/DHCP/connect error), and then no
+    // event will ever end the join, so the tracker cancels it.
+    const WifiJoinTracker::Start started = m_join.try_begin(now_ms, [this]() {
+      return WiFi.STA.begin() && WiFi.STA.connect(m_ssid.c_str(), m_password.c_str());
+    });
+    if (started != WifiJoinTracker::Start::Busy) {
+      m_last_attempt_ms = now_ms;
+    }
     return;
   }
 

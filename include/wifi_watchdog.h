@@ -6,6 +6,11 @@
 // unreachable for 2 minutes it forces a WiFi reconnect, and repeats every 2 minutes
 // while it stays unreachable. It never reboots: NetworkRebootGovernor is the only
 // network reboot authority.
+//
+// The forced reconnect goes through the hook set by wifi_watchdog_set_reconnect_hook()
+// (the firmware points it at WifiProvisioningManager::request_reconnect(), so the join is
+// tracked and ESP-NOW leaves the channel alone). Without a hook it falls back to
+// WiFi.disconnect() + WiFi.reconnect().
 
 #include <WiFi.h>
 #include <atomic>
@@ -36,6 +41,9 @@ struct State {
 };
 
 static State g_state;
+
+// Performs the forced reconnect; see the header comment. nullptr = direct WiFi calls.
+static void (*g_reconnect_hook)() = nullptr;
 
 static void on_ping_success(esp_ping_handle_t hdl, void *args) {
     static_cast<State *>(args)->ping_got_reply = true;
@@ -154,12 +162,22 @@ static void handle_ping_result(uint32_t now_ms) {
         // RECONNECT_THRESHOLD_MS away.
         g_state.first_failure_ms = now_ms;
         log_state("forcing_wifi_reconnect", now_ms);
-        WiFi.disconnect();
-        WiFi.reconnect();
+        if (g_reconnect_hook) {
+            g_reconnect_hook();
+        } else {
+            WiFi.disconnect();
+            WiFi.reconnect();
+        }
     }
 }
 
 } // namespace wifi_watchdog
+
+// Route the watchdog's forced reconnect through the caller's tracked reconnect path
+// (e.g. WifiProvisioningManager::request_reconnect()). Call from setup().
+inline void wifi_watchdog_set_reconnect_hook(void (*hook)()) {
+    wifi_watchdog::g_reconnect_hook = hook;
+}
 
 // connectivity_proven: pass true when the application layer (e.g. MQTT) is
 // confirmed working — this proves WiFi is healthy, so skip the gateway ping

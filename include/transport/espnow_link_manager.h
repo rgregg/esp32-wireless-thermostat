@@ -103,7 +103,12 @@ class EspNowLinkManager {
       wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
       const uint8_t want = policy_.current_channel();
       if (esp_wifi_get_channel(&primary, &second) == ESP_OK && primary != want) {
-        esp_wifi_set_channel(want, WIFI_SECOND_CHAN_NONE);
+        const esp_err_t err = esp_wifi_set_channel(want, WIFI_SECOND_CHAN_NONE);
+        if (err != ESP_OK) {
+          // Retried on the next enforcement pass (1 s).
+          log_w("[espnow-link] enforce set_channel(%u) failed: %s", want,
+                esp_err_to_name(err));
+        }
       }
     }
   }

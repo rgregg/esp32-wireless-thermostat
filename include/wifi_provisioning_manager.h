@@ -80,9 +80,10 @@ public:
   void set_suspended(bool suspended);
   bool suspended() const { return m_suspended; }
 
-  // True from each WiFi.begin() this manager issues until that attempt ends (GOT_IP, or a
-  // disconnect reporting its failure), at most 10 s. Always false while suspended. While
-  // true the radio is scanning/associating and its channel must not be changed.
+  // True from each connect this manager actually starts (and from arduino-esp32's one
+  // automatic retry) until that attempt ends (GOT_IP, or a disconnect reporting its
+  // failure), at most 10 s. Always false while suspended. While true the radio is
+  // scanning/associating and its channel must not be changed.
   bool join_in_progress() const;
 
   bool provisioning_active() const { return m_provisioning_started; }

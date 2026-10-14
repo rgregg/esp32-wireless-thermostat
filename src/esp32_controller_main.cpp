@@ -2855,6 +2855,9 @@ void setup() {
   }
   Serial.printf("Reset reason: %s | last reboot cause: %s\n",
                 g_ctrl_reset_reason.c_str(), g_ctrl_reboot_reason.c_str());
+  // The watchdog's forced reconnect goes through the WiFi manager so the join is tracked
+  // (ESP-NOW keeps off the channel while it runs). Runs on this loop task, like the tick.
+  wifi_watchdog_set_reconnect_hook([]() { g_ctrl_wifi.request_reconnect(); });
 
   // Make the Task Watchdog config deterministic regardless of the Arduino
   // default: 15s timeout, watch both cores' idle tasks, panic on timeout. Every
@@ -3117,9 +3120,9 @@ void loop() {
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
 #if !defined(CONTROLLER_BOARD_WAVESHARE)
     // Classic board: WiFi STA is the IP link, so keep it connected and let the WiFi
-    // watchdog reboot on sustained WiFi loss. On Waveshare, WiFi never associates
-    // (ESP-NOW only) and Ethernet/lwIP self-recovers — the isolation watchdog below is
-    // the SOLE reboot authority (no IP-link-down reboot). See ethernet-primary plan.
+    // watchdog force reconnects on sustained gateway loss. On Waveshare, WiFi never
+    // associates (ESP-NOW only) and Ethernet/lwIP self-recovers — the isolation watchdog
+    // below is the SOLE reboot authority (no IP-link-down reboot). See ethernet-primary plan.
     // NOTE: this gate is what keeps the WiFi radio from ever associating on Waveshare.
     // A stray `wifi_ssid` write only persists creds + sets reconnect_required (see
     // WifiProvisioningManager::set_credentials); association happens ONLY in
