@@ -57,3 +57,9 @@
     checksum, no inter-env wipe.
   - After any flash-prep `scp`, verify it succeeded and check the remote file's timestamp
     before flashing (`ls -la`); a failed scp leaves stale bins that flash "successfully."
+
+## ESP-NOW channel search: only 1, 6, 11 (2026-10-13)
+- Proposed sweeping channels 1-13 to find the ESP-NOW peer; Ryan corrected: search only the
+  three non-overlapping 2.4 GHz channels (1, 6, 11).
+- **Rule:** for 2.4 GHz channel search or selection on this project, default to {1, 6, 11}
+  (plus a last-known channel if there is one). Don't design full-band sweeps.
