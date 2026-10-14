@@ -105,6 +105,9 @@ when encryption is enabled. This is the first implementation task (bench spike).
 does not hold, the fallback is to dwell 12 s per candidate channel listening for the
 10 s heartbeat, about 36 s for a full pass.
 
+Bench result (scenario F0 in `docs/hil-checklist.md`): PENDING, to be run in the bench
+session. The production flash is gated on it passing.
+
 ### 2. WiFi rejoin behaviour
 
 - `WifiProvisioningManager::ensure_connected` gets a variable retry interval: 5 s as

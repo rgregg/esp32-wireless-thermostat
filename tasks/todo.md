@@ -1,5 +1,16 @@
 # TODO
 
+## ESP-NOW fallback during WiFi outages
+
+Spec: `docs/superpowers/specs/2026-10-13-espnow-wifi-outage-fallback-design.md`
+Plan: `docs/superpowers/plans/2026-10-13-espnow-wifi-outage-fallback.md`
+- [x] Firmware and native tests (Tasks 1-7) and documentation (Task 8 steps 1, 3-5).
+- [ ] Bench session with Ryan: flash bench devices, run F0-F11 in
+      `docs/hil-checklist.md`, record results in `docs/hil-results.md` and the F0 outcome
+      in the spec.
+- [ ] Production rollout to the live controller and display needs Ryan's go-ahead after
+      the bench list passes. Flash both devices together.
+
 ## SoftAP captive-portal provisioning (replace BLE/NimBLE)
 
 Replace BLE/Improv provisioning with SoftAP + captive portal on display + both

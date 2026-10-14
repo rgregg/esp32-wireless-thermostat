@@ -25,7 +25,9 @@
 ## Device Defaults
 - MQTT host: `mqtt.lan`
 - MQTT user/password: empty
-- ESP-NOW channel: `6` (both devices)
+- ESP-NOW rendezvous channel: `6` (both devices). While on WiFi a device uses its AP's
+  channel; off WiFi it follows its peer across channels 1, 6 and 11. See
+  `docs/espnow-transport.md`.
 - Controller MQTT client ID: `esp32-furnace-controller`
 - Thermostat MQTT client ID: `esp32-furnace-thermostat`
 - Controller OTA/mDNS hostname: `esp32-furnace-controller`
