@@ -62,21 +62,26 @@ ChannelAction EspNowChannelPolicy::poll(const ChannelInputs &in) {
     resumed_ = false;
   }
 
-  // The MQTT-down clock starts at the first associated poll with MQTT down and stops when
-  // MQTT comes up. Short gaps in association keep it running: with the AP up and DHCP
-  // down, each join is dropped after 20 s associated without IP and retried seconds
-  // later, and those failed joins must add up to a suspend. A gap of at least
-  // mqtt_down_reset_gap_ms is a real WiFi outage, so the next association restarts the
-  // clock and gets a full window for MQTT.
+  // The MQTT-down clock counts only time spent associated with MQTT down, so a short
+  // WiFi drop does not count toward a suspend. It accumulates across short gaps: with
+  // the AP up and DHCP down, each join is dropped after 20 s associated without IP and
+  // retried seconds later, and those failed joins must add up to a suspend. A gap of at
+  // least mqtt_down_reset_gap_ms is a real WiFi outage, so the next association restarts
+  // the clock and gets a full window for MQTT. Each poll adds at most 1 s, so a stalled
+  // loop cannot jump the clock forward.
   if (in.mqtt_up) {
     mqtt_down_ = false;
+    mqtt_down_associated_ms_ = 0;
   } else if (in.wifi_associated) {
-    if (!mqtt_down_ ||
-        static_cast<uint32_t>(now - last_associated_ms_) >= config_.mqtt_down_reset_gap_ms) {
+    const uint32_t since_associated = static_cast<uint32_t>(now - last_associated_ms_);
+    if (!mqtt_down_ || since_associated >= config_.mqtt_down_reset_gap_ms) {
       mqtt_down_ = true;
-      mqtt_down_since_ms_ = now;
+      mqtt_down_associated_ms_ = 0;
+    } else if (prev_poll_associated_) {
+      mqtt_down_associated_ms_ += since_associated < 1000u ? since_associated : 1000u;
     }
   }
+  prev_poll_associated_ = in.wifi_associated;
   if (in.wifi_associated) last_associated_ms_ = now;
 
   if (wifi_suspended_ &&
@@ -102,7 +107,7 @@ ChannelAction EspNowChannelPolicy::poll(const ChannelInputs &in) {
         resumed_ &&
         static_cast<uint32_t>(now - resumed_at_ms_) < config_.wifi_resume_window_ms;
     if (config_.role == LinkRole::Display && mqtt_down_ && !is_linked && !in_resume_window &&
-        static_cast<uint32_t>(now - mqtt_down_since_ms_) >= config_.mqtt_down_suspend_ms) {
+        mqtt_down_associated_ms_ >= config_.mqtt_down_suspend_ms) {
       wifi_suspended_ = true;
       suspended_at_ms_ = now;
       return {ChannelActionType::SuspendWifi, 0};

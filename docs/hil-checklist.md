@@ -104,7 +104,7 @@ production devices for these scenarios.
 - [ ] **F4 Display alone loses WiFi.** Mirror of F3.
 - [ ] **F5 Broker down, different AP channels.** Lock the two devices to APs on different
       2.4 GHz channels in UniFi. Stop the test broker. The display suspends WiFi once it
-      is associated and MQTT has been down for 60 s, so within about 2 minutes its
+      has spent 60 s associated with MQTT down, so within about 2 minutes its
       `/status` shows `wifi_suspended` true (it also logs the suspend), it links over
       ESP-NOW, and display commands move the relays. Start the
       broker: within 6 minutes the display is back on WiFi and MQTT.

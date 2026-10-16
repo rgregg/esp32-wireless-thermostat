@@ -398,4 +398,41 @@ TEST_CASE(channel_display_suspend_clock_restarts_after_long_wifi_gap) {
   ASSERT_TRUE(s.now - associated_at >= 60000u && s.now - associated_at < 61000u);
 }
 
+TEST_CASE(channel_display_suspend_clock_counts_only_associated_time) {
+  // A short WiFi drop during a broker outage: time off WiFi must not count toward the
+  // 60 s, or the display would suspend on its first poll after re-associating.
+  Sim s(cfg(LinkRole::Display, 5000));
+  s.in.mqtt_up = false;
+  s.in.wifi_channel = 1;
+  s.in.wifi_associated = true;
+  s.run(5000);
+  s.in.wifi_associated = false;
+  s.run(100000);
+  s.in.wifi_associated = true;
+  const uint32_t associated_at = s.now;
+  bool suspended = false;
+  while (!suspended && s.now - associated_at < 70000u) {
+    suspended = s.step().type == ChannelActionType::SuspendWifi;
+  }
+  ASSERT_TRUE(suspended);
+  ASSERT_TRUE(s.now - associated_at >= 54000u && s.now - associated_at < 56000u);
+}
+
+TEST_CASE(channel_display_suspend_clock_adds_at_most_1s_per_poll) {
+  // A stalled loop must not jump the MQTT-down clock past the suspend threshold.
+  Sim s(cfg(LinkRole::Display, 5000));
+  s.in.mqtt_up = false;
+  s.in.wifi_channel = 1;
+  s.in.wifi_associated = true;
+  s.run(10000);
+  ASSERT_TRUE(s.step(90000).type == ChannelActionType::None);  // counts as 1 s
+  const uint32_t resumed_at = s.now;
+  bool suspended = false;
+  while (!suspended && s.now - resumed_at < 70000u) {
+    suspended = s.step().type == ChannelActionType::SuspendWifi;
+  }
+  ASSERT_TRUE(suspended);
+  ASSERT_TRUE(s.now - resumed_at >= 48000u && s.now - resumed_at < 50000u);
+}
+
 #endif

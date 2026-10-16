@@ -26,7 +26,8 @@ struct EspNowChannelConfig {
   uint32_t probe_timeout_ms = 200;         // wait this long for a probe acknowledgement
   uint32_t search_interval_ms = 20000;     // 20 s on the controller, 5 s on the display
   uint32_t ack_hold_ms = 30000;            // after an ack, stay put this long awaiting a frame
-  uint32_t mqtt_down_suspend_ms = 60000;   // display: leave WiFi after MQTT down this long
+  uint32_t mqtt_down_suspend_ms = 60000;   // display: leave WiFi after this long associated
+                                           // with MQTT down
   // display: off WiFi this long restarts the MQTT-down clock (longer than one failed
   // join cycle: 60 s retry + 10 s scan + 20 s associated without IP)
   uint32_t mqtt_down_reset_gap_ms = 120000;
@@ -92,8 +93,9 @@ class EspNowChannelPolicy {
   uint32_t search_count_ = 0;
 
   bool mqtt_down_ = false;
-  uint32_t mqtt_down_since_ms_ = 0;
+  uint32_t mqtt_down_associated_ms_ = 0;  // associated time with MQTT down
   uint32_t last_associated_ms_ = 0;  // last poll that saw WiFi associated
+  bool prev_poll_associated_ = false;
   bool wifi_suspended_ = false;
   uint32_t suspended_at_ms_ = 0;
   bool resumed_ = false;

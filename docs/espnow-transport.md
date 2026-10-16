@@ -84,11 +84,12 @@ probes or enforces while associated.
 - While the SoftAP provisioning portal is up (no WiFi credentials), the link manager
   leaves the channel to the portal: it tracks link state but never changes channel or
   probes.
-- The display leaves WiFi once it is associated, MQTT has been down for 60 s and the
-  controller is not linked. The MQTT-down clock starts on the first association with MQTT
-  down and keeps running across short gaps in association, so the 20 s failed joins of a
-  DHCP outage add up to a suspend. A gap of 2 minutes or more off WiFi restarts it, so a
-  fresh association after a real WiFi outage gets a full 60 s for MQTT. While suspended
+- The display leaves WiFi once it has spent 60 s associated with MQTT down and the
+  controller is not linked. The MQTT-down clock counts only associated time (at most 1 s
+  per poll), so time off WiFi never counts toward a suspend. It accumulates across short
+  gaps in association, so the 20 s failed joins of a DHCP outage add up to a suspend. A
+  gap of 2 minutes or more off WiFi resets it, so a fresh association after a real WiFi
+  outage gets a full 60 s for MQTT. MQTT coming up also resets it. While suspended
   the display keeps the STA disconnected and retries WiFi every 5 minutes, giving each
   retry a 60 s window before it may suspend again. A display with MQTT disabled or no
   MQTT host never suspends WiFi (there is no broker to wait for).
