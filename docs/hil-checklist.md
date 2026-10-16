@@ -133,6 +133,8 @@ production devices for these scenarios.
         afterwards.
 - [ ] **F9 Cold boot in an outage.** With both blocked in UniFi, power-cycle both. They
       link over ESP-NOW within 60 s and neither reboots in 30 minutes.
+      - Display in ESP-NOW-only mode with the controller powered off: the display does
+        not reboot (the ladder arms only once the controller has been heard).
 - [ ] **F10 Waveshare.** Repeat F2 and F7 with the Waveshare controller, unplugging
       Ethernet instead of blocking WiFi. For F7, read `net_reboot_count` after each reboot
       (no more than 3 reboots in the first 24 h).
@@ -166,7 +168,9 @@ Bench watch-items:
 - `error_espnow` reports send failures in the last 5 minutes and clears itself.
 - MQTT down while ESP-NOW is linked (F5 left running past 60 minutes): the controller logs
   `mqtt down, espnow linked: recovered in place` every 60 minutes and never reboots; the
-  display logs none while `wifi_suspended` is true.
+  display recovers hourly too, never while `wifi_suspended` is true: one that falls due
+  while suspended runs in the next resume window and logs
+  `mqtt down, espnow linked (deferred)`.
 
 ## Pre-flash checks (production)
 

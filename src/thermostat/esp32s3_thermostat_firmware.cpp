@@ -3154,7 +3154,10 @@ void thermostat_firmware_loop() {
   // that fights the pinned ESP-NOW channel. Controller state arrives over ESP-NOW
   // (transport callbacks), not MQTT, so the apply/publish blocks aren't needed.
   if (!g_cfg_wifi_disabled) {
-    g_wifi.set_retry_interval_ms(g_link.wifi_retry_interval_ms());
+    // A broadcast/empty peer never counts as linked (see espnow_link_usable), so it
+    // never slows WiFi retries either.
+    g_wifi.set_retry_interval_ms(espnow_link_usable ? g_link.wifi_retry_interval_ms()
+                                                    : kNetworkRetryMs);
     g_wifi.set_suspended(espnow_link_usable && g_link.wifi_suspended());
     ensure_wifi_connected(now);
     wifi_watchdog_tick(now, g_mqtt.connected());
@@ -3230,17 +3233,32 @@ void thermostat_firmware_loop() {
     // loop pass from the first one.
     // MQTT down with the controller linked gets an in-place recovery every 60 min. The
     // governor is told MQTT is up whenever it is not expected to be: MQTT disabled, no
-    // host, ESP-NOW-only mode, or WiFi intentionally suspended by the link policy (not a
-    // wedge; the policy resumes WiFi itself every 5 min). Reporting "up" while suspended
-    // restarts the 60 min clock, so a suspend/resume cycle never adds up to a recovery,
-    // while a stack that cannot associate (never suspended) still gets one.
+    // host, or ESP-NOW-only mode. The 60 min clock keeps running while the link policy
+    // has WiFi suspended, so a display whose own WiFi/MQTT path is wedged still recovers
+    // while it suspend-cycles. A recovery that falls due while suspended waits for the
+    // next resume window (recovering would rejoin WiFi against the suspend).
+    // ESP-NOW-only mode counts as network-ready once the controller has been heard, so a
+    // display that boots with the controller absent does not run the reboot ladder.
+    static bool s_mqtt_recover_pending = false;
     const bool mqtt_connected = g_mqtt.connected();
     const bool isolated = !mqtt_connected && !(espnow_link_usable && g_link.linked());
-    const bool mqtt_up_for_governor = mqtt_connected || !mqtt_expected || g_wifi.suspended();
-    const bool network_was_ready = g_wifi_connected_once.load() || g_cfg_wifi_disabled;
+    const bool mqtt_up_for_governor = mqtt_connected || !mqtt_expected;
+    const bool network_was_ready =
+        g_wifi_connected_once.load() ||
+        (g_cfg_wifi_disabled && g_runtime != nullptr && g_runtime->transport().peer_heard());
+    if (s_mqtt_recover_pending && mqtt_connected) {
+      s_mqtt_recover_pending = false;  // MQTT is back: nothing to recover
+    } else if (s_mqtt_recover_pending && !g_wifi.suspended()) {
+      s_mqtt_recover_pending = false;
+      recover_network_in_place("mqtt down, espnow linked (deferred)");
+    }
     switch (g_reboot_gov.poll(now, isolated, mqtt_up_for_governor, network_was_ready)) {
       case thermostat::GovernorAction::RecoverInPlace:
-        recover_network_in_place(isolated ? "isolation" : "mqtt down, espnow linked");
+        if (!isolated && g_wifi.suspended()) {
+          s_mqtt_recover_pending = true;
+        } else {
+          recover_network_in_place(isolated ? "isolation" : "mqtt down, espnow linked");
+        }
         break;
       case thermostat::GovernorAction::Reboot: {
         const uint32_t count = g_reboot_gov.reboot_count();

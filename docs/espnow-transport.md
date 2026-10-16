@@ -129,15 +129,18 @@ recoveries. It reboots after 10 minutes isolated, then 1 hour, then 4 hours, the
 once per 24 hours; a reboot due at the same moment as a recovery wins. The count is
 stored in NVS (`net_rb_cnt`) and resets after 10 healthy (not isolated) minutes. While
 the stored count is 0, isolation is not counted until the IP network has been usable once
-this boot.
+this boot (for a display in ESP-NOW-only mode: until the controller has been heard once,
+so a display that boots with the controller absent does not run the ladder).
 
 MQTT down while the ESP-NOW peer is linked is not isolation: the furnace is still
 controlled, only Home Assistant loses the device. A wedged WiFi stack would never recover
 from that by itself, so after 60 minutes of continuous MQTT-down the governor recovers in
 place (same procedure), and again at 120, 180 ... minutes. It never reboots on this path.
-MQTT counts as up when it is not expected: MQTT disabled, no host configured, the display
-in ESP-NOW-only mode, or the display's WiFi intentionally suspended by the link policy (a
-suspend/resume cycle restarts the 60-minute clock). The same network-ready gate applies.
+MQTT counts as up when it is not expected: MQTT disabled, no host configured, or the
+display in ESP-NOW-only mode. The 60-minute clock keeps running while the display's link
+policy has WiFi suspended, so a display whose own WiFi/MQTT path is wedged still recovers
+while it suspend-cycles; a recovery that falls due while suspended waits for the next
+5-minute resume window. The same network-ready gate applies.
 `net_reboot_in_s` is 0 when isolation is not being counted, when the reboot is due, and
 after it was issued.
 
