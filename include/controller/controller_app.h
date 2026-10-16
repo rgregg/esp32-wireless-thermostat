@@ -38,10 +38,9 @@ class ControllerApp {
                 const ControllerConfig &config = ControllerConfig());
 
   void on_heartbeat(uint32_t now_ms);
-  // Applies the command immediately but does NOT send telemetry: on the firmware this is
-  // called from the ESP-NOW receive callback (WiFi task), and every ESP-NOW send must
-  // happen on the loop task (channel-probe attribution). The resulting telemetry is sent
-  // by the next tick().
+  // Applies the command immediately but does NOT send telemetry; the resulting telemetry
+  // is sent by the next tick(). Call from the loop task (ControllerNode queues ESP-NOW
+  // frames from the WiFi task and applies them in its tick()).
   CommandApplyResult on_command_word(uint32_t packed_word,
                                     const uint8_t *source_mac = nullptr);
   void on_thermostat_ack(uint16_t seq);
@@ -119,7 +118,7 @@ class ControllerApp {
   float outdoor_temp_c_ = 0.0f;
   WeatherIcon outdoor_icon_ = WeatherIcon::Unknown;
 
-  // Set by on_command_word() (possibly on another task); consumed by tick().
+  // Set by on_command_word(); consumed by tick().
   std::atomic<bool> publish_pending_{false};
 
   uint32_t persisted_filter_runtime_s_ = 0;

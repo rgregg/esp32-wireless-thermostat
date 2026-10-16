@@ -2271,8 +2271,12 @@ void ctrl_publish_runtime_state() {
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(esp_get_free_heap_size()));
   g_ctrl_mqtt.publish(self_topic_for("state/free_heap_bytes").c_str(), buf, true);
+  // MQTT and ESP-NOW inbound queue-full drops together.
   snprintf(buf, sizeof(buf), "%lu",
-           static_cast<unsigned long>(g_ctrl_inbound_dropped.load()));
+           static_cast<unsigned long>(g_ctrl_inbound_dropped.load() +
+                                      (g_controller != nullptr
+                                           ? g_controller->inbound_dropped()
+                                           : 0u)));
   g_ctrl_mqtt.publish(self_topic_for("state/inbound_dropped").c_str(), buf, true);
   {
     // Coredump presence: a captured crash dump waiting to be pulled (GET /coredump).
