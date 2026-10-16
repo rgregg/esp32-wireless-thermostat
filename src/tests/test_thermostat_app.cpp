@@ -11,9 +11,11 @@ class FakeThermostatTransport : public thermostat::IThermostatTransport {
     last_cmd = packed_word;
     ++cmd_count;
   }
-  void publish_controller_ack(uint16_t seq) override {
+  bool publish_controller_ack(uint16_t seq) override {
+    if (!accept_acks) return false;
     last_ack_seq = seq;
     ++ack_count;
+    return true;
   }
   void publish_indoor_temperature_c(float temp_c) override { last_temp = temp_c; }
   void publish_indoor_humidity(float humidity_pct) override { last_hum = humidity_pct; }
@@ -22,6 +24,7 @@ class FakeThermostatTransport : public thermostat::IThermostatTransport {
   int cmd_count = 0;
   uint16_t last_ack_seq = 0;
   int ack_count = 0;
+  bool accept_acks = true;
   float last_temp = 0.0f;
   float last_hum = 0.0f;
 };
@@ -52,12 +55,14 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   telem.setpoint_c = 18.0f;
 
   app.on_controller_telemetry(2000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 22.5f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 1);
   ASSERT_EQ(tx.ack_count, 1);
 
   telem.seq = 2;
   app.on_controller_telemetry(7000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 18.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 2);
   ASSERT_EQ(tx.ack_count, 2);
@@ -88,20 +93,51 @@ TEST_CASE(thermostat_app_ignores_duplicate_and_stale_controller_seq) {
   telem.mode_code = 1;
   telem.setpoint_c = 20.0f;
   app.on_controller_telemetry(1000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
 
   telem.seq = 10;  // duplicate
   telem.setpoint_c = 25.0f;
   app.on_controller_telemetry(2000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
 
   telem.seq = 9;  // stale
   telem.setpoint_c = 15.0f;
   app.on_controller_telemetry(3000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
+}
+
+// The ACK is not sent from on_controller_telemetry() (the ESP-NOW receive task) but by
+// send_pending_ack() on the loop task; only the latest owed ACK goes out, once.
+TEST_CASE(thermostat_app_telemetry_ack_deferred_to_send_pending_ack) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 5;
+  app.on_controller_telemetry(1000, telem);
+  ASSERT_EQ(tx.ack_count, 0);
+  telem.seq = 6;
+  app.on_controller_telemetry(1100, telem);
+  ASSERT_EQ(tx.ack_count, 0);
+
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 1);
+  ASSERT_EQ(tx.last_ack_seq, 6);
+
+  app.send_pending_ack();  // nothing owed
+  ASSERT_EQ(tx.ack_count, 1);
+
+  telem.seq = 0;  // seq 0 is a valid ACK (stale -> re-ACKs the last accepted seq 6)
+  app.on_controller_telemetry(1200, telem);
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 2);
+  ASSERT_EQ(tx.last_ack_seq, 6);
 }
 
 TEST_CASE(thermostat_app_reset_local_command_sequence_restarts_at_one) {
@@ -240,5 +276,52 @@ TEST_CASE(thermostat_app_telemetry_routes_setpoint_into_mode_bin) {
   app.on_controller_telemetry(8000, t);
   ASSERT_NEAR(app.local_cool_setpoint_c(), 22.5f, 0.01f);
   ASSERT_NEAR(app.local_heat_setpoint_c(), 21.5f, 0.01f);
+}
+TEST_CASE(thermostat_app_retries_ack_lost_to_send_throttle) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 5;
+  telem.mode_code = 1;
+  telem.setpoint_c = 20.0f;
+  app.on_controller_telemetry(1000, telem);
+  tx.accept_acks = false;  // throttled: the transport did not send it
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 0);
+  tx.accept_acks = true;
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 1);
+  ASSERT_EQ(tx.last_ack_seq, 5);
+  app.send_pending_ack();  // sent once only
+  ASSERT_EQ(tx.ack_count, 1);
+}
+
+TEST_CASE(thermostat_app_newer_ack_wins_over_throttled_retry) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 5;
+  telem.mode_code = 1;
+  telem.setpoint_c = 20.0f;
+  app.on_controller_telemetry(1000, telem);
+  tx.accept_acks = false;
+  app.send_pending_ack();
+  telem.seq = 6;
+  app.on_controller_telemetry(2000, telem);
+  tx.accept_acks = true;
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 1);
+  ASSERT_EQ(tx.last_ack_seq, 6);
+}
+TEST_CASE(thermostat_app_heartbeat_newer_than_now_counts_as_connected) {
+  // The heartbeat is stamped on the WiFi task and can be a few ms later than the loop's
+  // now_ms; that must not wrap into "silent for 49 days".
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+  app.on_controller_heartbeat(10005);
+  ASSERT_TRUE(app.controller_connected(10000, 30000));
+  ASSERT_TRUE(!app.controller_connected(50000, 30000));
 }
 #endif

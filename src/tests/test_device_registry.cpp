@@ -120,11 +120,11 @@ TEST_CASE(mac_strip_colons_handles_null) {
 // ── discovery_topics.h: entity counts ──
 
 TEST_CASE(discovery_controller_entity_count) {
-  ASSERT_EQ(kControllerDiscoveryCount, static_cast<size_t>(28));
+  ASSERT_EQ(kControllerDiscoveryCount, static_cast<size_t>(33));
 }
 
 TEST_CASE(discovery_display_entity_count) {
-  ASSERT_EQ(kDisplayDiscoveryCount, static_cast<size_t>(19));
+  ASSERT_EQ(kDisplayDiscoveryCount, static_cast<size_t>(23));
 }
 
 TEST_CASE(discovery_entities_for_role_controller) {

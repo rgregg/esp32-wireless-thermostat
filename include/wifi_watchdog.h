@@ -3,7 +3,16 @@
 // WiFi connectivity watchdog: detects "zombie WiFi" state where WiFi.isConnected()
 // returns true but the device is actually unreachable on the network.
 // Uses ESP-IDF ping API to periodically ping the gateway. If the gateway is
-// unreachable for an extended period, forces WiFi reconnect or full reboot.
+// unreachable for 2 minutes it forces a WiFi reconnect, and repeats every 2 minutes
+// while it stays unreachable. It never reboots: NetworkRebootGovernor is the only
+// network reboot authority.
+//
+// The forced reconnect goes through the hook set by wifi_watchdog_set_reconnect_hook()
+// (the firmware points it at WifiProvisioningManager::request_reconnect(), so the join is
+// tracked and ESP-NOW leaves the channel alone). Without a hook the forced reconnect does
+// nothing but log once: the watchdog never starts an untracked join itself. The watchdog
+// only runs while WiFi.status() == WL_CONNECTED (the STA has an IP), so it never acts on
+// an STA that is associated without an IP; WifiJoinTracker's 20 s window handles that.
 
 #include <WiFi.h>
 #include <atomic>
@@ -15,10 +24,8 @@ namespace wifi_watchdog {
 
 static constexpr uint32_t PING_INTERVAL_MS        = 30000;  // Ping every 30 seconds
 static constexpr uint32_t RECONNECT_THRESHOLD_MS   = 120000; // Reconnect after 2 min of failures
-static constexpr uint32_t REBOOT_THRESHOLD_MS      = 300000; // Reboot after 5 min of failures
 static constexpr uint32_t PING_TIMEOUT_MS          = 5000;   // Single ping timeout
 static constexpr uint32_t PING_STALE_MS            = 15000;  // Force-cleanup if ping hangs
-static constexpr uint32_t MAX_RECONNECTS           = 3;      // Reboot after this many failed reconnects
 
 struct State {
     uint32_t last_ping_ms          = 0;
@@ -37,10 +44,9 @@ struct State {
 
 static State g_state;
 
-// Optional hook invoked with a human-readable reason immediately before the
-// watchdog forces a reboot. Lets the application persist the cause (e.g. to
-// NVS) so it survives the reboot. No-op if unset.
-static void (*g_reboot_hook)(const char *reason) = nullptr;
+// Performs the forced reconnect; see the header comment. nullptr = no reconnect.
+static void (*g_reconnect_hook)() = nullptr;
+static bool g_missing_hook_logged = false;
 
 static void on_ping_success(esp_ping_handle_t hdl, void *args) {
     static_cast<State *>(args)->ping_got_reply = true;
@@ -151,42 +157,29 @@ static void handle_ping_result(uint32_t now_ms) {
 
     uint32_t failure_duration = now_ms - g_state.first_failure_ms;
 
-    // Reboot if we've exceeded the time threshold OR exhausted reconnect attempts
-    if (failure_duration >= REBOOT_THRESHOLD_MS ||
-        g_state.reconnect_count >= MAX_RECONNECTS) {
-        log_state("REBOOTING", now_ms);
-        Serial.printf("[watchdog]   reason: failure_duration=%lus reconnects=%lu\n",
-                      (unsigned long)(failure_duration / 1000),
-                      (unsigned long)g_state.reconnect_count);
-        if (g_reboot_hook) {
-            char reason[64];
-            snprintf(reason, sizeof(reason),
-                     "wifi_watchdog: gateway unreachable %lus reconnects=%lu",
-                     (unsigned long)(failure_duration / 1000),
-                     (unsigned long)g_state.reconnect_count);
-            g_reboot_hook(reason);
-        }
-        Serial.flush();
-        delay(100);
-        ESP.restart();
-    }
-
     if (failure_duration >= RECONNECT_THRESHOLD_MS && !g_state.reconnect_attempted) {
         g_state.reconnect_attempted = true;
         g_state.watchdog_disconnected = true;
         g_state.reconnect_count++;
+        // Restart the failure clock so the next forced reconnect is at least
+        // RECONNECT_THRESHOLD_MS away.
+        g_state.first_failure_ms = now_ms;
         log_state("forcing_wifi_reconnect", now_ms);
-        WiFi.disconnect();
-        WiFi.reconnect();
+        if (g_reconnect_hook) {
+            g_reconnect_hook();
+        } else if (!g_missing_hook_logged) {
+            g_missing_hook_logged = true;
+            Serial.println("[watchdog] no reconnect hook set; forced reconnect skipped");
+        }
     }
 }
 
 } // namespace wifi_watchdog
 
-// Register a callback invoked with the reboot reason just before the watchdog
-// forces a reboot. Pass nullptr to disable.
-inline void wifi_watchdog_set_reboot_hook(void (*hook)(const char *reason)) {
-    wifi_watchdog::g_reboot_hook = hook;
+// Route the watchdog's forced reconnect through the caller's tracked reconnect path
+// (e.g. WifiProvisioningManager::request_reconnect()). Call from setup().
+inline void wifi_watchdog_set_reconnect_hook(void (*hook)()) {
+    wifi_watchdog::g_reconnect_hook = hook;
 }
 
 // connectivity_proven: pass true when the application layer (e.g. MQTT) is
@@ -216,7 +209,7 @@ inline void wifi_watchdog_tick(uint32_t now_ms, bool connectivity_proven = false
             g_state.reconnect_count = 0;
         }
         // Keep first_failure_ms intact when we initiated the disconnect,
-        // so the reboot threshold can still be reached.
+        // so the next forced reconnect stays rate-limited.
         g_state.last_ping_ms = now_ms;
         return;
     }
@@ -224,7 +217,7 @@ inline void wifi_watchdog_tick(uint32_t now_ms, bool connectivity_proven = false
     // If the application layer confirms connectivity (e.g. MQTT is connected),
     // WiFi is provably healthy — no need to ping the gateway.
     // Clear any accumulated failure state so a brief MQTT drop doesn't
-    // immediately count against the reboot threshold when it reconnects.
+    // immediately count toward a forced reconnect when it reconnects.
     if (connectivity_proven) {
         if (g_state.ping_in_flight || g_state.ping_handle) {
             cleanup_session();
@@ -239,7 +232,7 @@ inline void wifi_watchdog_tick(uint32_t now_ms, bool connectivity_proven = false
     }
 
     // WiFi reconnected after our forced disconnect — resume pinging
-    // but keep failure state so reboot can escalate if needed.
+    // but keep failure state so another reconnect follows if it is still failing.
     if (g_state.watchdog_disconnected) {
         g_state.watchdog_disconnected = false;
         g_state.reconnect_attempted = false; // Allow another reconnect attempt

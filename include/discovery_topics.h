@@ -12,7 +12,7 @@ struct DiscoveryEntity {
   const char *suffix;     // e.g. "_lockout", "" (for climate)
 };
 
-// Controller entities (28 total) — must match ctrl_publish_discovery()
+// Controller entities (33 total) — must match ctrl_publish_discovery()
 static constexpr DiscoveryEntity kControllerDiscoveryEntities[] = {
     {"climate", ""},
     {"switch", "_lockout"},
@@ -34,6 +34,11 @@ static constexpr DiscoveryEntity kControllerDiscoveryEntities[] = {
     {"sensor", "_controller_error_mqtt"},
     {"sensor", "_controller_error_ota"},
     {"sensor", "_controller_error_espnow"},
+    {"sensor", "_controller_espnow_channel"},
+    {"sensor", "_controller_connection_path"},
+    {"sensor", "_controller_espnow_search_count"},
+    {"sensor", "_controller_net_reboot_count"},
+    {"sensor", "_controller_wifi_disconnect_reason"},
     {"button", "_controller_reset_sequence"},
     {"button", "_controller_reboot"},
     {"binary_sensor", "_filter_change_required"},
@@ -46,7 +51,7 @@ static constexpr DiscoveryEntity kControllerDiscoveryEntities[] = {
 static constexpr size_t kControllerDiscoveryCount =
     sizeof(kControllerDiscoveryEntities) / sizeof(kControllerDiscoveryEntities[0]);
 
-// Display entities (19 total) — must match mqtt_publish_discovery()
+// Display entities (23 total) — must match mqtt_publish_discovery()
 static constexpr DiscoveryEntity kDisplayDiscoveryEntities[] = {
     {"number", "_display_timeout"},
     {"number", "_display_backlight_active"},
@@ -63,6 +68,10 @@ static constexpr DiscoveryEntity kDisplayDiscoveryEntities[] = {
     {"sensor", "_display_error_mqtt"},
     {"sensor", "_display_error_ota"},
     {"sensor", "_display_error_espnow"},
+    {"sensor", "_display_espnow_channel"},
+    {"sensor", "_display_espnow_search_count"},
+    {"sensor", "_display_net_reboot_count"},
+    {"sensor", "_display_wifi_disconnect_reason"},
     {"button", "_display_reset_sequence"},
     {"button", "_display_reboot"},
     {"sensor", "_indoor_temperature"},

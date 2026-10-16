@@ -3,9 +3,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <atomic>
+
 #include "thermostat/thermostat_transport.h"
 #include "thermostat_types.h"
 #include "transport/espnow_packets.h"
+#include "transport/espnow_probe_tracker.h"
 #include "weather_icon.h"
 
 namespace thermostat {
@@ -37,7 +40,14 @@ using ThermostatWeatherCallback =
 
 class EspNowThermostatTransport final : public IThermostatTransport {
  public:
+  EspNowThermostatTransport() = default;
+  // Releases the static send/recv callback instance if it is this object.
+  ~EspNowThermostatTransport() override;
+
   bool begin(const EspNowThermostatConfig &config);
+  // Tear down and re-initialise ESP-NOW with the stored config. Re-pins the radio to the
+  // configured channel; the link manager restores the wanted channel afterwards.
+  bool restart();
   void loop(uint32_t now_ms);
 
   void set_callbacks(ThermostatHeartbeatCallback heartbeat_cb,
@@ -46,18 +56,37 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   void set_weather_callback(ThermostatWeatherCallback weather_cb);
 
   void publish_command_word(uint32_t packed_word) override;
-  void publish_controller_ack(uint16_t seq) override;
+  bool publish_controller_ack(uint16_t seq) override;
   void publish_indoor_temperature_c(float temp_c) override;
   void publish_indoor_humidity(float humidity_pct) override;
   uint32_t send_ok_count() const { return send_ok_count_; }
   uint32_t send_fail_count() const { return send_fail_count_; }
 
+  // True ESP-NOW liveness: set only when a frame from the configured peer arrives.
+  bool peer_heard() const { return peer_heard_.load(); }
+  uint32_t last_peer_rx_ms() const { return last_peer_rx_ms_.load(); }
+  // Send one heartbeat immediately, bypassing the send throttle (channel probe). Returns
+  // true when the probe frame was accepted by esp_now_send; the outcome is then reported
+  // by probe_status().
+  bool send_probe();
+  bool has_unicast_peer() const;
+  ProbeStatus probe_status() const { return probe_tracker_.status(); }
+  void clear_probe() { probe_tracker_.clear(); }
+  // Resyncs probe attribution if a send callback was lost (main loop; see
+  // EspNowProbeTracker::check_lost_callbacks()).
+  void check_lost_send_callbacks(uint32_t now_ms) { probe_tracker_.check_lost_callbacks(now_ms); }
+
+  // ESP-NOW send-callback entry point (runs in the WiFi task). Public so host tests can
+  // deliver send callbacks; firmware reaches it only through the registered callback.
+  static void on_send_static(const uint8_t *mac_addr, int status);
+
  private:
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
-  static void on_send_static(const uint8_t *mac_addr, int status);
   void on_recv(const uint8_t *src_mac, const uint8_t *data, int len);
   void send_heartbeat(uint32_t now_ms);
-  void send_to_peer(const uint8_t *data, size_t len);
+  bool send_to_peer(const uint8_t *data, size_t len);  // false only if throttled (not attempted)
+  // esp_now_send plus send-sequence accounting. Returns true when the frame was accepted.
+  bool send_frame(const uint8_t *data, size_t len);
 
   EspNowThermostatConfig config_{};
   bool initialized_ = false;
@@ -72,6 +101,11 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   static EspNowThermostatTransport *instance_;
   uint32_t send_ok_count_ = 0;
   uint32_t send_fail_count_ = 0;
+  // Written by the receive callback (WiFi task), read by the main loop.
+  std::atomic<bool> peer_heard_{false};
+  std::atomic<uint32_t> last_peer_rx_ms_{0};
+  // Exact probe attribution (send sequence numbers; callback side runs in the WiFi task).
+  EspNowProbeTracker probe_tracker_;
   uint32_t last_send_ms_ = 0;
   static constexpr uint32_t kMinSendIntervalMs = 50;
 };

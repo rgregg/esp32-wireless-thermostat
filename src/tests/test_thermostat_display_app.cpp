@@ -10,9 +10,10 @@ class FakeThermostatTransport : public thermostat::IThermostatTransport {
     last_cmd = packed_word;
     ++cmd_count;
   }
-  void publish_controller_ack(uint16_t seq) override {
+  bool publish_controller_ack(uint16_t seq) override {
     last_ack_seq = seq;
     ++ack_count;
+    return true;
   }
   void publish_indoor_temperature_c(float temp_c) override {
     last_temp = temp_c;

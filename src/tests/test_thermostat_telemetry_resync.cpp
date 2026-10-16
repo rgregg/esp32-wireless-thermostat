@@ -7,7 +7,7 @@ namespace {
 class FakeThermostatTransport : public thermostat::IThermostatTransport {
  public:
   void publish_command_word(uint32_t) override {}
-  void publish_controller_ack(uint16_t) override {}
+  bool publish_controller_ack(uint16_t) override { return true; }
   void publish_indoor_temperature_c(float) override {}
   void publish_indoor_humidity(float) override {}
 };

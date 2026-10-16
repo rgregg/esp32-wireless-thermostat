@@ -165,12 +165,13 @@ class SimThermostatTransport : public thermostat::IThermostatTransport {
     printf("[MQTT TX] packed_command=%lu\n", static_cast<unsigned long>(packed_word));
   }
 
-  void publish_controller_ack(uint16_t seq) override {
-    if (!g_mqtt_connected) return;
+  bool publish_controller_ack(uint16_t seq) override {
+    if (!g_mqtt_connected) return true;
 
     char buf[16];
     snprintf(buf, sizeof(buf), "%u", seq);
     g_mqtt.publish(self_topic("state/controller_ack"), buf, true);
+    return true;
   }
 
   void publish_indoor_temperature_c(float temp_c) override {
@@ -299,6 +300,7 @@ void on_mqtt_message(const std::string &topic, const std::string &payload) {
     telemetry.filter_runtime_seconds = s_filter_seconds;
 
     g_therm_app->on_controller_telemetry(now, telemetry);
+    g_therm_app->send_pending_ack();  // single-threaded sim: ACK right away
     g_display_app->sync_from_app();
   }
 }
