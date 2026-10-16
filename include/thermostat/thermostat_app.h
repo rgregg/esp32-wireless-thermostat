@@ -31,7 +31,8 @@ class ThermostatApp {
   // send_pending_ack().
   void on_controller_telemetry(uint32_t now_ms,
                                const ThermostatControllerTelemetry &telemetry);
-  // Sends the ACK owed for the latest telemetry, if any. Call from the loop task.
+  // Sends the ACK owed for the latest telemetry, if any. Call from the loop task. An ACK
+  // the transport throttles stays owed for the next call.
   void send_pending_ack();
   void on_controller_state_update(uint32_t now_ms,
                                   FurnaceStateCode state,

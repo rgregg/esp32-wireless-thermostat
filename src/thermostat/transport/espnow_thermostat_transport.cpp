@@ -156,9 +156,9 @@ void EspNowThermostatTransport::publish_command_word(uint32_t packed_word) {
   send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
-void EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {
+bool EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {
   if (!initialized_) {
-    return;
+    return true;  // nothing to retry: ESP-NOW is not running
   }
 
   ControllerAckPacket pkt;
@@ -166,7 +166,7 @@ void EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.seq = seq;
 
-  send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+  return send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 void EspNowThermostatTransport::publish_indoor_temperature_c(float temp_c) {
@@ -319,17 +319,18 @@ void EspNowThermostatTransport::send_heartbeat(uint32_t now_ms) {
   send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
-void EspNowThermostatTransport::send_to_peer(const uint8_t *data, size_t len) {
+bool EspNowThermostatTransport::send_to_peer(const uint8_t *data, size_t len) {
 #if defined(ARDUINO)
-  if (!initialized_) return;
+  if (!initialized_) return true;
   const uint32_t now = millis();
   if (last_send_ms_ != 0 &&
       static_cast<uint32_t>(now - last_send_ms_) < kMinSendIntervalMs) {
-    return;  // Throttle: too soon since last send
+    return false;  // Throttle: too soon since last send
   }
   last_send_ms_ = now;
 #endif
-  send_frame(data, len);
+  send_frame(data, len);  // a rejected send is not retried (it would fail every pass)
+  return true;
 }
 
 bool EspNowThermostatTransport::send_frame(const uint8_t *data, size_t len) {

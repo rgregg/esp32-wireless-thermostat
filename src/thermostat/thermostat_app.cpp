@@ -185,7 +185,11 @@ bool ThermostatApp::controller_connected(uint32_t now_ms, uint32_t timeout_ms) c
   if (last_controller_heartbeat_ms_ == 0) {
     return false;
   }
-  return static_cast<uint32_t>(now_ms - last_controller_heartbeat_ms_) < timeout_ms;
+  const uint32_t age = static_cast<uint32_t>(now_ms - last_controller_heartbeat_ms_);
+  // A heartbeat stamped on the WiFi task after the loop read now_ms is "in the future";
+  // it is fresh, not 49 days old.
+  if (age >= 0x80000000u) return true;
+  return age < timeout_ms;
 }
 
 FurnaceMode ThermostatApp::mode_from_code(uint8_t mode_code) {
@@ -221,9 +225,13 @@ void ThermostatApp::ack_controller_seq(uint16_t seq) {
 }
 
 void ThermostatApp::send_pending_ack() {
-  const uint32_t pending = pending_ack_.exchange(0);
-  if ((pending & kAckPending) != 0) {
-    transport_.publish_controller_ack(static_cast<uint16_t>(pending & 0xFFFFu));
+  uint32_t pending = pending_ack_.exchange(0);
+  if ((pending & kAckPending) == 0) return;
+  if (!transport_.publish_controller_ack(static_cast<uint16_t>(pending & 0xFFFFu))) {
+    // Not sent (send throttle): keep it owed for the next call, unless a newer ACK
+    // was stored meanwhile.
+    uint32_t none = 0;
+    pending_ack_.compare_exchange_strong(none, pending);
   }
 }
 

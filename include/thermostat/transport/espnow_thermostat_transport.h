@@ -56,7 +56,7 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   void set_weather_callback(ThermostatWeatherCallback weather_cb);
 
   void publish_command_word(uint32_t packed_word) override;
-  void publish_controller_ack(uint16_t seq) override;
+  bool publish_controller_ack(uint16_t seq) override;
   void publish_indoor_temperature_c(float temp_c) override;
   void publish_indoor_humidity(float humidity_pct) override;
   uint32_t send_ok_count() const { return send_ok_count_; }
@@ -84,7 +84,7 @@ class EspNowThermostatTransport final : public IThermostatTransport {
   static void on_recv_static(const void *recv_info, const uint8_t *data, int len);
   void on_recv(const uint8_t *src_mac, const uint8_t *data, int len);
   void send_heartbeat(uint32_t now_ms);
-  void send_to_peer(const uint8_t *data, size_t len);
+  bool send_to_peer(const uint8_t *data, size_t len);  // false only if throttled (not attempted)
   // esp_now_send plus send-sequence accounting. Returns true when the frame was accepted.
   bool send_frame(const uint8_t *data, size_t len);
 
