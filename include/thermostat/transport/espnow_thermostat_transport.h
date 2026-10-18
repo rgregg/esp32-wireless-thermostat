@@ -57,6 +57,8 @@ class EspNowThermostatTransport final : public IThermostatTransport {
 
   bool publish_command_word(uint32_t packed_word) override;
   bool publish_controller_ack(uint16_t seq) override;
+  CommandDelivery take_command_delivery() override;
+  bool reports_command_delivery() const override { return initialized_; }
   void publish_indoor_temperature_c(float temp_c) override;
   void publish_indoor_humidity(float humidity_pct) override;
   uint32_t send_ok_count() const { return send_ok_count_; }

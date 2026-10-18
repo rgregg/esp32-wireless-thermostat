@@ -21,7 +21,17 @@ class FakeThermostatTransport : public thermostat::IThermostatTransport {
   }
   void publish_indoor_temperature_c(float temp_c) override { last_temp = temp_c; }
   void publish_indoor_humidity(float humidity_pct) override { last_hum = humidity_pct; }
+  thermostat::CommandDelivery take_command_delivery() override {
+    const thermostat::CommandDelivery d = delivery;
+    if (d == thermostat::CommandDelivery::Delivered || d == thermostat::CommandDelivery::Failed) {
+      delivery = thermostat::CommandDelivery::None;
+    }
+    return d;
+  }
+  bool reports_command_delivery() const override { return reports_delivery; }
 
+  bool reports_delivery = false;
+  thermostat::CommandDelivery delivery = thermostat::CommandDelivery::None;
   uint32_t last_cmd = 0;
   int cmd_count = 0;
   uint16_t last_ack_seq = 0;
@@ -362,7 +372,7 @@ TEST_CASE(thermostat_app_throttled_command_merges_into_next) {
   ASSERT_EQ(tx.cmd_count, 1);
 }
 
-TEST_CASE(thermostat_app_throttled_sync_and_filter_reset_are_kept) {
+TEST_CASE(thermostat_app_throttled_filter_reset_kept_sync_folded_away) {
   FakeThermostatTransport tx;
   thermostat::ThermostatApp app(tx);
 
@@ -374,12 +384,99 @@ TEST_CASE(thermostat_app_throttled_sync_and_filter_reset_are_kept) {
   ASSERT_EQ(tx.cmd_count, 1);
   CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
   ASSERT_TRUE(decoded.filter_reset);
-  ASSERT_TRUE(decoded.sync_request);
+  // The controller applies nothing else from a sync word (and answers every accepted
+  // command with telemetry), so the sync is dropped rather than voiding the fan change.
+  ASSERT_TRUE(!decoded.sync_request);
   ASSERT_EQ(static_cast<int>(decoded.fan), static_cast<int>(FanMode::AlwaysOn));
   ASSERT_TRUE(!decoded.preserve_fan);
-  // The sync request does not preserve fields, so the merged word sends all of them.
+  ASSERT_TRUE(decoded.preserve_mode);
+  ASSERT_TRUE(decoded.preserve_setpoint);
+}
+
+TEST_CASE(thermostat_app_throttled_syncs_stay_a_sync) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.request_sync(1000);
+  tx.accept_cmds = true;
+  app.request_sync(1001);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.sync_request);
+}
+
+// The F2 bench miss: mode, setpoint, fan back to back; the mode frame's delivery failed
+// after the later frames had gone out preserving mode.
+TEST_CASE(thermostat_app_burst_frames_carry_unconfirmed_fields) {
+  FakeThermostatTransport tx;
+  tx.reports_delivery = true;
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  tx.delivery = thermostat::CommandDelivery::Pending;
+  app.set_local_fan_mode(FanMode::AlwaysOn, 1001);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Heat));
+  ASSERT_TRUE(!decoded.preserve_mode);  // the unconfirmed mode rides along
+  ASSERT_TRUE(!decoded.preserve_fan);
+  ASSERT_TRUE(decoded.preserve_setpoint);
+}
+
+TEST_CASE(thermostat_app_resends_command_that_failed_delivery) {
+  FakeThermostatTransport tx;
+  tx.reports_delivery = true;
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  const uint16_t first_seq = app.last_command_seq();
+  tx.delivery = thermostat::CommandDelivery::Failed;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 2);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Heat));
   ASSERT_TRUE(!decoded.preserve_mode);
-  ASSERT_TRUE(!decoded.preserve_setpoint);
+  ASSERT_TRUE(decoded.preserve_fan);
+  ASSERT_TRUE(app.last_command_seq() != first_seq);  // new seq: not dropped as a duplicate
+
+  tx.delivery = thermostat::CommandDelivery::Delivered;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 2);
+  // Confirmed: a later fan change no longer carries the mode.
+  tx.delivery = thermostat::CommandDelivery::None;
+  app.set_local_fan_mode(FanMode::AlwaysOn, 2000);
+  decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.preserve_mode);
+}
+
+TEST_CASE(thermostat_app_delivery_retries_are_capped) {
+  FakeThermostatTransport tx;
+  tx.reports_delivery = true;
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  for (int i = 0; i < 10; ++i) {
+    tx.delivery = thermostat::CommandDelivery::Failed;
+    app.send_pending_command();
+  }
+  ASSERT_EQ(tx.cmd_count, 4);  // the original plus three retries
+  // A new change gets a fresh budget and no longer carries the abandoned mode.
+  app.set_local_fan_mode(FanMode::AlwaysOn, 2000);
+  ASSERT_EQ(tx.cmd_count, 5);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.preserve_mode);
+  tx.delivery = thermostat::CommandDelivery::Failed;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 6);
+}
+
+TEST_CASE(thermostat_app_no_delivery_reports_means_no_carry_over) {
+  FakeThermostatTransport tx;  // reports_delivery = false (sim, MQTT-only builds)
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  app.set_local_fan_mode(FanMode::AlwaysOn, 1001);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.preserve_mode);
 }
 
 TEST_CASE(thermostat_app_heartbeat_newer_than_now_counts_as_connected) {

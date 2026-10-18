@@ -153,7 +153,20 @@ bool EspNowThermostatTransport::publish_command_word(uint32_t packed_word) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.packed_word = packed_word;
 
-  return send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+  probe_tracker_.begin_tracked();
+  const bool attempted = send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+  probe_tracker_.end_tracked(attempted);
+  return attempted;
+}
+
+static_assert(static_cast<uint8_t>(CommandDelivery::Pending) == EspNowProbeTracker::kTrackPending &&
+                  static_cast<uint8_t>(CommandDelivery::Delivered) ==
+                      EspNowProbeTracker::kTrackDelivered &&
+                  static_cast<uint8_t>(CommandDelivery::Failed) == EspNowProbeTracker::kTrackFailed,
+              "CommandDelivery must match the tracker states");
+
+CommandDelivery EspNowThermostatTransport::take_command_delivery() {
+  return static_cast<CommandDelivery>(probe_tracker_.take_tracked());
 }
 
 bool EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {

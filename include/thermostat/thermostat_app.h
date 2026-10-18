@@ -34,7 +34,8 @@ class ThermostatApp {
   // Sends the ACK owed for the latest telemetry, if any. Call from the loop task. An ACK
   // the transport throttles stays owed for the next call.
   void send_pending_ack();
-  // Re-sends a command the transport throttled, if one is owed. Call from the loop task.
+  // Re-sends a command the transport throttled or that failed delivery (up to
+  // kMaxCommandRetries times per change), if one is owed. Call from the loop task.
   void send_pending_command();
   void on_controller_state_update(uint32_t now_ms,
                                   FurnaceStateCode state,
@@ -89,8 +90,13 @@ class ThermostatApp {
     bool preserve_setpoint = false;
   };
 
+  static SendOptions merge_send_options(const SendOptions &a, const SendOptions &b);
+
   void mark_local_interaction(uint32_t now_ms);
+  // A new local change: fresh retry budget, then transmit_command().
   void send_command(const SendOptions &opts);
+  // Builds and sends the word, folding in any throttled or unconfirmed command.
+  void transmit_command(const SendOptions &opts);
   void ack_controller_seq(uint16_t seq);
 
   IThermostatTransport &transport_;
@@ -121,6 +127,13 @@ class ThermostatApp {
   // is preserved only if both commands preserved it), so no change is lost.
   bool has_pending_command_ = false;
   SendOptions pending_command_opts_;
+
+  // Fields sent but not yet reported delivered. They merge into every later command, so
+  // the latest frame of a burst carries all of them, and are re-sent if it fails.
+  bool has_unconfirmed_command_ = false;
+  SendOptions unconfirmed_opts_;
+  uint8_t command_retries_ = 0;
+  static constexpr uint8_t kMaxCommandRetries = 3;
 
   // ACK owed to the controller: kAckPending | seq. Set by on_controller_telemetry()
   // (possibly on another task); consumed by send_pending_ack().

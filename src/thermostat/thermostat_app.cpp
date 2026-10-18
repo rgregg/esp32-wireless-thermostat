@@ -152,6 +152,11 @@ void ThermostatApp::request_sync(uint32_t now_ms) {
   mark_local_interaction(now_ms);
   SendOptions opts;
   opts.sync_request = true;
+  // The controller applies nothing from a sync word; preserving every field lets a sync
+  // merge with a real change without sending fields nobody changed.
+  opts.preserve_mode = true;
+  opts.preserve_fan = true;
+  opts.preserve_setpoint = true;
   send_command(opts);
 }
 
@@ -169,6 +174,8 @@ void ThermostatApp::request_filter_reset(uint32_t now_ms) {
 void ThermostatApp::reset_local_command_sequence() {
   seq_local_ = 0;
   has_pending_command_ = false;
+  has_unconfirmed_command_ = false;
+  command_retries_ = 0;
   has_last_packed_command_ = false;
   last_packed_command_ = 0;
   last_command_seq_ = 0;
@@ -237,21 +244,56 @@ void ThermostatApp::send_pending_ack() {
 }
 
 void ThermostatApp::send_pending_command() {
+  switch (transport_.take_command_delivery()) {
+    case CommandDelivery::Delivered:
+      has_unconfirmed_command_ = false;
+      break;
+    case CommandDelivery::Failed:
+      if (has_unconfirmed_command_ && command_retries_ < kMaxCommandRetries) {
+        ++command_retries_;
+        pending_command_opts_ = has_pending_command_
+                                    ? merge_send_options(pending_command_opts_, unconfirmed_opts_)
+                                    : unconfirmed_opts_;
+        has_pending_command_ = true;
+      } else {
+        has_unconfirmed_command_ = false;  // out of retries: drop it
+      }
+      break;
+    case CommandDelivery::None:
+      // Nothing tracked (a throttled word replaced it; the owed word carries its fields).
+      has_unconfirmed_command_ = false;
+      break;
+    case CommandDelivery::Pending:
+      break;
+  }
   if (!has_pending_command_) return;
-  send_command(pending_command_opts_);
+  transmit_command(pending_command_opts_);
+}
+
+ThermostatApp::SendOptions ThermostatApp::merge_send_options(const SendOptions &a,
+                                                             const SendOptions &b) {
+  // Send every field either one changed.
+  SendOptions m;
+  m.filter_reset = a.filter_reset || b.filter_reset;
+  m.preserve_mode = a.preserve_mode && b.preserve_mode;
+  m.preserve_fan = a.preserve_fan && b.preserve_fan;
+  m.preserve_setpoint = a.preserve_setpoint && b.preserve_setpoint;
+  // The controller applies nothing else from a word with sync_request set, and it sends
+  // telemetry after every accepted command anyway: keep the sync only on its own.
+  m.sync_request = (a.sync_request || b.sync_request) && !m.filter_reset && m.preserve_mode &&
+                   m.preserve_fan && m.preserve_setpoint;
+  return m;
 }
 
 void ThermostatApp::send_command(const SendOptions &requested) {
+  command_retries_ = 0;
+  transmit_command(requested);
+}
+
+void ThermostatApp::transmit_command(const SendOptions &requested) {
   SendOptions opts = requested;
-  if (has_pending_command_) {
-    // Fold in the throttled command: send every field either one changed.
-    opts.sync_request = opts.sync_request || pending_command_opts_.sync_request;
-    opts.filter_reset = opts.filter_reset || pending_command_opts_.filter_reset;
-    opts.preserve_mode = opts.preserve_mode && pending_command_opts_.preserve_mode;
-    opts.preserve_fan = opts.preserve_fan && pending_command_opts_.preserve_fan;
-    opts.preserve_setpoint =
-        opts.preserve_setpoint && pending_command_opts_.preserve_setpoint;
-  }
+  if (has_pending_command_) opts = merge_send_options(opts, pending_command_opts_);
+  if (has_unconfirmed_command_) opts = merge_send_options(opts, unconfirmed_opts_);
 
   seq_local_ = espnow_cmd::next_seq(seq_local_);
   CommandWord cmd = build_command_word(local_mode_, local_fan_mode_, local_setpoint_c(),
@@ -264,7 +306,12 @@ void ThermostatApp::send_command(const SendOptions &requested) {
   last_command_seq_ = cmd.seq;
   has_last_packed_command_ = true;
   has_pending_command_ = !transport_.publish_command_word(last_packed_command_);
-  if (has_pending_command_) pending_command_opts_ = opts;
+  if (has_pending_command_) {
+    pending_command_opts_ = opts;
+  } else {
+    has_unconfirmed_command_ = transport_.reports_command_delivery();
+    unconfirmed_opts_ = opts;
+  }
 }
 
 }  // namespace thermostat

@@ -249,6 +249,76 @@ TEST_CASE(espnow_probe_tracker_lag_clock_restarts_when_caught_up) {
   ASSERT_TRUE(tr.status() == ProbeStatus::Failed);
 }
 
+// --- Command frame delivery tracking ---
+
+using thermostat::CommandDelivery;
+
+TEST_CASE(espnow_disp_command_delivery_reported_once) {
+  EspNowThermostatTransport t;
+  EspNowThermostatConfig cfg;
+  memcpy(cfg.peer_mac, kPeerA, 6);
+  ASSERT_TRUE(t.begin(cfg));
+  ASSERT_TRUE(t.reports_command_delivery());
+  t.publish_indoor_temperature_c(21.0f);  // routine send ahead of the command
+  ASSERT_TRUE(t.publish_command_word(0x1234u));
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::Pending);
+  disp_cb(kFail);  // the temperature frame's callback: not the command's
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::Pending);
+  disp_cb(kOk);
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::Delivered);
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::None);
+}
+
+TEST_CASE(espnow_disp_command_delivery_failure_reported) {
+  EspNowThermostatTransport t;
+  EspNowThermostatConfig cfg;
+  memcpy(cfg.peer_mac, kPeerA, 6);
+  ASSERT_TRUE(t.begin(cfg));
+  ASSERT_TRUE(t.publish_command_word(0x1234u));
+  disp_cb(kFail);
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::Failed);
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::None);
+}
+
+TEST_CASE(espnow_disp_newer_command_replaces_tracked_frame) {
+  EspNowThermostatTransport t;
+  EspNowThermostatConfig cfg;
+  memcpy(cfg.peer_mac, kPeerA, 6);
+  ASSERT_TRUE(t.begin(cfg));
+  ASSERT_TRUE(t.publish_command_word(0x1u));
+  ASSERT_TRUE(t.publish_command_word(0x2u));
+  disp_cb(kFail);  // first command's callback: replaced, so not reported
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::Pending);
+  disp_cb(kOk);
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::Delivered);
+}
+
+TEST_CASE(espnow_disp_restart_fails_pending_command) {
+  EspNowThermostatTransport t;
+  EspNowThermostatConfig cfg;
+  memcpy(cfg.peer_mac, kPeerA, 6);
+  ASSERT_TRUE(t.begin(cfg));
+  ASSERT_TRUE(t.publish_command_word(0x1u));
+  ASSERT_TRUE(t.restart());  // its callback may be lost
+  ASSERT_TRUE(t.take_command_delivery() == CommandDelivery::Failed);
+}
+
+TEST_CASE(espnow_probe_tracker_tracked_frame_states) {
+  thermostat::EspNowProbeTracker tr;
+  using T = thermostat::EspNowProbeTracker;
+  tr.begin_tracked();
+  tr.end_tracked(false);  // throttled: never attempted, not tracked
+  ASSERT_EQ(tr.take_tracked(), T::kTrackNone);
+  tr.begin_tracked();
+  tr.end_tracked(true);  // attempted but esp_now_send rejected it: no callback coming
+  ASSERT_EQ(tr.take_tracked(), T::kTrackFailed);
+  tr.begin_tracked();
+  tr.on_send_accepted();
+  tr.on_send_complete(true);  // callback before end_tracked(): still attributed
+  tr.end_tracked(true);
+  ASSERT_EQ(tr.take_tracked(), T::kTrackDelivered);
+}
+
 TEST_CASE(espnow_ctrl_lost_callback_guard_runs_via_transport) {
   EspNowControllerTransport t;
   ASSERT_TRUE(t.begin(controller_config(1)));
