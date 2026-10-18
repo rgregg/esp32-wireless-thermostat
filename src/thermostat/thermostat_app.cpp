@@ -168,6 +168,7 @@ void ThermostatApp::request_filter_reset(uint32_t now_ms) {
 
 void ThermostatApp::reset_local_command_sequence() {
   seq_local_ = 0;
+  has_pending_command_ = false;
   has_last_packed_command_ = false;
   last_packed_command_ = 0;
   last_command_seq_ = 0;
@@ -235,7 +236,23 @@ void ThermostatApp::send_pending_ack() {
   }
 }
 
-void ThermostatApp::send_command(const SendOptions &opts) {
+void ThermostatApp::send_pending_command() {
+  if (!has_pending_command_) return;
+  send_command(pending_command_opts_);
+}
+
+void ThermostatApp::send_command(const SendOptions &requested) {
+  SendOptions opts = requested;
+  if (has_pending_command_) {
+    // Fold in the throttled command: send every field either one changed.
+    opts.sync_request = opts.sync_request || pending_command_opts_.sync_request;
+    opts.filter_reset = opts.filter_reset || pending_command_opts_.filter_reset;
+    opts.preserve_mode = opts.preserve_mode && pending_command_opts_.preserve_mode;
+    opts.preserve_fan = opts.preserve_fan && pending_command_opts_.preserve_fan;
+    opts.preserve_setpoint =
+        opts.preserve_setpoint && pending_command_opts_.preserve_setpoint;
+  }
+
   seq_local_ = espnow_cmd::next_seq(seq_local_);
   CommandWord cmd = build_command_word(local_mode_, local_fan_mode_, local_setpoint_c(),
                                        seq_local_, opts.sync_request, opts.filter_reset);
@@ -246,7 +263,8 @@ void ThermostatApp::send_command(const SendOptions &opts) {
   last_packed_command_ = espnow_cmd::encode(cmd);
   last_command_seq_ = cmd.seq;
   has_last_packed_command_ = true;
-  transport_.publish_command_word(last_packed_command_);
+  has_pending_command_ = !transport_.publish_command_word(last_packed_command_);
+  if (has_pending_command_) pending_command_opts_ = opts;
 }
 
 }  // namespace thermostat

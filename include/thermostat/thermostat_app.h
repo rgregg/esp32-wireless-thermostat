@@ -34,6 +34,8 @@ class ThermostatApp {
   // Sends the ACK owed for the latest telemetry, if any. Call from the loop task. An ACK
   // the transport throttles stays owed for the next call.
   void send_pending_ack();
+  // Re-sends a command the transport throttled, if one is owed. Call from the loop task.
+  void send_pending_command();
   void on_controller_state_update(uint32_t now_ms,
                                   FurnaceStateCode state,
                                   bool lockout,
@@ -114,6 +116,11 @@ class ThermostatApp {
   uint32_t last_controller_heartbeat_ms_ = 0;
   bool has_controller_seq_ = false;
   uint16_t last_controller_seq_ = 0;
+
+  // A command the transport throttled. Its options merge into the next send (a field
+  // is preserved only if both commands preserved it), so no change is lost.
+  bool has_pending_command_ = false;
+  SendOptions pending_command_opts_;
 
   // ACK owed to the controller: kAckPending | seq. Set by on_controller_telemetry()
   // (possibly on another task); consumed by send_pending_ack().

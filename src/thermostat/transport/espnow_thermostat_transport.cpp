@@ -143,9 +143,9 @@ void EspNowThermostatTransport::set_weather_callback(
   weather_cb_ = weather_cb;
 }
 
-void EspNowThermostatTransport::publish_command_word(uint32_t packed_word) {
+bool EspNowThermostatTransport::publish_command_word(uint32_t packed_word) {
   if (!initialized_) {
-    return;
+    return true;  // nothing to retry: ESP-NOW is not running
   }
 
   CommandWordPacket pkt;
@@ -153,7 +153,7 @@ void EspNowThermostatTransport::publish_command_word(uint32_t packed_word) {
   pkt.header.version = kEspNowProtocolVersion;
   pkt.packed_word = packed_word;
 
-  send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+  return send_to_peer(reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
 }
 
 bool EspNowThermostatTransport::publish_controller_ack(uint16_t seq) {

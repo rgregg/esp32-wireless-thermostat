@@ -55,7 +55,7 @@ class EspNowThermostatTransport final : public IThermostatTransport {
                      void *callback_context);
   void set_weather_callback(ThermostatWeatherCallback weather_cb);
 
-  void publish_command_word(uint32_t packed_word) override;
+  bool publish_command_word(uint32_t packed_word) override;
   bool publish_controller_ack(uint16_t seq) override;
   void publish_indoor_temperature_c(float temp_c) override;
   void publish_indoor_humidity(float humidity_pct) override;

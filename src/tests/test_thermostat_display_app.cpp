@@ -6,9 +6,10 @@
 namespace {
 class FakeThermostatTransport : public thermostat::IThermostatTransport {
  public:
-  void publish_command_word(uint32_t packed_word) override {
+  bool publish_command_word(uint32_t packed_word) override {
     last_cmd = packed_word;
     ++cmd_count;
+    return true;
   }
   bool publish_controller_ack(uint16_t seq) override {
     last_ack_seq = seq;

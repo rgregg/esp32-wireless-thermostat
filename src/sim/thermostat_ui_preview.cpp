@@ -155,8 +155,8 @@ std::string peer_topic(const char *mac, const char *suffix) {
 // SimThermostatTransport: bridges ThermostatApp commands to MQTT topics
 class SimThermostatTransport : public thermostat::IThermostatTransport {
  public:
-  void publish_command_word(uint32_t packed_word) override {
-    if (!g_mqtt_connected) return;
+  bool publish_command_word(uint32_t packed_word) override {
+    if (!g_mqtt_connected) return true;
 
     char buf[32];
     snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(packed_word));

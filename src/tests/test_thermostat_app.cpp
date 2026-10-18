@@ -7,9 +7,11 @@
 namespace {
 class FakeThermostatTransport : public thermostat::IThermostatTransport {
  public:
-  void publish_command_word(uint32_t packed_word) override {
+  bool publish_command_word(uint32_t packed_word) override {
+    if (!accept_cmds) return false;
     last_cmd = packed_word;
     ++cmd_count;
+    return true;
   }
   bool publish_controller_ack(uint16_t seq) override {
     if (!accept_acks) return false;
@@ -25,6 +27,7 @@ class FakeThermostatTransport : public thermostat::IThermostatTransport {
   uint16_t last_ack_seq = 0;
   int ack_count = 0;
   bool accept_acks = true;
+  bool accept_cmds = true;
   float last_temp = 0.0f;
   float last_hum = 0.0f;
 };
@@ -315,6 +318,70 @@ TEST_CASE(thermostat_app_newer_ack_wins_over_throttled_retry) {
   ASSERT_EQ(tx.ack_count, 1);
   ASSERT_EQ(tx.last_ack_seq, 6);
 }
+// A command the transport throttles (sent within 50 ms of another frame) used to be
+// dropped for good; during a WiFi outage there is no MQTT copy to recover it.
+TEST_CASE(thermostat_app_retries_command_lost_to_send_throttle) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.set_local_setpoint_c(22.5f, 1000);
+  ASSERT_EQ(tx.cmd_count, 0);
+  tx.accept_cmds = true;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 1);
+  {
+    CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+    ASSERT_EQ(decoded.setpoint_decic, static_cast<uint16_t>(225));
+    ASSERT_TRUE(decoded.preserve_mode);
+    ASSERT_TRUE(!decoded.preserve_setpoint);
+  }
+  ASSERT_EQ(app.last_packed_command(), tx.last_cmd);
+  app.send_pending_command();  // sent once only
+  ASSERT_EQ(tx.cmd_count, 1);
+}
+
+// Mode then setpoint, back to back: the bench case. The mode word is throttled; the
+// setpoint word must carry the new mode too instead of preserving the controller's.
+TEST_CASE(thermostat_app_throttled_command_merges_into_next) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  tx.accept_cmds = true;
+  app.set_local_setpoint_c(22.5f, 1001);
+  ASSERT_EQ(tx.cmd_count, 1);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Heat));
+  ASSERT_EQ(decoded.setpoint_decic, static_cast<uint16_t>(225));
+  ASSERT_TRUE(!decoded.preserve_mode);
+  ASSERT_TRUE(!decoded.preserve_setpoint);
+  ASSERT_TRUE(decoded.preserve_fan);
+  app.send_pending_command();  // nothing left owed
+  ASSERT_EQ(tx.cmd_count, 1);
+}
+
+TEST_CASE(thermostat_app_throttled_sync_and_filter_reset_are_kept) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.request_filter_reset(1000);
+  app.request_sync(1001);
+  tx.accept_cmds = true;
+  app.set_local_fan_mode(FanMode::AlwaysOn, 1002);
+  ASSERT_EQ(tx.cmd_count, 1);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.filter_reset);
+  ASSERT_TRUE(decoded.sync_request);
+  ASSERT_EQ(static_cast<int>(decoded.fan), static_cast<int>(FanMode::AlwaysOn));
+  ASSERT_TRUE(!decoded.preserve_fan);
+  // The sync request does not preserve fields, so the merged word sends all of them.
+  ASSERT_TRUE(!decoded.preserve_mode);
+  ASSERT_TRUE(!decoded.preserve_setpoint);
+}
+
 TEST_CASE(thermostat_app_heartbeat_newer_than_now_counts_as_connected) {
   // The heartbeat is stamped on the WiFi task and can be a few ms later than the loop's
   // now_ms; that must not wrap into "silent for 49 days".
