@@ -82,3 +82,22 @@
   - A blank secret from a web form means "keep" (`is_blank_secret_form_value`).
   - Judge an ESP-NOW link by the receiver's `last_espnow_rx_ms` and both sides'
     `espnow_encrypted`, never by the sender's ack counters or MQTT-fed heartbeat fields.
+
+## Test builds defaulted to the production MQTT broker (2026-10-18)
+- The bench Waveshare controller (test env) had no `mqtt_host` in NVS, so it fell back to
+  the compiled-in default `mqtt.lan` and spent a boot on the production broker under the
+  test base topic. Production devices were unaffected (separate topics), but its HA
+  discovery added a bench controller device to production Home Assistant, and the bench
+  broker never saw it, so the bench display looked like it had no controller over MQTT.
+- `/status` said `mqtt_connected: true` throughout: it was connected, just to the wrong
+  broker. Check the broker's client count (`$SYS/broker/clients/connected`) before
+  trusting a board's MQTT state on the bench.
+- **Rules:**
+  - Every test-identity env compiles in an empty MQTT host (`-D..._MQTT_HOST=\"\"`), so an
+    unconfigured bench board stays off MQTT instead of finding production. Only the
+    production envs keep `mqtt.lan`.
+  - After flashing a bench board, set `mqtt_host` in NVS and confirm the board shows up on
+    the bench broker.
+  - Cleaning up after a leak: clear the retained `homeassistant/.../<node>.../config` and
+    `<base>/devices/<MAC>/...` topics on the production broker with empty retained
+    publishes.
