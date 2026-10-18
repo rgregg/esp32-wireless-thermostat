@@ -488,4 +488,37 @@ TEST_CASE(thermostat_app_heartbeat_newer_than_now_counts_as_connected) {
   ASSERT_TRUE(app.controller_connected(10000, 30000));
   ASSERT_TRUE(!app.controller_connected(50000, 30000));
 }
+
+TEST_CASE(thermostat_app_words_carry_session_and_reset_starts_a_new_one) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatAppConfig cfg;
+  cfg.command_session_seed = 41;  // boot count
+  thermostat::ThermostatApp app(tx, cfg);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  const uint8_t s1 = espnow_cmd::decode(tx.last_cmd).session;
+  ASSERT_TRUE(s1 >= 1 && s1 <= espnow_cmd::kMaxSession);
+
+  app.reset_local_command_sequence();
+  app.set_local_mode(FurnaceMode::Off, 2000);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(decoded.seq, static_cast<uint16_t>(1));
+  ASSERT_TRUE(decoded.session != s1);
+}
+
+TEST_CASE(thermostat_app_consecutive_boots_get_different_sessions) {
+  for (uint32_t boot = 0; boot < 70; ++boot) {
+    FakeThermostatTransport a, b;
+    thermostat::ThermostatAppConfig ca, cb;
+    ca.command_session_seed = boot;
+    cb.command_session_seed = boot + 1;
+    thermostat::ThermostatApp app_a(a, ca), app_b(b, cb);
+    app_a.request_sync(0);
+    app_b.request_sync(0);
+    const uint8_t sa = espnow_cmd::decode(a.last_cmd).session;
+    const uint8_t sb = espnow_cmd::decode(b.last_cmd).session;
+    ASSERT_TRUE(sa != 0 && sb != 0);
+    ASSERT_TRUE(sa != sb);
+  }
+}
 #endif

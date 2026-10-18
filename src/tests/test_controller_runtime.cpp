@@ -825,4 +825,51 @@ TEST_CASE(controller_runtime_windows_open_fan_circulate_continues_in_cool_mode) 
   // Cool demand must remain suppressed
   ASSERT_TRUE(!rt.cool_demand());
 }
+
+// A display that rebooted (or reset its seq) restarts at seq 1 with a new session; the
+// controller must adopt it instead of rejecting every command as stale.
+TEST_CASE(controller_runtime_new_session_adopts_restarted_seq) {
+  thermostat::ControllerRuntime rt;
+  const uint8_t mac[6] = {0x80, 0xB5, 0x4E, 0xD1, 0xB8, 0x04};
+
+  CommandWord cmd;
+  cmd.session = 4;
+  cmd.seq = 100;  // seq 1 is behind 100 in the 9-bit ring
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).accepted);
+
+  cmd.session = 5;  // rebooted: new session, seq restarts
+  cmd.seq = 1;
+  cmd.mode = FurnaceMode::Heat;
+  cmd.setpoint_decic = 215;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).accepted);
+  ASSERT_EQ(static_cast<int>(rt.mode()), static_cast<int>(FurnaceMode::Heat));
+
+  cmd.seq = 2;  // the new session continues normally
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).accepted);
+  cmd.seq = 1;  // and keeps stale protection within it
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).stale_or_duplicate);
+}
+
+TEST_CASE(controller_runtime_session_zero_keeps_legacy_seq_check) {
+  thermostat::ControllerRuntime rt;
+  const uint8_t mac[6] = {0x80, 0xB5, 0x4E, 0xD1, 0xB8, 0x04};
+
+  CommandWord cmd;  // session 0: an older display
+  cmd.seq = 100;  // seq 1 is behind 100 in the 9-bit ring
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).accepted);
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).stale_or_duplicate);
+}
+
+TEST_CASE(controller_runtime_same_session_low_seq_is_stale) {
+  thermostat::ControllerRuntime rt;
+  const uint8_t mac[6] = {0x80, 0xB5, 0x4E, 0xD1, 0xB8, 0x04};
+
+  CommandWord cmd;
+  cmd.session = 7;
+  cmd.seq = 100;  // seq 1 is behind 100 in the 9-bit ring
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).accepted);
+  cmd.seq = 1;
+  ASSERT_TRUE(rt.apply_remote_command(cmd, mac).stale_or_duplicate);
+}
 #endif

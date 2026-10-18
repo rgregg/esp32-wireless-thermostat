@@ -2964,6 +2964,8 @@ void thermostat_firmware_setup() {
   cfg.controller_connection_timeout_ms = g_cfg_controller_timeout_ms;
   // Resync telemetry seq on reconnect after the same gap that marks "disconnected".
   cfg.app.controller_reconnect_resync_ms = g_cfg_controller_timeout_ms;
+  // A different command session each boot, so the controller adopts the restarted seq.
+  cfg.app.command_session_seed = (g_boot_count != 0) ? g_boot_count : esp_random();
   if (g_cfg_espnow_enabled) {
     parse_mac(g_cfg_espnow_peer_mac.c_str(), cfg.transport.peer_mac);
     uint8_t lmk[16] = {0};

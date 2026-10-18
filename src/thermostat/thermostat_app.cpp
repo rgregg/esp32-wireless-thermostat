@@ -6,7 +6,10 @@ namespace thermostat {
 
 ThermostatApp::ThermostatApp(IThermostatTransport &transport,
                              const ThermostatAppConfig &config)
-    : transport_(transport), config_(config) {}
+    : transport_(transport),
+      config_(config),
+      session_(espnow_cmd::next_session(
+          static_cast<uint8_t>(config.command_session_seed % espnow_cmd::kMaxSession))) {}
 
 float ThermostatApp::local_setpoint_c() const {
   // Cool mode shows cool bin; Heat and Off show heat bin.
@@ -173,6 +176,7 @@ void ThermostatApp::request_filter_reset(uint32_t now_ms) {
 
 void ThermostatApp::reset_local_command_sequence() {
   seq_local_ = 0;
+  session_ = espnow_cmd::next_session(session_);  // the controller adopts the new seq
   has_pending_command_ = false;
   has_unconfirmed_command_ = false;
   command_retries_ = 0;
@@ -301,6 +305,7 @@ void ThermostatApp::transmit_command(const SendOptions &requested) {
   cmd.preserve_mode = opts.preserve_mode;
   cmd.preserve_fan = opts.preserve_fan;
   cmd.preserve_setpoint = opts.preserve_setpoint;
+  cmd.session = session_;
 
   last_packed_command_ = espnow_cmd::encode(cmd);
   last_command_seq_ = cmd.seq;

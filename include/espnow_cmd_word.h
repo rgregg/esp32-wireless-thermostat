@@ -19,11 +19,19 @@ struct CommandWord {
   bool preserve_mode = false;
   bool preserve_fan = false;
   bool preserve_setpoint = false;
+  // Sender session (5 bits, 1..31; 0 = sender has no sessions). A sender starts a new
+  // session whenever its seq restarts (boot, reset_sequence); a receiver seeing a new
+  // session adopts its seq instead of rejecting it as stale. Older controllers ignore it.
+  uint8_t session = 0;
 };
 
 namespace espnow_cmd {
 
+constexpr uint8_t kMaxSession = 31;
+
 uint16_t next_seq(uint16_t current_seq);
+// The session after `session` (1..31, never 0).
+uint8_t next_session(uint8_t session);
 uint32_t encode(const CommandWord &cmd);
 CommandWord decode(uint32_t packed);
 

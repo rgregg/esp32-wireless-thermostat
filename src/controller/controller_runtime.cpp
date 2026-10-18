@@ -69,9 +69,11 @@ void ControllerRuntime::set_windows_open(bool open) {
 
 void ControllerRuntime::reset_remote_command_sequence() {
   last_seq_default_ = 0;
+  session_default_ = 0;
   for (int i = 0; i < kMaxCommandSources; ++i) {
     command_sources_[i].active = false;
     command_sources_[i].last_seq = 0;
+    command_sources_[i].session = 0;
   }
 }
 
@@ -81,6 +83,7 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
 
   // Resolve the per-source sequence counter
   uint16_t *last_seq = &last_seq_default_;
+  uint8_t *session = &session_default_;
 
   if (source_mac != nullptr) {
     // Find existing entry or allocate a new one
@@ -89,6 +92,7 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
       if (command_sources_[i].active &&
           memcmp(command_sources_[i].mac, source_mac, 6) == 0) {
         last_seq = &command_sources_[i].last_seq;
+        session = &command_sources_[i].session;
         free_slot = -2;  // sentinel: found
         break;
       }
@@ -100,8 +104,10 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
       // New source — register it
       memcpy(command_sources_[free_slot].mac, source_mac, 6);
       command_sources_[free_slot].last_seq = 0;
+      command_sources_[free_slot].session = 0;
       command_sources_[free_slot].active = true;
       last_seq = &command_sources_[free_slot].last_seq;
+      session = &command_sources_[free_slot].session;
     } else if (free_slot == -1) {
       // All slots full and source not found — reject to avoid
       // sharing sequence tracking with the default source
@@ -110,7 +116,16 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
     }
   }
 
-  if (*last_seq != 0) {
+  // A new sender session means the sender restarted its seq (rebooted or reset): adopt
+  // it rather than reject every word as stale until the seq catches up.
+  const bool new_session = cmd.session != 0 && cmd.session != *session;
+  if (new_session) {
+    if (*last_seq != 0) {
+      audit("command session %u->%u: seq %u->%u", static_cast<unsigned>(*session),
+            static_cast<unsigned>(cmd.session), static_cast<unsigned>(*last_seq),
+            static_cast<unsigned>(cmd.seq));
+    }
+  } else if (*last_seq != 0) {
     if (!espnow_cmd::is_newer_seq(*last_seq, cmd.seq)) {
       result.stale_or_duplicate = true;
       return result;
@@ -118,6 +133,7 @@ CommandApplyResult ControllerRuntime::apply_remote_command(const CommandWord &cm
   }
 
   *last_seq = cmd.seq;
+  *session = cmd.session;
   result.accepted = true;
 
   if (cmd.sync_request) {

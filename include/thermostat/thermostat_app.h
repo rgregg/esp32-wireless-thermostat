@@ -17,6 +17,9 @@ struct ThermostatAppConfig {
   // reconnect and drop telemetry-seq tracking so the next telemetry is accepted even
   // if the controller restarted and reset its sequence. 0 disables the resync.
   uint32_t controller_reconnect_resync_ms = 30000;
+  // Picks the first command session (see CommandWord::session); give each boot a
+  // different value (the firmware uses its persisted boot count).
+  uint32_t command_session_seed = 0;
 };
 
 class ThermostatApp {
@@ -103,6 +106,7 @@ class ThermostatApp {
   ThermostatAppConfig config_;
 
   uint16_t seq_local_ = 0;
+  uint8_t session_ = 1;  // command session; changes whenever seq_local_ restarts
   bool has_last_packed_command_ = false;
   uint32_t last_packed_command_ = 0;
   uint16_t last_command_seq_ = 0;
