@@ -77,5 +77,9 @@ bool is_secret_cfg_key(const std::string &key) {
   return false;
 }
 
+bool is_blank_secret_form_value(const std::string &key, const char *value) {
+  return is_secret_cfg_key(key) && (value == nullptr || value[0] == '\0');
+}
+
 }  // namespace management_paths
 }  // namespace thermostat

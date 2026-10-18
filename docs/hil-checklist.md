@@ -178,7 +178,13 @@ Bench watch-items:
       display's MAC). The channel search assumes a single unicast peer.
 - [ ] Both production devices show an advancing `state/last_espnow_rx_ms` over MQTT (the
       "Last ESP-NOW RX" sensors in Home Assistant), proving true ESP-NOW receive, before
-      the fallback is relied on.
+      the fallback is relied on. (Before 2026-10-17 the display published its controller
+      heartbeat time here, which MQTT also refreshes, so it could not prove this.)
+- [ ] Both production `/status` pages show `espnow_encrypted` true and neither shows
+      `error_espnow` `key_not_applied`. An LMK on one side only makes the link one-way:
+      the encrypting side's frames are MAC-acked and then dropped by the peer that has no
+      key. The display's LMK must match the controller's; set it before the flash if it
+      is unset.
 
 ## Result
 - Status: PASS / FAIL

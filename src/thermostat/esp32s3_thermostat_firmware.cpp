@@ -35,6 +35,7 @@
 #include "thermostat/thermostat_screen_controller.h"
 #include "thermostat/ui/thermostat_ui_shared.h"
 #include "management_paths.h"
+#include "transport/espnow_config_parse.h"
 #include "device_registry.h"
 #include "mac_address_utils.h"
 #include "network_reboot_governor.h"
@@ -322,6 +323,11 @@ String g_reset_reason = "unknown";
 String g_last_mqtt_error = "none";
 String g_last_ota_error = "none";
 String g_last_espnow_error = "none";
+// True when an LMK is configured but the ESP-NOW peer could not be set up encrypted (no
+// valid unicast peer MAC). The controller encrypts, so its frames would all be dropped.
+bool g_espnow_key_not_applied = false;
+// Whether the ESP-NOW peer was registered with encryption at boot.
+bool g_espnow_encrypted = false;
 bool g_reboot_requested = false;
 uint32_t g_reboot_at_ms = 0;
 bool g_backlight_enabled = false;
@@ -554,11 +560,19 @@ bool try_update_runtime_config(const String &key, const char *raw_value) {
     NVS_PUT_UCHAR("esp_ch", g_cfg_espnow_channel);
     g_cfg_reboot_required = true;
   } else if (key == "espnow_peer_mac" || key == "paired_controller_mac") {
-    g_cfg_espnow_peer_mac = value;
-    NVS_PUT_STR("esp_peer", value);
+    // Store the canonical colon form; reject anything that would not parse, since an
+    // unparseable peer falls back to broadcast and silently disables encryption.
+    char normalized[18] = "";
+    if (value.length() > 0 &&
+        !thermostat::espnow_config::normalize_mac(value.c_str(), normalized)) {
+      return false;
+    }
+    g_cfg_espnow_peer_mac = normalized;
+    NVS_PUT_STR("esp_peer", g_cfg_espnow_peer_mac);
     g_cfg_mqtt_reconfigure_required = true;
     g_cfg_reboot_required = true;
   } else if (key == "espnow_lmk") {
+    if (!thermostat::espnow_config::lmk_value_valid(value.c_str())) return false;
     g_cfg_espnow_lmk = value;
     NVS_PUT_STR("esp_lmk", value);
     g_cfg_reboot_required = true;
@@ -717,14 +731,7 @@ void poll_weather(uint32_t now_ms) {
 }
 
 bool parse_mac(const char *text, uint8_t out[6]) {
-  if (text == nullptr || strlen(text) < 17) return false;
-  unsigned values[6] = {};
-  if (sscanf(text, "%02x:%02x:%02x:%02x:%02x:%02x", &values[0], &values[1], &values[2],
-             &values[3], &values[4], &values[5]) != 6) {
-    return false;
-  }
-  for (int i = 0; i < 6; ++i) out[i] = static_cast<uint8_t>(values[i] & 0xFFu);
-  return true;
+  return thermostat::espnow_config::parse_mac(text, out);
 }
 
 bool is_broadcast_mac(const uint8_t mac[6]) {
@@ -733,13 +740,7 @@ bool is_broadcast_mac(const uint8_t mac[6]) {
 }
 
 bool parse_lmk_hex(const char *text, uint8_t out[16]) {
-  if (text == nullptr || strlen(text) != 32) return false;
-  for (int i = 0; i < 16; ++i) {
-    unsigned byte = 0;
-    if (sscanf(text + (i * 2), "%02x", &byte) != 1) return false;
-    out[i] = static_cast<uint8_t>(byte & 0xFFu);
-  }
-  return true;
+  return thermostat::espnow_config::parse_lmk(text, out);
 }
 
 const char *reset_reason_text(esp_reset_reason_t reason) {
@@ -803,6 +804,11 @@ void web_handle_config_post() {
   int updated = 0;
   xSemaphoreTake(g_api_mutex, portMAX_DELAY);
   for (int i = 0; i < g_web.args(); ++i) {
+    // A blank secret from the form means "keep the current value" (see password_field).
+    if (thermostat::management_paths::is_blank_secret_form_value(
+            g_web.argName(i).c_str(), g_web.arg(i).c_str())) {
+      continue;
+    }
     if (try_update_runtime_config(g_web.argName(i), g_web.arg(i).c_str())) {
       ++updated;
     }
@@ -869,6 +875,7 @@ void web_handle_status_get() {
     "\"wifi_rssi\":%d,"
     "\"mqtt_connected\":%s,"
     "\"espnow_connected\":%s,"
+    "\"espnow_encrypted\":%s,"
     "\"aht_sensor_ready\":%s,"
     "\"sensor_type\":\"%s\","
     "\"remote_indoor_temp_c\":%s,"
@@ -899,6 +906,7 @@ void web_handle_status_get() {
     WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
     g_mqtt.connected() ? "true" : "false",
     g_link.linked() ? "true" : "false",
+    g_espnow_encrypted ? "true" : "false",
     sensor_type != SensorType::None ? "true" : "false",
     sensor_type == SensorType::AHT ? "aht" :
     sensor_type == SensorType::Si7021 ? "si7021" : "none",
@@ -1110,6 +1118,7 @@ void web_handle_root() {
   status_item(html, "RSSI", "wifi_rssi");
   status_item(html, "MQTT", "mqtt_connected");
   status_item(html, "ESP-NOW", "espnow_connected");
+  status_item(html, "ESP-NOW encrypted", "espnow_encrypted");
   status_section(html, "Environment");
   status_item(html, "Sensor", "sensor_type");
   status_item(html, "Remote Temp", "remote_indoor_temp_text");
@@ -1370,8 +1379,11 @@ void mqtt_publish_state() {
   g_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_last_mqtt_command_ms));
   g_mqtt.publish(self_topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
+  // A frame from the controller that passed ESP-NOW decryption and the peer filter. Not
+  // last_controller_heartbeat_ms(), which MQTT controller state also refreshes and so
+  // stayed fresh while every encrypted ESP-NOW frame was being dropped.
   snprintf(buf, sizeof(buf), "%lu",
-           static_cast<unsigned long>(g_runtime->last_controller_heartbeat_ms()));
+           static_cast<unsigned long>(g_runtime->transport().last_peer_rx_ms()));
   g_mqtt.publish(self_topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_runtime->espnow_send_ok_count()));
@@ -1380,7 +1392,7 @@ void mqtt_publish_state() {
            static_cast<unsigned long>(g_runtime->espnow_send_fail_count()));
   g_mqtt.publish(self_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
   // g_espnow_fail_window is updated on every loop pass; only read it here.
-  if (g_last_espnow_error != "begin_failed") {
+  if (g_last_espnow_error != "begin_failed" && g_last_espnow_error != "key_not_applied") {
     g_last_espnow_error = g_espnow_fail_window.recent(millis()) ? "send_failed" : "none";
   }
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_link.channel()));
@@ -2960,7 +2972,15 @@ void thermostat_firmware_setup() {
       memcpy(cfg.transport.lmk, lmk, sizeof(lmk));
       cfg.transport.encrypted = true;
     }
+    if (g_cfg_espnow_lmk.length() > 0 && !cfg.transport.encrypted) {
+      g_espnow_key_not_applied = true;
+      Serial.printf("[espnow] ERROR: LMK set but peer MAC \"%s\" is not a valid unicast "
+                    "MAC; ESP-NOW is unencrypted and the controller's frames will be "
+                    "dropped\n",
+                    g_cfg_espnow_peer_mac.c_str());
+    }
   }
+  g_espnow_encrypted = cfg.transport.encrypted;
 
   static ThermostatDeviceRuntime runtime(cfg);
   g_runtime = &runtime;
@@ -2984,7 +3004,9 @@ void thermostat_firmware_setup() {
   if (g_cfg_espnow_enabled) {
     runtime_ok = g_runtime->begin();
   }
-  g_last_espnow_error = runtime_ok ? "none" : (g_cfg_espnow_enabled ? "begin_failed" : "disabled");
+  g_last_espnow_error = !runtime_ok ? (g_cfg_espnow_enabled ? "begin_failed" : "disabled")
+                        : g_espnow_key_not_applied ? "key_not_applied"
+                                                   : "none";
   {
     thermostat::EspNowChannelConfig link_cfg;
     link_cfg.role = thermostat::LinkRole::Display;

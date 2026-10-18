@@ -26,6 +26,7 @@
 #include "discovery_topics.h"
 #include "wifi_watchdog.h"
 #include "network_reboot_governor.h"
+#include "transport/espnow_config_parse.h"
 #include "transport/espnow_fail_window.h"
 #include "transport/espnow_link_manager.h"
 
@@ -284,6 +285,10 @@ bool g_cfg_ctrl_espnow_enabled = true; // NVS "espnow_en"
 String g_ctrl_last_mqtt_error = "none";
 String g_ctrl_last_ota_error = "none";
 String g_ctrl_last_espnow_error = "none";
+// True when an LMK is configured but no unicast peer could be registered encrypted.
+bool g_ctrl_espnow_key_not_applied = false;
+// Whether the ESP-NOW peers were registered with encryption at boot.
+bool g_ctrl_espnow_encrypted = false;
 uint16_t g_ctrl_mqtt_seq = 0;
 std::atomic<bool> g_ctrl_mqtt_discovery_sent{false};
 // NetworkRecoveryPolicy for MQTT reconnect backoff + subsystem restart.
@@ -841,6 +846,9 @@ bool ctrl_try_update_runtime_config(const String &key, const char *raw_value) {
     g_ctrl_cfg.putUChar("esp_ch", g_cfg_ctrl_espnow_channel);
     g_ctrl_cfg_reboot_required = true;
   } else if (key == "espnow_lmk") {
+    if (!thermostat::espnow_config::lmk_value_valid(value.c_str())) {
+      return false;
+    }
     g_cfg_ctrl_espnow_lmk = value;
     g_ctrl_cfg.putString("esp_lmk", value);
     g_ctrl_cfg_reboot_required = true;
@@ -988,18 +996,7 @@ const char *ctrl_reset_reason_text(esp_reset_reason_t reason) {
 }
 
 bool ctrl_parse_mac(const char *text, uint8_t out[6]) {
-  if (text == nullptr || strlen(text) < 17) {
-    return false;
-  }
-  unsigned values[6] = {};
-  if (sscanf(text, "%02x:%02x:%02x:%02x:%02x:%02x", &values[0], &values[1], &values[2],
-             &values[3], &values[4], &values[5]) != 6) {
-    return false;
-  }
-  for (int i = 0; i < 6; ++i) {
-    out[i] = static_cast<uint8_t>(values[i] & 0xFFu);
-  }
-  return true;
+  return thermostat::espnow_config::parse_mac(text, out);
 }
 
 bool ctrl_is_broadcast_mac(const uint8_t mac[6]) {
@@ -1009,17 +1006,7 @@ bool ctrl_is_broadcast_mac(const uint8_t mac[6]) {
 
 
 bool ctrl_parse_lmk_hex(const char *text, uint8_t out[16]) {
-  if (text == nullptr || strlen(text) != 32) {
-    return false;
-  }
-  for (int i = 0; i < 16; ++i) {
-    unsigned byte = 0;
-    if (sscanf(text + (i * 2), "%02x", &byte) != 1) {
-      return false;
-    }
-    out[i] = static_cast<uint8_t>(byte & 0xFFu);
-  }
-  return true;
+  return thermostat::espnow_config::parse_lmk(text, out);
 }
 
 // --- Weather polling (PirateWeather API) ---
@@ -1669,6 +1656,11 @@ void ctrl_web_handle_config_post() {
   for (int i = 0; i < g_ctrl_web.args(); ++i) {
     const String name = g_ctrl_web.argName(i);
     const String value = g_ctrl_web.arg(i);
+    // A blank secret from the form means "keep the current value" (see password_field).
+    if (thermostat::management_paths::is_blank_secret_form_value(name.c_str(),
+                                                                  value.c_str())) {
+      continue;
+    }
     if (ctrl_try_update_runtime_config(name, value.c_str())) {
       ++updated;
     }
@@ -1773,6 +1765,7 @@ void ctrl_web_handle_status_get() {
     "\"allow_ha\":%s,"
     "\"mqtt_enabled\":%s,"
     "\"espnow_enabled\":%s,"
+    "\"espnow_encrypted\":%s,"
     "\"display_availability\":\"%s\","
     "\"filter_runtime_hours\":%.2f,"
     "\"relay_heat\":%s,"
@@ -1808,6 +1801,7 @@ void ctrl_web_handle_status_get() {
     g_cfg_ctrl_allow_ha ? "true" : "false",
     g_cfg_ctrl_mqtt_enabled ? "true" : "false",
     g_cfg_ctrl_espnow_enabled ? "true" : "false",
+    g_ctrl_espnow_encrypted ? "true" : "false",
     g_disp_availability.c_str(),
     static_cast<double>(rt.filter_runtime_hours()),
     g_relay_io.latched_output().heat ? "true" : "false",
@@ -1929,6 +1923,7 @@ void ctrl_web_handle_root() {
   status_item(html, "Allow HA", "allow_ha");
   status_item(html, "MQTT Enabled", "mqtt_enabled");
   status_item(html, "ESP-NOW Enabled", "espnow_enabled");
+  status_item(html, "ESP-NOW encrypted", "espnow_encrypted");
   status_grid_end(html);
   card_end(html);
   if (g_ctrl_cfg_reboot_required) {
@@ -2253,7 +2248,8 @@ void ctrl_publish_runtime_state() {
            static_cast<unsigned long>(g_controller->transport().send_fail_count()));
   g_ctrl_mqtt.publish(self_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
   // g_ctrl_espnow_fail_window is updated on every loop pass; only read it here.
-  if (g_ctrl_last_espnow_error != "begin_failed") {
+  if (g_ctrl_last_espnow_error != "begin_failed" &&
+      g_ctrl_last_espnow_error != "key_not_applied") {
     g_ctrl_last_espnow_error =
         g_ctrl_espnow_fail_window.recent(millis()) ? "send_failed" : "none";
   }
@@ -3014,7 +3010,14 @@ void setup() {
         transport_cfg.encrypted = true;
       }
     }
+    if (g_cfg_ctrl_espnow_lmk.length() > 0 && !transport_cfg.encrypted) {
+      g_ctrl_espnow_key_not_applied = true;
+      Serial.printf("[espnow] ERROR: LMK set but no valid unicast peer in devices \"%s\"; "
+                    "ESP-NOW is unencrypted\n",
+                    g_cfg_ctrl_devices.c_str());
+    }
   }
+  g_ctrl_espnow_encrypted = transport_cfg.encrypted;
 
   static thermostat::ControllerNode node(controller_cfg, transport_cfg);
   g_controller = &node;
@@ -3072,7 +3075,9 @@ void setup() {
   if (g_cfg_ctrl_espnow_enabled) {
     ok = g_controller->begin();
   }
-  g_ctrl_last_espnow_error = ok ? "none" : (g_cfg_ctrl_espnow_enabled ? "begin_failed" : "disabled");
+  g_ctrl_last_espnow_error = !ok ? (g_cfg_ctrl_espnow_enabled ? "begin_failed" : "disabled")
+                             : g_ctrl_espnow_key_not_applied ? "key_not_applied"
+                                                             : "none";
   {
     // The channel search assumes a single unicast peer in `devices` (production: the
     // display's MAC only). With several, probes and peer_heard() cover every authorized
@@ -3093,7 +3098,7 @@ void setup() {
   {
     String temp_mac_str = ctrl_find_temp_sensor_mac_str(g_cfg_ctrl_devices);
     uint8_t ps_mac[6];
-    if (temp_mac_str.length() >= 17 && ctrl_parse_mac(temp_mac_str.c_str(), ps_mac)) {
+    if (ctrl_parse_mac(temp_mac_str.c_str(), ps_mac)) {
       g_controller->app().set_primary_sensor_mac(ps_mac);
     }
   }
