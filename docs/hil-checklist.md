@@ -90,8 +90,9 @@ production devices for these scenarios.
         If it fails, redesign the channel probe to the spec's dwell fallback before any
         production flash.
 
-- [ ] **F1 Baseline.** Both on WiFi, same AP. `/status` on both: `espnow_connected` true,
-      `espnow_search_count` 0. Controller `/status`: `connection_path` `mqtt+esp-now`. The
+- [x] **F1 Baseline.** Both on WiFi, same AP. `/status` on both: `espnow_connected` true,
+      `espnow_search_count` at most 1 (one pass runs at boot before the network is up) and
+      not rising. Controller `/status`: `connection_path` `mqtt+esp-now`. The
       display's `/status` has no `connection_path`; read its MQTT topic
       `state/connection_path` instead.
 - [ ] **F2 Both lose WiFi.** Block both clients in UniFi. Within 60 s both report
