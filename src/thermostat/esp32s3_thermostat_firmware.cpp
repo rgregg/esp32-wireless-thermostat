@@ -459,12 +459,19 @@ String controller_topic_for(const char *suffix) {
 }
 
 
+// Preferences::putString returns the length written, so a successful write of an empty
+// string also returns 0. Read an empty value back instead of reporting it as a failure.
+bool nvs_put_string_ok(const char *key, const String &value) {
+  if (g_cfg.putString(key, value) != 0) return true;
+  return value.length() == 0 && g_cfg.isKey(key) && g_cfg.getString(key, "x").length() == 0;
+}
+
 bool try_update_runtime_config(const String &key, const char *raw_value) {
   if (!g_cfg_ready || raw_value == nullptr) return false;
   const String value(raw_value);
   bool known = true;
 #define NVS_PUT_STR(ns_key, val) \
-  do { if (g_cfg.putString((ns_key), (val)) == 0) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
+  do { if (!nvs_put_string_ok((ns_key), (val))) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
 #define NVS_PUT_UINT(ns_key, val) \
   do { if (g_cfg.putUInt((ns_key), (val)) == 0) Serial.printf("[cfg] NVS write failed: %s\n", (ns_key)); } while(0)
 #define NVS_PUT_UCHAR(ns_key, val) \
