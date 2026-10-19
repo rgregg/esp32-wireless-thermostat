@@ -44,9 +44,13 @@ Open observations:
   frames arrive every 2-15 s, so a gap means two or more lost frames. Watch whether the
   passes cost link time. It reached 23 by the end of F2 (about 2.5 h of uptime).
 - With the controller's port cut off through the UniFi API (which drops traffic but
-  probably leaves the Ethernet link up), display commands reached the controller's audit
-  log about 14 s after they were sent, in three runs. With the port disabled in the UI
-  (F2) they applied in the same second. Likely the controller's loop blocking on network
-  connects while the link is up; worth checking before the production swap.
+  leaves the Ethernet link up), display commands reached the controller's audit log
+  14-19 s after they were sent, in four runs. Root cause (found with the loop profiler
+  added in `870d5d3`): the half-open broker connection still read as connected, each
+  publish blocked in the framework's socket write (up to 10 s), and the controller's
+  loop publishes under the MQTT mutex, so the whole control loop stalled for up to 60 s
+  (relays and failsafe included). Fixed in `4a7df9d` with a 250 ms write budget per MQTT
+  packet; the same test then showed a longest loop gap of 365 ms and commands applied in
+  the same second.
 - UniFi stats lag: `stat/device` reported the port down about 3 min after it stopped
   passing traffic. Use the device's own reachability, not the switch stats, to time tests.
