@@ -23,6 +23,7 @@
 #include <esp_now.h>
 #include <esp_system.h>
 #include "ota_web_updater.h"
+#include "bounded_write_client.h"
 #include "web/web_ui_escape.h"
 #include "web/web_ui_shell.h"
 #include "web/web_ui_fields.h"
@@ -224,7 +225,8 @@ TwoWire g_sensor_i2c(1);
 Adafruit_Si7021 g_si7021(&g_sensor_i2c);
 Preferences g_cfg;
 bool g_cfg_ready = false;
-WiFiClient g_wifi_client;
+// A stalled broker socket must not hold the UI/ESP-NOW loop (see bounded_write_client.h).
+BoundedWriteClient g_wifi_client(250);
 PubSubClient g_mqtt(g_wifi_client);
 WebServer g_web(80);
 bool g_mqtt_discovery_sent = false;

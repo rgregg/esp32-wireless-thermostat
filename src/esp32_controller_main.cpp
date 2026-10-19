@@ -59,6 +59,7 @@
 #include "web/web_ui_shell.h"
 #include "web/web_ui_fields.h"
 #include "mac_address_utils.h"
+#include "bounded_write_client.h"
 
 thermostat::ControllerNode *g_controller = nullptr;
 #if defined(CONTROLLER_BOARD_WAVESHARE)
@@ -272,7 +273,9 @@ static void ctrl_time_tick(uint32_t now_ms) {
 #endif
   }
 }
-WiFiClient g_ctrl_wifi_client;
+// 250 ms per MQTT packet: a LAN broker drains the send buffer in a few ms, and a stalled
+// socket must not hold the control loop (see bounded_write_client.h).
+BoundedWriteClient g_ctrl_wifi_client(250);
 PubSubClient g_ctrl_mqtt(g_ctrl_wifi_client);
 WebServer g_ctrl_web(80);
 uint32_t g_ctrl_last_mqtt_publish_ms = 0;
@@ -1883,10 +1886,12 @@ void ctrl_web_handle_status_get() {
       len -= 1;
       len += snprintf(buf + len, sizeof(buf) - len,
                       ",\"loop_gap_max_ms\":%lu,\"cmd_wait_max_ms\":%lu,"
-                      "\"espnow_cmd_gated\":%lu,\"loop_step_max_ms\":{",
+                      "\"espnow_cmd_gated\":%lu,\"mqtt_stalled_writes\":%lu,"
+                      "\"loop_step_max_ms\":{",
                       static_cast<unsigned long>(g_ctrl_loop_gap_max_ms),
                       static_cast<unsigned long>(g_controller->command_wait_max_ms()),
-                      static_cast<unsigned long>(g_controller->espnow_commands_gated()));
+                      static_cast<unsigned long>(g_controller->espnow_commands_gated()),
+                      static_cast<unsigned long>(g_ctrl_wifi_client.stalled_writes()));
       for (int i = 0; i < kLoopStepCount && len < sizeof(buf); ++i) {
         len += snprintf(buf + len, sizeof(buf) - len, "%s\"%s\":%lu", i ? "," : "",
                         kCtrlLoopStepNames[i],
