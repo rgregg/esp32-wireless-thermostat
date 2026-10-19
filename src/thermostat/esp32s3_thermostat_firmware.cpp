@@ -29,6 +29,9 @@
 #include "web/web_ui_fields.h"
 
 #include "thermostat/thermostat_device_runtime.h"
+#if defined(THERMOSTAT_BENCH_COMMANDS)
+#include "thermostat/bench_command.h"
+#endif
 #include "mqtt_payload.h"
 #include "mqtt_topics.h"
 #include "wifi_watchdog.h"
@@ -824,6 +827,104 @@ void web_handle_reboot_post() {
   g_web.send(200, "text/plain", "rebooting\n");
 }
 
+#if defined(THERMOSTAT_BENCH_COMMANDS)
+// Bench-only command input (see bench_command.h): USB serial `cmd mode=heat sp=22.5` or
+// `POST /cmd`. Both go through the touchscreen's runtime calls. /cmd runs on the web task,
+// so it only queues the command; the loop applies it, keeping every ESP-NOW send on the
+// loop task (the link manager's probe attribution relies on that).
+thermostat::BenchCommand g_bench_pending;  // guarded by g_api_mutex
+bool g_bench_pending_set = false;
+char g_bench_serial_line[128];
+size_t g_bench_serial_len = 0;
+bool g_bench_serial_overflow = false;
+
+constexpr const char *kBenchUsage =
+    "usage: cmd mode=heat|cool|off fan=auto|on|circulate sp=<C 0-40> sync=1";
+
+// Caller holds g_api_mutex.
+void bench_apply(const thermostat::BenchCommand &c, const char *source) {
+  if (g_runtime == nullptr) return;
+  const uint32_t now = millis();
+  if (c.has_mode) g_runtime->on_user_set_mode(c.mode, now);
+  if (c.has_fan) g_runtime->on_user_set_fan_mode(c.fan, now);
+  if (c.has_setpoint) g_runtime->on_user_set_setpoint_c(c.setpoint_c, now);
+  if (c.sync) g_runtime->request_sync(now);
+  Serial.printf("[bench] %s command applied at %lu ms, last_command_seq=%u\n", source,
+                static_cast<unsigned long>(now),
+                static_cast<unsigned>(g_runtime->last_command_seq()));
+}
+
+void web_handle_cmd_post() {
+  String line;
+  for (int i = 0; i < g_web.args(); ++i) {
+    if (g_web.argName(i) == "plain") continue;  // raw body; the form fields carry the args
+    line += g_web.argName(i) + "=" + g_web.arg(i) + " ";
+  }
+  thermostat::BenchCommand c;
+  const char *err = nullptr;
+  if (!thermostat::parse_bench_command(line.c_str(), &c, &err)) {
+    g_web.send(400, "text/plain", String("error: ") + err + "\n" + kBenchUsage + "\n");
+    return;
+  }
+  xSemaphoreTake(g_api_mutex, portMAX_DELAY);
+  // A command still waiting for the loop is merged, so back-to-back posts keep every field.
+  thermostat::BenchCommand &p = g_bench_pending;
+  if (!g_bench_pending_set) p = thermostat::BenchCommand{};
+  if (c.has_mode) { p.has_mode = true; p.mode = c.mode; }
+  if (c.has_fan) { p.has_fan = true; p.fan = c.fan; }
+  if (c.has_setpoint) { p.has_setpoint = true; p.setpoint_c = c.setpoint_c; }
+  if (c.sync) p.sync = true;
+  g_bench_pending_set = true;
+  xSemaphoreGive(g_api_mutex);
+  g_web.send(202, "text/plain", "queued\n");
+}
+
+// Runs on the loop task: reads serial lines and applies any command queued by /cmd.
+void bench_command_tick() {
+  while (Serial.available() > 0) {
+    const int ch = Serial.read();
+    if (ch < 0) break;
+    if (ch != '\n' && ch != '\r') {
+      if (g_bench_serial_len < sizeof(g_bench_serial_line) - 1) {
+        g_bench_serial_line[g_bench_serial_len++] = static_cast<char>(ch);
+      } else {
+        g_bench_serial_overflow = true;
+      }
+      continue;
+    }
+    if (g_bench_serial_len == 0 && !g_bench_serial_overflow) continue;  // blank line / CRLF
+    g_bench_serial_line[g_bench_serial_len] = '\0';
+    const bool overflow = g_bench_serial_overflow;
+    g_bench_serial_len = 0;
+    g_bench_serial_overflow = false;
+    if (overflow) {
+      Serial.println("[bench] error: line too long");
+      continue;
+    }
+    if (strncmp(g_bench_serial_line, "cmd ", 4) != 0) {
+      Serial.printf("[bench] %s\n", kBenchUsage);
+      continue;
+    }
+    thermostat::BenchCommand c;
+    const char *err = nullptr;
+    if (!thermostat::parse_bench_command(g_bench_serial_line + 4, &c, &err)) {
+      Serial.printf("[bench] error: %s\n", err);
+      continue;
+    }
+    xSemaphoreTake(g_api_mutex, portMAX_DELAY);
+    bench_apply(c, "serial");
+    xSemaphoreGive(g_api_mutex);
+  }
+
+  xSemaphoreTake(g_api_mutex, portMAX_DELAY);
+  if (g_bench_pending_set) {
+    g_bench_pending_set = false;
+    bench_apply(g_bench_pending, "http");
+  }
+  xSemaphoreGive(g_api_mutex);
+}
+#endif
+
 void web_handle_status_get() {
   const uint32_t now = millis();
 
@@ -1303,6 +1404,9 @@ void ensure_web_ready() {
     g_web.on("/config", HTTP_GET, web_handle_config_get);
     g_web.on("/config", HTTP_POST, web_handle_config_post);
     g_web.on("/reboot", HTTP_POST, web_handle_reboot_post);
+#if defined(THERMOSTAT_BENCH_COMMANDS)
+    g_web.on("/cmd", HTTP_POST, web_handle_cmd_post);
+#endif
     g_web.on("/screenshot", HTTP_GET, web_handle_screenshot);
     ota_web_setup(g_web);
     ota_set_prepare_callback([]() {
@@ -3140,6 +3244,9 @@ void thermostat_firmware_loop() {
       g_runtime->tick(now);
       xSemaphoreGive(g_api_mutex);
     }
+#if defined(THERMOSTAT_BENCH_COMMANDS)
+    bench_command_tick();
+#endif
     if (g_display_ready) {
       g_screen.tick(now);
       show_page(g_screen.current_page());
