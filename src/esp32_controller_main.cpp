@@ -279,6 +279,36 @@ uint32_t g_ctrl_last_mqtt_publish_ms = 0;
 bool g_ctrl_last_lockout = false;
 bool g_ctrl_have_lockout = false;
 uint32_t g_ctrl_last_mqtt_command_ms = 0;
+
+// Loop profiler (diagnostic, in /status): the longest gap between loop passes and each
+// step's longest run, so a stalled control loop (which delays ESP-NOW command apply) shows
+// where it stalled. Written by the loop task only; /status?loop_reset=1 clears it.
+enum CtrlLoopStep : uint8_t {
+  kLoopStepTick = 0,
+  kLoopStepTelemetryRelays,
+  kLoopStepLink,
+  kLoopStepMdnsWeb,
+  kLoopStepMqtt,
+  kLoopStepTime,
+  kLoopStepWeather,
+  kLoopStepGovernor,
+  kLoopStepOther,
+  kLoopStepCount,
+};
+const char *const kCtrlLoopStepNames[kLoopStepCount] = {
+    "tick", "telemetry_relays", "link", "mdns_web", "mqtt",
+    "time", "weather", "governor", "other"};
+uint32_t g_ctrl_loop_step_max_ms[kLoopStepCount] = {};
+uint32_t g_ctrl_loop_gap_max_ms = 0;
+uint32_t g_ctrl_loop_step_start_ms = 0;
+volatile bool g_ctrl_loop_reset_requested = false;
+static inline void ctrl_loop_step_done(CtrlLoopStep step) {
+  const uint32_t t = millis();
+  const uint32_t d = t - g_ctrl_loop_step_start_ms;
+  if (d > g_ctrl_loop_step_max_ms[step]) g_ctrl_loop_step_max_ms[step] = d;
+  g_ctrl_loop_step_start_ms = t;
+}
+
 bool g_cfg_ctrl_allow_ha = true;       // NVS "allow_ha"
 bool g_cfg_ctrl_mqtt_enabled = true;   // NVS "mqtt_en"
 bool g_cfg_ctrl_espnow_enabled = true; // NVS "espnow_en"
@@ -1739,7 +1769,7 @@ void ctrl_web_handle_status_get() {
     snprintf(time_utc_str, sizeof(time_utc_str), "%04u-%02u-%02uT%02u:%02u:%02uZ",
              trt.year, trt.month, trt.day, trt.hour, trt.minute, trt.second);
   }
-  char buf[1700];  // sized for base + permanent dns/mac fields
+  char buf[2048];  // sized for base + permanent dns/mac fields + loop profiler
   snprintf(buf, sizeof(buf),
     "{"
     "\"uptime_ms\":%lu,"
@@ -1846,6 +1876,26 @@ void ctrl_web_handle_status_get() {
         static_cast<unsigned>(g_ctrl_wifi_drop_reason.load()));
     }
   }
+  // Loop profiler (see kCtrlLoopStepNames); spliced in the same way.
+  {
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '}') {
+      len -= 1;
+      len += snprintf(buf + len, sizeof(buf) - len,
+                      ",\"loop_gap_max_ms\":%lu,\"cmd_wait_max_ms\":%lu,"
+                      "\"espnow_cmd_gated\":%lu,\"loop_step_max_ms\":{",
+                      static_cast<unsigned long>(g_ctrl_loop_gap_max_ms),
+                      static_cast<unsigned long>(g_controller->command_wait_max_ms()),
+                      static_cast<unsigned long>(g_controller->espnow_commands_gated()));
+      for (int i = 0; i < kLoopStepCount && len < sizeof(buf); ++i) {
+        len += snprintf(buf + len, sizeof(buf) - len, "%s\"%s\":%lu", i ? "," : "",
+                        kCtrlLoopStepNames[i],
+                        static_cast<unsigned long>(g_ctrl_loop_step_max_ms[i]));
+      }
+      if (len < sizeof(buf)) snprintf(buf + len, sizeof(buf) - len, "}}");
+    }
+  }
+  if (g_ctrl_web.hasArg("loop_reset")) g_ctrl_loop_reset_requested = true;
   g_ctrl_web.send(200, "application/json", buf);
 }
 
@@ -3202,6 +3252,19 @@ void loop() {
 
   static uint32_t last_heartbeat = 0;
   const uint32_t now = millis();
+  {
+    static uint32_t s_last_pass_ms = 0;
+    if (g_ctrl_loop_reset_requested) {
+      g_ctrl_loop_reset_requested = false;
+      g_ctrl_loop_gap_max_ms = 0;
+      for (auto &m : g_ctrl_loop_step_max_ms) m = 0;
+      if (g_controller != nullptr) g_controller->reset_command_wait_max();
+    } else if (s_last_pass_ms != 0 && now - s_last_pass_ms > g_ctrl_loop_gap_max_ms) {
+      g_ctrl_loop_gap_max_ms = now - s_last_pass_ms;
+    }
+    s_last_pass_ms = now;
+    g_ctrl_loop_step_start_ms = now;
+  }
   if (now - last_heartbeat >= 5000) {
     last_heartbeat = now;
     Serial.printf("[%lu] controller alive, ip=%s, mqtt=%s, prov=%s\n",
@@ -3222,7 +3285,9 @@ void loop() {
     ESP.restart();
   }
   if (g_controller != nullptr) {
+    ctrl_loop_step_done(kLoopStepOther);  // alive print, reboot check
     g_controller->tick(now);
+    ctrl_loop_step_done(kLoopStepTick);
     // Periodically rebroadcast the latest telemetry so a display that joined or
     // rebooted after the last state change still learns the current state (telemetry
     // is otherwise change-driven). ~15s keeps displays within their 30s timeout.
@@ -3242,6 +3307,7 @@ void loop() {
     }
     const ThermostatSnapshot snap = g_controller->app().runtime().snapshot();
     g_relay_io.apply(now, snap.relay, snap.failsafe_active || snap.hvac_lockout);
+    ctrl_loop_step_done(kLoopStepTelemetryRelays);
 #if !defined(CONTROLLER_BOARD_WAVESHARE)
     // Classic board: WiFi STA is the IP link, so keep it connected and let the WiFi
     // watchdog force reconnects on sustained gateway loss. On Waveshare, WiFi never
@@ -3275,8 +3341,10 @@ void loop() {
       ctrl_audit("wifi: association dropped, reason=%u",
                  static_cast<unsigned>(g_ctrl_wifi_drop_reason.load()));
     }
+    ctrl_loop_step_done(kLoopStepLink);  // includes the classic board's WiFi upkeep
     ctrl_ensure_mdns_ready();
     ctrl_ensure_web_ready();
+    ctrl_loop_step_done(kLoopStepMdnsWeb);
     // ---- MQTT connect + receive runs on the dedicated ctrl_mqtt task (ctrl_mqtt_task).
     //      The control loop only drains inbound commands + publishes, under a TRY-lock so a
     //      slow connect on the MQTT task can NEVER block relay control. If the lock is held
@@ -3306,12 +3374,15 @@ void loop() {
       }
       xSemaphoreGive(g_ctrl_mqtt_mtx);
     }
+    ctrl_loop_step_done(kLoopStepMqtt);
     ctrl_time_tick(now);  // start SNTP once IP up; mark time valid; (Waveshare: RTC write-back)
+    ctrl_loop_step_done(kLoopStepTime);
     const bool mqtt_primary_active =
         g_ctrl_mqtt_up.load() &&
         (static_cast<uint32_t>(now - g_ctrl_last_mqtt_command_ms) < kCtrlMqttPrimaryHoldMs);
     g_controller->set_espnow_command_enabled(!mqtt_primary_active);
     ctrl_poll_weather(now);
+    ctrl_loop_step_done(kLoopStepWeather);
 
     // Network isolation: neither MQTT nor the ESP-NOW peer is reachable. The governor
     // recovers in place at 2 min and every 30 min after, and reboots on a backed-off
@@ -3351,9 +3422,11 @@ void loop() {
         ctrl_audit("isolation: network healthy 10 min, reboot count reset");
       }
     }
+    ctrl_loop_step_done(kLoopStepGovernor);
 
   }
   ota_rollback_check(ctrl_ip_link_up() && g_ctrl_mqtt_up.load());
+  ctrl_loop_step_done(kLoopStepOther);
   delay(100);
 }
 #endif

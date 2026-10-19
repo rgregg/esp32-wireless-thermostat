@@ -2,6 +2,10 @@
 
 #include <string.h>
 
+#if defined(ARDUINO)
+#include <Arduino.h>
+#endif
+
 namespace thermostat {
 
 ControllerNode::ControllerNode(const ControllerConfig &controller_config,
@@ -75,6 +79,9 @@ void ControllerNode::enqueue(InboundType type, const uint8_t *src_mac, uint32_t 
   }
   in.u32 = u32;
   in.value = value;
+#if defined(ARDUINO)
+  in.rx_ms = millis();
+#endif
   if (!inbound_.push(in)) {
     inbound_dropped_.fetch_add(1);  // full: the display resends commands and heartbeats
   }
@@ -92,8 +99,15 @@ void ControllerNode::apply(const Inbound &in, uint32_t now_ms) {
   switch (in.type) {
     case InboundType::CommandWord:
       // Checked when applied: the loop sets this each pass from MQTT-primary state.
+      if (in.rx_ms != 0) {
+        const uint32_t waited = now_ms - in.rx_ms;
+        // A frame stamped after the loop read now_ms is "in the future": it did not wait.
+        if (waited < 0x80000000u && waited > command_wait_max_ms_) command_wait_max_ms_ = waited;
+      }
       if (espnow_command_enabled_) {
         app_.on_command_word(in.u32, mac);
+      } else {
+        ++espnow_commands_gated_;
       }
       break;
     case InboundType::Heartbeat:

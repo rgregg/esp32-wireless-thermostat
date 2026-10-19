@@ -23,6 +23,11 @@ class ControllerNode {
   // Frames dropped because the inbound queue was full (diagnostic).
   uint32_t inbound_dropped() const { return inbound_dropped_.load(); }
   void set_espnow_command_enabled(bool enabled) { espnow_command_enabled_ = enabled; }
+  // Diagnostics: longest time a command word waited in the queue before tick() applied it,
+  // and command words dropped because MQTT was primary.
+  uint32_t command_wait_max_ms() const { return command_wait_max_ms_; }
+  uint32_t espnow_commands_gated() const { return espnow_commands_gated_; }
+  void reset_command_wait_max() { command_wait_max_ms_ = 0; }
 
   ControllerApp &app() { return app_; }
   EspNowControllerTransport &transport() { return transport_; }
@@ -45,6 +50,7 @@ class ControllerNode {
     uint8_t mac[6] = {};
     uint32_t u32 = 0;  // packed command word or ACK seq
     float value = 0.0f;
+    uint32_t rx_ms = 0;  // receive time (firmware only; 0 on host builds)
   };
   void enqueue(InboundType type, const uint8_t *src_mac, uint32_t u32, float value);
   void apply(const Inbound &in, uint32_t now_ms);
@@ -56,6 +62,8 @@ class ControllerNode {
   bool espnow_command_enabled_ = true;
   SpscRing<Inbound, 16> inbound_;
   std::atomic<uint32_t> inbound_dropped_{0};
+  uint32_t command_wait_max_ms_ = 0;  // loop task only
+  uint32_t espnow_commands_gated_ = 0;
 };
 
 }  // namespace thermostat
