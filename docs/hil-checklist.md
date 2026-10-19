@@ -109,6 +109,11 @@ production devices for these scenarios.
       `/status` shows `wifi_suspended` true (it also logs the suspend), it links over
       ESP-NOW, and display commands move the relays. Start the
       broker: within 6 minutes the display is back on WiFi and MQTT.
+      - Needs a controller that cannot follow the display: a classic board associated
+        to an AP on another channel. The display suspends only while the peer is not
+        linked, and a Waveshare controller on Ethernet is never associated, so it follows
+        the display's channel and the link holds (no suspend expected; check that the
+        link, failsafe and uptime hold instead).
       - Timing: record when the display detects MQTT down versus the controller, and when
         the controller first logs `recovered in place` relative to the display's
         `[espnow] controller CONNECTED`. The controller should not recover in place before
