@@ -220,6 +220,10 @@ lv_indev_drv_t g_indev_drv;
 bool g_display_ready = false;
 
 TouchState g_touch{};
+// Touch diagnostics for /status (written on the loop task, read on the web task).
+std::atomic<uint32_t> g_touch_presses{0};      // released->pressed transitions since boot
+std::atomic<uint32_t> g_touch_last_ms{0};      // millis() of the last pressed poll
+std::atomic<uint32_t> g_touch_last_xy{0};      // last point, x << 16 | y
 enum class SensorType : uint8_t { None, AHT, Si7021 };
 SensorType g_sensor_type = SensorType::None;
 Adafruit_AHTX0 g_aht;
@@ -957,7 +961,10 @@ void web_handle_status_get() {
   const bool ctrl_available = g_mqtt_ctrl_available;
   const SensorType sensor_type = g_sensor_type;
   const bool temp_unit_f = g_cfg_temp_unit_f;
+  const bool screensaver_active = g_screen.screensaver_active();
   xSemaphoreGive(g_api_mutex);
+  const uint32_t touch_presses = g_touch_presses.load();
+  const uint32_t touch_xy = g_touch_last_xy.load();
 
   char buf[2048];
   // remote_indoor_temp_c is always Celsius (API contract); the unit-converted
@@ -1054,14 +1061,24 @@ void web_handle_status_get() {
         "\"espnow_search_count\":%lu,"
         "\"net_reboot_count\":%lu,"
         "\"net_reboot_in_s\":%lu,"
-        "\"wifi_disconnect_reason\":%u"
+        "\"wifi_disconnect_reason\":%u,"
+        "\"screensaver_active\":%s,"
+        "\"touch_presses\":%lu,"
+        "\"touch_last_s_ago\":%ld,"
+        "\"touch_last_x\":%u,"
+        "\"touch_last_y\":%u"
         "}",
         static_cast<unsigned>(g_link.channel()),
         g_link.wifi_suspended() ? "true" : "false",
         static_cast<unsigned long>(g_link.search_count()),
         static_cast<unsigned long>(g_reboot_gov.reboot_count()),
         static_cast<unsigned long>(g_reboot_gov.ms_until_reboot(millis()) / 1000UL),
-        static_cast<unsigned>(g_wifi_drop_reason.load()));
+        static_cast<unsigned>(g_wifi_drop_reason.load()),
+        screensaver_active ? "true" : "false",
+        static_cast<unsigned long>(touch_presses),
+        touch_presses == 0 ? -1L : static_cast<long>((millis() - g_touch_last_ms.load()) / 1000UL),
+        static_cast<unsigned>(touch_xy >> 16),
+        static_cast<unsigned>(touch_xy & 0xFFFFu));
     }
   }
   g_web.send(200, "application/json", buf);
@@ -2253,7 +2270,15 @@ void poll_touch() {
 }
 
 void touch_read_cb(lv_indev_drv_t *, lv_indev_data_t *data) {
+  static bool was_touched = false;
   poll_touch();
+  if (g_touch.touched) {
+    if (!was_touched) g_touch_presses.fetch_add(1);
+    g_touch_last_ms.store(millis());
+    g_touch_last_xy.store(static_cast<uint32_t>(static_cast<uint16_t>(g_touch.x)) << 16 |
+                          static_cast<uint16_t>(g_touch.y));
+  }
+  was_touched = g_touch.touched;
   if (g_touch.touched) {
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = g_touch.x;
