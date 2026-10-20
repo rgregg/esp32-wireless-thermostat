@@ -3110,6 +3110,9 @@ void setup() {
   wifi_cfg.firmware_version = THERMOSTAT_FIRMWARE_VERSION;
   wifi_cfg.hardware_variant = "ESP32";
   wifi_cfg.nvs = &g_ctrl_cfg;
+  // Compile-time credentials (bench builds) are used when NVS has none, as on the display.
+  wifi_cfg.default_ssid = g_cfg_ctrl_wifi_ssid.c_str();
+  wifi_cfg.default_password = g_cfg_ctrl_wifi_password.c_str();
   wifi_cfg.hostname = g_cfg_ctrl_hostname.c_str();
   wifi_cfg.retry_interval_ms = kCtrlNetworkRetryMs;
   bool has_wifi = g_ctrl_wifi.begin(wifi_cfg);
