@@ -105,8 +105,20 @@ when encryption is enabled. This is the first implementation task (bench spike).
 does not hold, the fallback is to dwell 12 s per candidate channel listening for the
 10 s heartbeat, about 36 s for a full pass.
 
-Bench result (scenario F0 in `docs/hil-checklist.md`): PENDING, to be run in the bench
-session. The production flash is gated on it passing.
+Bench result (scenario F0 in `docs/hil-checklist.md`, 2026-10-20): **holds.** About 119
+probes per channel per case on channels 1, 6 and 11. Peer on the probed channel: 97.5-100 %
+acknowledged, worst-case send-callback latency 42.7 ms (typically 2-3 ms). Peer on another
+channel: 0 acknowledged in every case except 3 of 119 while an unlinked ESP-NOW-only peer
+was moving channels mid-run. Held for an ESP-NOW-only peer (Waveshare) and for a peer
+associated to an AP in default modem sleep (ESP32-S3 WiFi controller), with and without
+encryption. No send timed out. No modem-sleep change or multi-frame probe is needed.
+
+Finding: a probe is acknowledged at the MAC layer even when the peer then drops the frame
+for a key mismatch (spike with a wrong LMK: 100 % acknowledged on the peer's channel, peer
+receive counter unchanged). So a probe proves only that a radio with the peer's MAC is on
+that channel, not that the link works. That is enough for channel selection (a unicast ack
+comes only from the peer's own MAC), and link state already comes from received, decrypted
+frames (`espnow_connected`), so a mis-keyed peer is found but never reported linked.
 
 ### 2. WiFi rejoin behaviour
 
