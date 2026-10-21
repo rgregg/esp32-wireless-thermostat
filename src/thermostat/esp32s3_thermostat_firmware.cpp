@@ -1763,6 +1763,9 @@ void mqtt_publish_discovery() {
         {"espnow_search_count", "Display ESP-NOW Search Count", "espnow_search_count"},
         {"net_reboot_count", "Display Network Reboot Count", "net_reboot_count"},
         {"wifi_disconnect_reason", "Display WiFi Disconnect Reason", "wifi_disconnect_reason"},
+        {"boot_count", "Display Boot Count", "boot_count"},
+        {"reset_reason", "Display Reset Reason", "reset_reason"},
+        {"uptime_s", "Display Uptime", "uptime_s"},
     };
     for (const Diag &d : kLinkDiags) {
       const String topic =
@@ -2046,7 +2049,12 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
     }
   }
 
-  mqtt_publish_state();
+  // Only this display's own commands change what it publishes; the main loop publishes
+  // once on its next pass. Republishing the whole state for every controller message
+  // sent ~35 publishes per controller update (about 40 messages/s to the broker).
+  if (topic_str.startsWith(self_topic_for("cmd/"))) {
+    g_mqtt_state_dirty = true;
+  }
   xSemaphoreGive(g_api_mutex);
 }
 
@@ -3344,12 +3352,20 @@ void thermostat_firmware_loop() {
     // Apply accumulated MQTT controller state to app layer
     if (g_runtime != nullptr && g_mqtt_ctrl_last_update_ms > g_mqtt_ctrl_last_applied_ms) {
       xSemaphoreTake(g_api_mutex, portMAX_DELAY);
+      const FurnaceMode mode_before = g_runtime->local_mode();
+      const FanMode fan_before = g_runtime->local_fan_mode();
+      const float setpoint_before = g_runtime->local_setpoint_c();
       g_runtime->on_controller_state_update(
           now, g_mqtt_ctrl_state, g_mqtt_ctrl_lockout,
           g_mqtt_ctrl_mode, g_mqtt_ctrl_fan,
           g_mqtt_ctrl_setpoint_c, g_mqtt_ctrl_filter_runtime_s,
           g_mqtt_ctrl_windows_open);
       g_mqtt_ctrl_last_applied_ms = g_mqtt_ctrl_last_update_ms;
+      // Publish promptly when the controller's state changed this display's settings.
+      if (g_runtime->local_mode() != mode_before || g_runtime->local_fan_mode() != fan_before ||
+          g_runtime->local_setpoint_c() != setpoint_before) {
+        g_mqtt_state_dirty = true;
+      }
       xSemaphoreGive(g_api_mutex);
     }
 
