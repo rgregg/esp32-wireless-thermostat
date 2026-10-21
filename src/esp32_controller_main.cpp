@@ -21,6 +21,7 @@
 #include "espnow_cmd_word.h"
 #include "management_paths.h"
 #include "mqtt_payload.h"
+#include "mqtt_publish_dedup.h"
 #include "mqtt_topics.h"
 #include "device_registry.h"
 #include "discovery_topics.h"
@@ -2235,9 +2236,30 @@ void ctrl_ensure_web_ready() {
   }
 }
 
+// Retained state publishes go through g_ctrl_pub_dedup: a value the broker already holds
+// is not sent again, and fast-changing diagnostics are capped at one publish a minute.
+// Only called from the control-loop task under the MQTT mutex (see ctrl_publish_on_connect).
+thermostat::MqttPublishDedup g_ctrl_pub_dedup;
+constexpr uint32_t kCtrlNoisyStateMs = 60000;
+constexpr uint32_t kCtrlFullRefreshMs = 600000;
+uint32_t g_ctrl_last_full_publish_ms = 0;
+
+static void ctrl_pub_state(const String &topic, const char *payload,
+                           uint32_t min_interval_ms = 0) {
+  if (!g_ctrl_pub_dedup.should_publish(topic.c_str(), payload, millis(), min_interval_ms)) return;
+  if (!g_ctrl_mqtt.publish(topic.c_str(), payload, true)) g_ctrl_pub_dedup.forget(topic.c_str());
+}
+
 void ctrl_publish_runtime_state() {
   if (g_controller == nullptr || !g_ctrl_mqtt.connected()) {
     return;
+  }
+  // Unchanged retained values are skipped; the whole set is resent every 10 minutes and
+  // on every (re)connect (ctrl_publish_on_connect) so a broker that lost them is refilled.
+  const uint32_t now_ms = millis();
+  if (static_cast<uint32_t>(now_ms - g_ctrl_last_full_publish_ms) >= kCtrlFullRefreshMs) {
+    g_ctrl_pub_dedup.reset();
+    g_ctrl_last_full_publish_ms = now_ms;
   }
   const auto &rt = g_controller->app().runtime();
   const bool lockout = rt.hvac_lockout();
@@ -2246,62 +2268,54 @@ void ctrl_publish_runtime_state() {
   const char *fan = mqtt_payload::fan_to_str(snap.fan_mode);
 
   char buf[32];
+  // Sent every time: the display counts it as the controller's MQTT heartbeat.
   g_ctrl_mqtt.publish(self_topic_for("state/availability").c_str(), "online", true);
-  g_ctrl_mqtt.publish(self_topic_for("state/lockout").c_str(), lockout ? "1" : "0", true);
-  g_ctrl_mqtt.publish(self_topic_for("state/windows_open").c_str(),
-                      rt.windows_open() ? "1" : "0", true);
-  g_ctrl_mqtt.publish(self_topic_for("state/mode").c_str(), mode, true);
-  g_ctrl_mqtt.publish(self_topic_for("state/fan_mode").c_str(), fan, true);
+  ctrl_pub_state(self_topic_for("state/lockout"), lockout ? "1" : "0");
+  ctrl_pub_state(self_topic_for("state/windows_open"), rt.windows_open() ? "1" : "0");
+  ctrl_pub_state(self_topic_for("state/mode"), mode);
+  ctrl_pub_state(self_topic_for("state/fan_mode"), fan);
   {
     float target = rt.target_temperature_c();
     if (g_ctrl_temp_unit_f) target = target * 9.0f / 5.0f + 32.0f;
     snprintf(buf, sizeof(buf), g_ctrl_temp_unit_f ? "%.0f" : "%.1f", static_cast<double>(target));
-    g_ctrl_mqtt.publish(self_topic_for("state/target_temp_c").c_str(), buf, true);
+    ctrl_pub_state(self_topic_for("state/target_temp_c"), buf);
   }
   const auto &app = g_controller->app();
   if (app.has_indoor_temperature()) {
     float current = app.indoor_temperature_c();
     if (g_ctrl_temp_unit_f) current = current * 9.0f / 5.0f + 32.0f;
     snprintf(buf, sizeof(buf), g_ctrl_temp_unit_f ? "%.0f" : "%.1f", static_cast<double>(current));
-    g_ctrl_mqtt.publish(self_topic_for("state/current_temp_c").c_str(), buf, true);
+    ctrl_pub_state(self_topic_for("state/current_temp_c"), buf);
   }
   if (app.has_indoor_humidity()) {
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.indoor_humidity_pct()));
-    g_ctrl_mqtt.publish(self_topic_for("state/current_humidity").c_str(), buf, true);
+    ctrl_pub_state(self_topic_for("state/current_humidity"), buf);
   }
   snprintf(buf, sizeof(buf), "%.2f", rt.filter_runtime_hours());
-  g_ctrl_mqtt.publish(self_topic_for("state/filter_runtime_hours").c_str(), buf, true);
-  g_ctrl_mqtt.publish(self_topic_for("state/filter_change_required").c_str(),
-                      rt.filter_runtime_hours() >= kFilterChangeThresholdHours ? "1" : "0", true);
-  g_ctrl_mqtt.publish(self_topic_for("state/max_runtime_exceeded").c_str(),
-                      rt.max_runtime_exceeded() ? "1" : "0", true);
-  g_ctrl_mqtt.publish(self_topic_for("state/furnace_state").c_str(),
-                      mqtt_payload::furnace_state_to_str(rt.furnace_state()), true);
-  g_ctrl_mqtt.publish(self_topic_for("state/firmware_version").c_str(),
-                      THERMOSTAT_FIRMWARE_VERSION, true);
+  ctrl_pub_state(self_topic_for("state/filter_runtime_hours"), buf, kCtrlNoisyStateMs);
+  ctrl_pub_state(self_topic_for("state/filter_change_required"), rt.filter_runtime_hours() >= kFilterChangeThresholdHours ? "1" : "0");
+  ctrl_pub_state(self_topic_for("state/max_runtime_exceeded"), rt.max_runtime_exceeded() ? "1" : "0");
+  ctrl_pub_state(self_topic_for("state/furnace_state"), mqtt_payload::furnace_state_to_str(rt.furnace_state()));
+  ctrl_pub_state(self_topic_for("state/firmware_version"), THERMOSTAT_FIRMWARE_VERSION);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_boot_count));
-  g_ctrl_mqtt.publish(self_topic_for("state/boot_count").c_str(), buf, true);
-  g_ctrl_mqtt.publish(self_topic_for("state/reset_reason").c_str(), g_ctrl_reset_reason.c_str(),
-                      true);
-  g_ctrl_mqtt.publish(self_topic_for("state/reboot_reason").c_str(),
-                      g_ctrl_reboot_reason.c_str(), true);
-  g_ctrl_mqtt.publish(self_topic_for("state/wdt_section").c_str(),
-                      g_ctrl_wdt_section.c_str(), true);
-  g_ctrl_mqtt.publish(self_topic_for("state/panic_pc").c_str(),
-                      g_ctrl_panic_pc.c_str(), true);
+  ctrl_pub_state(self_topic_for("state/boot_count"), buf);
+  ctrl_pub_state(self_topic_for("state/reset_reason"), g_ctrl_reset_reason.c_str());
+  ctrl_pub_state(self_topic_for("state/reboot_reason"), g_ctrl_reboot_reason.c_str());
+  ctrl_pub_state(self_topic_for("state/wdt_section"), g_ctrl_wdt_section.c_str());
+  ctrl_pub_state(self_topic_for("state/panic_pc"), g_ctrl_panic_pc.c_str());
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
-  g_ctrl_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/uptime_s"), buf, kCtrlNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_last_mqtt_command_ms));
-  g_ctrl_mqtt.publish(self_topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/last_mqtt_command_ms"), buf);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_controller->transport().last_peer_rx_ms()));
-  g_ctrl_mqtt.publish(self_topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/last_espnow_rx_ms"), buf, kCtrlNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_controller->transport().send_ok_count()));
-  g_ctrl_mqtt.publish(self_topic_for("state/espnow_send_ok_count").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/espnow_send_ok_count"), buf, kCtrlNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_controller->transport().send_fail_count()));
-  g_ctrl_mqtt.publish(self_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/espnow_send_fail_count"), buf, kCtrlNoisyStateMs);
   // g_ctrl_espnow_fail_window is updated on every loop pass; only read it here.
   if (g_ctrl_last_espnow_error != "begin_failed" &&
       g_ctrl_last_espnow_error != "key_not_applied") {
@@ -2309,74 +2323,64 @@ void ctrl_publish_runtime_state() {
         g_ctrl_espnow_fail_window.recent(millis()) ? "send_failed" : "none";
   }
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_ctrl_link.channel()));
-  g_ctrl_mqtt.publish(self_topic_for("state/espnow_channel").c_str(), buf, true);
-  g_ctrl_mqtt.publish(self_topic_for("state/connection_path").c_str(),
-                      ctrl_connection_path(), true);
+  ctrl_pub_state(self_topic_for("state/espnow_channel"), buf);
+  ctrl_pub_state(self_topic_for("state/connection_path"), ctrl_connection_path());
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_ctrl_link.search_count()));
-  g_ctrl_mqtt.publish(self_topic_for("state/espnow_search_count").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/espnow_search_count"), buf, kCtrlNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_ctrl_reboot_gov.reboot_count()));
-  g_ctrl_mqtt.publish(self_topic_for("state/net_reboot_count").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/net_reboot_count"), buf);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_ctrl_wifi_drop_reason.load()));
-  g_ctrl_mqtt.publish(self_topic_for("state/wifi_disconnect_reason").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/wifi_disconnect_reason"), buf);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(esp_get_free_heap_size()));
-  g_ctrl_mqtt.publish(self_topic_for("state/free_heap_bytes").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/free_heap_bytes"), buf, kCtrlNoisyStateMs);
   // MQTT and ESP-NOW inbound queue-full drops together.
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_ctrl_inbound_dropped.load() +
                                       (g_controller != nullptr
                                            ? g_controller->inbound_dropped()
                                            : 0u)));
-  g_ctrl_mqtt.publish(self_topic_for("state/inbound_dropped").c_str(), buf, true);
+  ctrl_pub_state(self_topic_for("state/inbound_dropped"), buf, kCtrlNoisyStateMs);
   {
     // Coredump presence: a captured crash dump waiting to be pulled (GET /coredump).
     size_t cd_addr = 0, cd_size = 0;
     const bool cd_present =
         (esp_core_dump_image_get(&cd_addr, &cd_size) == ESP_OK) && cd_size > 0;
-    g_ctrl_mqtt.publish(self_topic_for("state/coredump_present").c_str(),
-                        cd_present ? "true" : "false", true);
+    ctrl_pub_state(self_topic_for("state/coredump_present"), cd_present ? "true" : "false");
   }
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
-    g_ctrl_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
+    ctrl_pub_state(self_topic_for("state/wifi_rssi"), buf, kCtrlNoisyStateMs);
   }
   // Time diagnostics: source (rtc/ntp/none), RTC presence, and the current UTC time.
   // Lets HA/monitoring see whether the clock is trustworthy. Board-agnostic: the classic
   // controller reports source=ntp/rtc_present=false once SNTP syncs over WiFi.
-  g_ctrl_mqtt.publish(self_topic_for("state/time_source").c_str(), g_ctrl_time_source, true);
-  g_ctrl_mqtt.publish(self_topic_for("state/rtc_present").c_str(),
-                      g_ctrl_rtc_present ? "true" : "false", true);
+  ctrl_pub_state(self_topic_for("state/time_source"), g_ctrl_time_source);
+  ctrl_pub_state(self_topic_for("state/rtc_present"), g_ctrl_rtc_present ? "true" : "false");
   if (g_ctrl_time_valid) {
     const thermostat::RtcTime rt =
         thermostat::rtc_time_from_epoch(static_cast<long long>(time(nullptr)));
     snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02uZ",
              rt.year, rt.month, rt.day, rt.hour, rt.minute, rt.second);
-    g_ctrl_mqtt.publish(self_topic_for("state/time_utc").c_str(), buf, true);
+    ctrl_pub_state(self_topic_for("state/time_utc"), buf, kCtrlNoisyStateMs);
   }
-  g_ctrl_mqtt.publish(self_topic_for("state/error_mqtt").c_str(), g_ctrl_last_mqtt_error.c_str(),
-                      true);
-  g_ctrl_mqtt.publish(self_topic_for("state/error_ota").c_str(), g_ctrl_last_ota_error.c_str(),
-                      true);
-  g_ctrl_mqtt.publish(self_topic_for("state/error_espnow").c_str(),
-                      g_ctrl_last_espnow_error.c_str(), true);
+  ctrl_pub_state(self_topic_for("state/error_mqtt"), g_ctrl_last_mqtt_error.c_str());
+  ctrl_pub_state(self_topic_for("state/error_ota"), g_ctrl_last_ota_error.c_str());
+  ctrl_pub_state(self_topic_for("state/error_espnow"), g_ctrl_last_espnow_error.c_str());
   if (app.has_outdoor_weather()) {
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(app.outdoor_temp_c()));
-    g_ctrl_mqtt.publish(self_topic_for("state/outdoor_temp_c").c_str(), buf, true);
-    g_ctrl_mqtt.publish(self_topic_for("state/outdoor_condition").c_str(),
-                        thermostat::weather_icon_display_text(app.outdoor_icon()), true);
+    ctrl_pub_state(self_topic_for("state/outdoor_temp_c"), buf);
+    ctrl_pub_state(self_topic_for("state/outdoor_condition"), thermostat::weather_icon_display_text(app.outdoor_icon()));
   }
-  g_ctrl_mqtt.publish(self_topic_for("state/allow_ha").c_str(),
-                      g_cfg_ctrl_allow_ha ? "true" : "false", true);
-  g_ctrl_mqtt.publish(self_topic_for("state/mqtt_enabled").c_str(),
-                      g_cfg_ctrl_mqtt_enabled ? "true" : "false", true);
-  g_ctrl_mqtt.publish(self_topic_for("state/espnow_enabled").c_str(),
-                      g_cfg_ctrl_espnow_enabled ? "true" : "false", true);
+  ctrl_pub_state(self_topic_for("state/allow_ha"), g_cfg_ctrl_allow_ha ? "true" : "false");
+  ctrl_pub_state(self_topic_for("state/mqtt_enabled"), g_cfg_ctrl_mqtt_enabled ? "true" : "false");
+  ctrl_pub_state(self_topic_for("state/espnow_enabled"), g_cfg_ctrl_espnow_enabled ? "true" : "false");
   {
     const auto &relay = g_relay_io.latched_output();
-    g_ctrl_mqtt.publish(self_topic_for("state/relay_heat").c_str(), relay.heat ? "ON" : "OFF", true);
-    g_ctrl_mqtt.publish(self_topic_for("state/relay_cool").c_str(), relay.cool ? "ON" : "OFF", true);
-    g_ctrl_mqtt.publish(self_topic_for("state/relay_fan").c_str(), relay.fan ? "ON" : "OFF", true);
+    ctrl_pub_state(self_topic_for("state/relay_heat"), relay.heat ? "ON" : "OFF");
+    ctrl_pub_state(self_topic_for("state/relay_cool"), relay.cool ? "ON" : "OFF");
+    ctrl_pub_state(self_topic_for("state/relay_fan"), relay.fan ? "ON" : "OFF");
   }
   g_ctrl_have_lockout = true;
   g_ctrl_last_lockout = lockout;
@@ -2908,6 +2912,8 @@ void ctrl_publish_on_connect() {
   if (g_cfg_ha_discovery_enabled) {
     ctrl_publish_discovery();
   }
+  g_ctrl_pub_dedup.reset();  // a fresh session: resend every retained value
+  g_ctrl_last_full_publish_ms = millis();
   ctrl_publish_runtime_state();
   char announce_buf[256];
   snprintf(announce_buf, sizeof(announce_buf),

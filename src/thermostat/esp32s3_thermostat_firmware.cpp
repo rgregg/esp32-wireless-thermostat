@@ -33,6 +33,7 @@
 #include "thermostat/bench_command.h"
 #endif
 #include "mqtt_payload.h"
+#include "mqtt_publish_dedup.h"
 #include "mqtt_topics.h"
 #include "wifi_watchdog.h"
 #include "weather_icon.h"
@@ -1479,19 +1480,38 @@ std::string current_date_text() {
   return std::string(buf);
 }
 
+// Retained state publishes go through g_pub_dedup: a value the broker already holds is not
+// sent again, and fast-changing diagnostics are capped at one publish a minute. Callers
+// hold g_api_mutex.
+thermostat::MqttPublishDedup g_pub_dedup;
+constexpr uint32_t kNoisyStateMs = 60000;
+constexpr uint32_t kFullRefreshMs = 600000;
+uint32_t g_last_full_publish_ms = 0;
+
+void pub_state(const String &topic, const char *payload, uint32_t min_interval_ms = 0) {
+  if (!g_pub_dedup.should_publish(topic.c_str(), payload, millis(), min_interval_ms)) return;
+  if (!g_mqtt.publish(topic.c_str(), payload, true)) g_pub_dedup.forget(topic.c_str());
+}
+
 void mqtt_publish_state() {
   if (g_runtime == nullptr || !g_mqtt.connected()) return;
 
   const uint32_t now = millis();
+  // Unchanged retained values are skipped; the whole set is resent every 10 minutes and
+  // on every (re)connect so a broker that lost them is refilled.
+  if (static_cast<uint32_t>(now - g_last_full_publish_ms) >= kFullRefreshMs) {
+    g_pub_dedup.reset();
+    g_last_full_publish_ms = now;
+  }
 
+  // Sent every time: the controller counts it as the display's MQTT heartbeat.
   g_mqtt.publish(self_topic_for("state/availability").c_str(), "online", true);
-  g_mqtt.publish(self_topic_for("state/mode").c_str(), mqtt_payload::mode_to_str(g_runtime->local_mode()), true);
-  g_mqtt.publish(self_topic_for("state/fan_mode").c_str(), mqtt_payload::fan_to_str(g_runtime->local_fan_mode()),
-                 true);
+  pub_state(self_topic_for("state/mode"), mqtt_payload::mode_to_str(g_runtime->local_mode()));
+  pub_state(self_topic_for("state/fan_mode"), mqtt_payload::fan_to_str(g_runtime->local_fan_mode()));
 
   char buf[32];
   snprintf(buf, sizeof(buf), "%.1f", g_runtime->local_setpoint_c());
-  g_mqtt.publish(self_topic_for("state/target_temp_c").c_str(), buf, true);
+  pub_state(self_topic_for("state/target_temp_c"), buf);
   if (g_runtime->has_last_packed_command()) {
     snprintf(buf, sizeof(buf), "%lu",
              static_cast<unsigned long>(g_runtime->last_packed_command()));
@@ -1501,51 +1521,51 @@ void mqtt_publish_state() {
   }
 
   snprintf(buf, sizeof(buf), "%.2f", g_runtime->local_temperature_compensation_c());
-  g_mqtt.publish(self_topic_for("state/temp_comp_c").c_str(), buf, true);
+  pub_state(self_topic_for("state/temp_comp_c"), buf);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_display_timeout_ms / 1000UL));
-  g_mqtt.publish(self_topic_for("state/display_timeout_s").c_str(), buf, true);
+  pub_state(self_topic_for("state/display_timeout_s"), buf);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_cfg_backlight_active_pct));
-  g_mqtt.publish(self_topic_for("state/backlight_active_pct").c_str(), buf, true);
+  pub_state(self_topic_for("state/backlight_active_pct"), buf);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_cfg_backlight_screensaver_pct));
-  g_mqtt.publish(self_topic_for("state/backlight_screensaver_pct").c_str(), buf, true);
-  g_mqtt.publish(self_topic_for("state/firmware_version").c_str(), THERMOSTAT_FIRMWARE_VERSION, true);
+  pub_state(self_topic_for("state/backlight_screensaver_pct"), buf);
+  pub_state(self_topic_for("state/firmware_version"), THERMOSTAT_FIRMWARE_VERSION);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_boot_count));
-  g_mqtt.publish(self_topic_for("state/boot_count").c_str(), buf, true);
-  g_mqtt.publish(self_topic_for("state/reset_reason").c_str(), g_reset_reason.c_str(), true);
+  pub_state(self_topic_for("state/boot_count"), buf);
+  pub_state(self_topic_for("state/reset_reason"), g_reset_reason.c_str());
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(millis() / 1000UL));
-  g_mqtt.publish(self_topic_for("state/uptime_s").c_str(), buf, true);
+  pub_state(self_topic_for("state/uptime_s"), buf, kNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_last_mqtt_command_ms));
-  g_mqtt.publish(self_topic_for("state/last_mqtt_command_ms").c_str(), buf, true);
+  pub_state(self_topic_for("state/last_mqtt_command_ms"), buf);
   // A frame from the controller that passed ESP-NOW decryption and the peer filter. Not
   // last_controller_heartbeat_ms(), which MQTT controller state also refreshes and so
   // stayed fresh while every encrypted ESP-NOW frame was being dropped.
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_runtime->transport().last_peer_rx_ms()));
-  g_mqtt.publish(self_topic_for("state/last_espnow_rx_ms").c_str(), buf, true);
+  pub_state(self_topic_for("state/last_espnow_rx_ms"), buf, kNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_runtime->espnow_send_ok_count()));
-  g_mqtt.publish(self_topic_for("state/espnow_send_ok_count").c_str(), buf, true);
+  pub_state(self_topic_for("state/espnow_send_ok_count"), buf, kNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(g_runtime->espnow_send_fail_count()));
-  g_mqtt.publish(self_topic_for("state/espnow_send_fail_count").c_str(), buf, true);
+  pub_state(self_topic_for("state/espnow_send_fail_count"), buf, kNoisyStateMs);
   // g_espnow_fail_window is updated on every loop pass; only read it here.
   if (g_last_espnow_error != "begin_failed" && g_last_espnow_error != "key_not_applied") {
     g_last_espnow_error = g_espnow_fail_window.recent(millis()) ? "send_failed" : "none";
   }
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_link.channel()));
-  g_mqtt.publish(self_topic_for("state/espnow_channel").c_str(), buf, true);
+  pub_state(self_topic_for("state/espnow_channel"), buf);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_link.search_count()));
-  g_mqtt.publish(self_topic_for("state/espnow_search_count").c_str(), buf, true);
+  pub_state(self_topic_for("state/espnow_search_count"), buf, kNoisyStateMs);
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_reboot_gov.reboot_count()));
-  g_mqtt.publish(self_topic_for("state/net_reboot_count").c_str(), buf, true);
+  pub_state(self_topic_for("state/net_reboot_count"), buf);
   snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(g_wifi_drop_reason.load()));
-  g_mqtt.publish(self_topic_for("state/wifi_disconnect_reason").c_str(), buf, true);
+  pub_state(self_topic_for("state/wifi_disconnect_reason"), buf);
   snprintf(buf, sizeof(buf), "%lu",
            static_cast<unsigned long>(esp_get_free_heap_size()));
-  g_mqtt.publish(self_topic_for("state/free_heap_bytes").c_str(), buf, true);
-  g_mqtt.publish(self_topic_for("state/error_mqtt").c_str(), g_last_mqtt_error.c_str(), true);
-  g_mqtt.publish(self_topic_for("state/error_ota").c_str(), g_last_ota_error.c_str(), true);
-  g_mqtt.publish(self_topic_for("state/error_espnow").c_str(), g_last_espnow_error.c_str(), true);
+  pub_state(self_topic_for("state/free_heap_bytes"), buf, kNoisyStateMs);
+  pub_state(self_topic_for("state/error_mqtt"), g_last_mqtt_error.c_str());
+  pub_state(self_topic_for("state/error_ota"), g_last_ota_error.c_str());
+  pub_state(self_topic_for("state/error_espnow"), g_last_espnow_error.c_str());
 
   {
     const uint32_t now_ms = millis();
@@ -1558,31 +1578,31 @@ void mqtt_publish_state() {
                        : mqtt_active                ? "mqtt"
                        : espnow_active              ? "esp-now"
                                                     : "disconnected";
-    g_mqtt.publish(self_topic_for("state/connection_path").c_str(), path, true);
+    pub_state(self_topic_for("state/connection_path"), path);
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    g_mqtt.publish(self_topic_for("state/wifi_ip").c_str(), WiFi.localIP().toString().c_str(), true);
-    g_mqtt.publish(self_topic_for("state/wifi_mac").c_str(), WiFi.macAddress().c_str(), true);
-    g_mqtt.publish(self_topic_for("state/wifi_ssid").c_str(), WiFi.SSID().c_str(), true);
+    pub_state(self_topic_for("state/wifi_ip"), WiFi.localIP().toString().c_str());
+    pub_state(self_topic_for("state/wifi_mac"), WiFi.macAddress().c_str());
+    pub_state(self_topic_for("state/wifi_ssid"), WiFi.SSID().c_str());
     snprintf(buf, sizeof(buf), "%d", WiFi.channel());
-    g_mqtt.publish(self_topic_for("state/wifi_channel").c_str(), buf, true);
+    pub_state(self_topic_for("state/wifi_channel"), buf);
     snprintf(buf, sizeof(buf), "%d", WiFi.RSSI());
-    g_mqtt.publish(self_topic_for("state/wifi_rssi").c_str(), buf, true);
+    pub_state(self_topic_for("state/wifi_rssi"), buf, kNoisyStateMs);
   }
 
   const float indoor_c = g_runtime->local_indoor_temperature_c();
   const bool ok_temp = std::isfinite(indoor_c);
   if (ok_temp) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_c);
-    g_mqtt.publish(self_topic_for("state/current_temp_c").c_str(), buf, true);
+    pub_state(self_topic_for("state/current_temp_c"), buf, kNoisyStateMs);
   }
 
   const float indoor_h = g_runtime->local_indoor_humidity();
   const bool ok_humidity = std::isfinite(indoor_h);
   if (ok_humidity) {
     snprintf(buf, sizeof(buf), "%.2f", indoor_h);
-    g_mqtt.publish(self_topic_for("state/current_humidity").c_str(), buf, true);
+    pub_state(self_topic_for("state/current_humidity"), buf, kNoisyStateMs);
   }
 
   // Publish local sensor data under own device path.
@@ -1597,7 +1617,7 @@ void mqtt_publish_state() {
     }
   }
 
-  g_mqtt.publish(self_topic_for("state/status").c_str(), g_runtime->status_text(now).c_str(), true);
+  pub_state(self_topic_for("state/status"), g_runtime->status_text(now).c_str());
 }
 
 void mqtt_publish_discovery() {
@@ -2046,6 +2066,9 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
       }
     } else if (topic_str == controller_topic_for("state/availability")) {
       g_mqtt_ctrl_available = strcmp(normalized, "online") == 0;
+      // The controller resends availability every publish cycle, while its other state
+      // topics are only sent on change, so this is what keeps the MQTT path counted live.
+      if (g_mqtt_ctrl_available) g_mqtt_ctrl_last_update_ms = now;
     }
   }
 
@@ -2174,6 +2197,8 @@ void ensure_mqtt_connected(uint32_t now_ms) {
   if (g_cfg_ha_discovery_enabled) {
     mqtt_publish_discovery();
   }
+  g_pub_dedup.reset();  // a fresh session: resend every retained value
+  g_last_full_publish_ms = millis();
   mqtt_publish_state();
 
   // Publish our announce message so other devices can discover us
