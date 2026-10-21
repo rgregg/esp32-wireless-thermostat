@@ -748,8 +748,13 @@ void poll_weather(uint32_t now_ms) {
   // Mark weather available if delivered via ESP-NOW (has_controller_weather)
   // or via MQTT (g_have_weather_data set in MQTT callback).
   if (g_runtime->has_controller_weather()) {
-    if (g_runtime->last_controller_weather_ms() == 0)
+    if (g_runtime->last_controller_weather_ms() == 0) {
+      // A new ESP-NOW weather packet. Keep the globals in step: poll_sensors re-applies
+      // them, and would otherwise overwrite this with older MQTT weather.
       g_runtime->set_last_controller_weather_ms(now_ms);
+      g_outdoor_temp_c = g_runtime->controller_outdoor_temp_c();
+      g_weather_icon = g_runtime->controller_weather_icon();
+    }
     g_have_weather_data = true;
   }
 }
@@ -2029,26 +2034,10 @@ void mqtt_on_message(char *topic, uint8_t *payload, unsigned int length) {
         g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
         g_have_weather_data = true;
       }
-    } else if (topic_str == controller_topic_for("state/weather_condition")) {
-      WeatherIcon icon = weather_icon_from_api(normalized);
-      if (icon == WeatherIcon::Unknown) {
-        // Try matching display text for conditions published as English names
-        for (uint8_t i = 0; i <= static_cast<uint8_t>(WeatherIcon::Unknown); ++i) {
-          const auto candidate = static_cast<WeatherIcon>(i);
-          char lower_display[32];
-          const char *display = weather_icon_display_text(candidate);
-          size_t j = 0;
-          for (; display[j] != '\0' && j < sizeof(lower_display) - 1; ++j) {
-            lower_display[j] = static_cast<char>(
-                std::tolower(static_cast<unsigned char>(display[j])));
-          }
-          lower_display[j] = '\0';
-          if (strcmp(normalized, lower_display) == 0) {
-            icon = candidate;
-            break;
-          }
-        }
-      }
+    } else if (topic_str == controller_topic_for("state/outdoor_condition") ||
+               topic_str == controller_topic_for("state/weather_condition")) {
+      // Controllers since v0.11.0 publish outdoor_condition; older ones weather_condition.
+      const WeatherIcon icon = weather_icon_from_condition(normalized);
       if (g_runtime != nullptr) {
         g_weather_icon = icon;
         g_runtime->on_outdoor_weather_update(g_outdoor_temp_c, g_weather_icon);
@@ -2185,6 +2174,7 @@ void ensure_mqtt_connected(uint32_t now_ms) {
     g_mqtt.subscribe(controller_topic_for("state/windows_open").c_str());
     g_mqtt.subscribe(controller_topic_for("state/filter_runtime_hours").c_str());
     g_mqtt.subscribe(controller_topic_for("state/outdoor_temp_c").c_str());
+    g_mqtt.subscribe(controller_topic_for("state/outdoor_condition").c_str());
     g_mqtt.subscribe(controller_topic_for("state/weather_condition").c_str());
     g_mqtt.subscribe(controller_topic_for("state/availability").c_str());
     g_mqtt.subscribe(controller_topic_for("state/current_temp_c").c_str());

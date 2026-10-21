@@ -16,6 +16,8 @@ void ThermostatDeviceRuntime::on_weather_from_controller(float outdoor_temp_c,
   if (ctx == nullptr) return;
   auto *self = static_cast<ThermostatDeviceRuntime *>(ctx);
   self->display_.on_outdoor_weather_update(outdoor_temp_c, icon);
+  self->controller_outdoor_temp_c_ = outdoor_temp_c;
+  self->controller_weather_icon_ = icon;
   self->last_controller_weather_ms_ = 0;  // mark as received; firmware sets actual timestamp
   self->has_controller_weather_ = true;
 }
