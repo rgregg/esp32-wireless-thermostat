@@ -57,7 +57,7 @@ CommandApplyResult ControllerApp::on_command_word(uint32_t packed_word,
     if (result.filter_reset_requested) {
       maybe_persist_filter_runtime(/*force=*/true);
     }
-    publish();
+    publish_pending_.store(true);
   }
   return result;
 }
@@ -130,6 +130,10 @@ void ControllerApp::tick(uint32_t now_ms) {
 }
 
 void ControllerApp::tick(uint32_t now_ms, bool heat_call, bool cool_call) {
+  // Send the telemetry for a command applied since the last tick (see on_command_word).
+  if (publish_pending_.exchange(false)) {
+    publish();
+  }
   ControllerTickInput in;
   in.now_ms = now_ms;
   in.heat_call = heat_call;

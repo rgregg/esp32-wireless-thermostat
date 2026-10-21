@@ -28,6 +28,10 @@ bool ThermostatNode::begin() {
 
 void ThermostatNode::tick(uint32_t now_ms) {
   transport_.loop(now_ms);
+  // After the heartbeat, so a due heartbeat is never lost to the send throttle. A frame
+  // throttled here stays owed for the next pass.
+  app_.send_pending_command();
+  app_.send_pending_ack();
 }
 
 void ThermostatNode::on_heartbeat_static(uint32_t now_ms, void *ctx) {

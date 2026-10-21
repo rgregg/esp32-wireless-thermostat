@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include <atomic>
+
 #include "espnow_cmd_word.h"
 #include "thermostat/thermostat_transport.h"
 #include "thermostat_types.h"
@@ -15,6 +17,9 @@ struct ThermostatAppConfig {
   // reconnect and drop telemetry-seq tracking so the next telemetry is accepted even
   // if the controller restarted and reset its sequence. 0 disables the resync.
   uint32_t controller_reconnect_resync_ms = 30000;
+  // Picks the first command session (see CommandWord::session); give each boot a
+  // different value (the firmware uses its persisted boot count).
+  uint32_t command_session_seed = 0;
 };
 
 class ThermostatApp {
@@ -23,8 +28,18 @@ class ThermostatApp {
                 const ThermostatAppConfig &config = ThermostatAppConfig());
 
   void on_controller_heartbeat(uint32_t now_ms);
+  // Applies the telemetry immediately but does NOT send the ACK: on the firmware this is
+  // called from the ESP-NOW receive callback (WiFi task), and every ESP-NOW send must
+  // happen on the loop task (channel-probe attribution). The ACK is sent by the next
+  // send_pending_ack().
   void on_controller_telemetry(uint32_t now_ms,
                                const ThermostatControllerTelemetry &telemetry);
+  // Sends the ACK owed for the latest telemetry, if any. Call from the loop task. An ACK
+  // the transport throttles stays owed for the next call.
+  void send_pending_ack();
+  // Re-sends a command the transport throttled or that failed delivery (up to
+  // kMaxCommandRetries times per change), if one is owed. Call from the loop task.
+  void send_pending_command();
   void on_controller_state_update(uint32_t now_ms,
                                   FurnaceStateCode state,
                                   bool lockout,
@@ -78,14 +93,20 @@ class ThermostatApp {
     bool preserve_setpoint = false;
   };
 
+  static SendOptions merge_send_options(const SendOptions &a, const SendOptions &b);
+
   void mark_local_interaction(uint32_t now_ms);
+  // A new local change: fresh retry budget, then transmit_command().
   void send_command(const SendOptions &opts);
+  // Builds and sends the word, folding in any throttled or unconfirmed command.
+  void transmit_command(const SendOptions &opts);
   void ack_controller_seq(uint16_t seq);
 
   IThermostatTransport &transport_;
   ThermostatAppConfig config_;
 
   uint16_t seq_local_ = 0;
+  uint8_t session_ = 1;  // command session; changes whenever seq_local_ restarts
   bool has_last_packed_command_ = false;
   uint32_t last_packed_command_ = 0;
   uint16_t last_command_seq_ = 0;
@@ -105,6 +126,23 @@ class ThermostatApp {
   uint32_t last_controller_heartbeat_ms_ = 0;
   bool has_controller_seq_ = false;
   uint16_t last_controller_seq_ = 0;
+
+  // A command the transport throttled. Its options merge into the next send (a field
+  // is preserved only if both commands preserved it), so no change is lost.
+  bool has_pending_command_ = false;
+  SendOptions pending_command_opts_;
+
+  // Fields sent but not yet reported delivered. They merge into every later command, so
+  // the latest frame of a burst carries all of them, and are re-sent if it fails.
+  bool has_unconfirmed_command_ = false;
+  SendOptions unconfirmed_opts_;
+  uint8_t command_retries_ = 0;
+  static constexpr uint8_t kMaxCommandRetries = 3;
+
+  // ACK owed to the controller: kAckPending | seq. Set by on_controller_telemetry()
+  // (possibly on another task); consumed by send_pending_ack().
+  static constexpr uint32_t kAckPending = 0x10000u;
+  std::atomic<uint32_t> pending_ack_{0};
 };
 
 }  // namespace thermostat

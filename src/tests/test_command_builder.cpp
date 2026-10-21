@@ -48,4 +48,20 @@ TEST_CASE(command_builder_guards_nan_and_inf_setpoint) {
   ASSERT_EQ(neg_inf_cmd.setpoint_decic, static_cast<uint16_t>(0));
 }
 
+TEST_CASE(command_word_session_roundtrips_in_spare_bits) {
+  CommandWord cmd;
+  cmd.seq = 0x1FF;
+  cmd.preserve_setpoint = true;
+  cmd.session = 31;
+  const uint32_t packed = espnow_cmd::encode(cmd);
+  const CommandWord decoded = espnow_cmd::decode(packed);
+  ASSERT_EQ(decoded.session, static_cast<uint8_t>(31));
+  ASSERT_EQ(decoded.seq, static_cast<uint16_t>(0x1FF));
+  ASSERT_TRUE(decoded.preserve_setpoint);
+  cmd.session = 0;  // a session-less word is bit-identical to the old format
+  ASSERT_EQ(espnow_cmd::encode(cmd) >> 27, 0u);
+  ASSERT_EQ(espnow_cmd::next_session(31), static_cast<uint8_t>(1));
+  ASSERT_EQ(espnow_cmd::next_session(0), static_cast<uint8_t>(1));
+}
+
 #endif

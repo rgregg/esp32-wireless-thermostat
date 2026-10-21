@@ -7,21 +7,37 @@
 namespace {
 class FakeThermostatTransport : public thermostat::IThermostatTransport {
  public:
-  void publish_command_word(uint32_t packed_word) override {
+  bool publish_command_word(uint32_t packed_word) override {
+    if (!accept_cmds) return false;
     last_cmd = packed_word;
     ++cmd_count;
+    return true;
   }
-  void publish_controller_ack(uint16_t seq) override {
+  bool publish_controller_ack(uint16_t seq) override {
+    if (!accept_acks) return false;
     last_ack_seq = seq;
     ++ack_count;
+    return true;
   }
   void publish_indoor_temperature_c(float temp_c) override { last_temp = temp_c; }
   void publish_indoor_humidity(float humidity_pct) override { last_hum = humidity_pct; }
+  thermostat::CommandDelivery take_command_delivery() override {
+    const thermostat::CommandDelivery d = delivery;
+    if (d == thermostat::CommandDelivery::Delivered || d == thermostat::CommandDelivery::Failed) {
+      delivery = thermostat::CommandDelivery::None;
+    }
+    return d;
+  }
+  bool reports_command_delivery() const override { return reports_delivery; }
 
+  bool reports_delivery = false;
+  thermostat::CommandDelivery delivery = thermostat::CommandDelivery::None;
   uint32_t last_cmd = 0;
   int cmd_count = 0;
   uint16_t last_ack_seq = 0;
   int ack_count = 0;
+  bool accept_acks = true;
+  bool accept_cmds = true;
   float last_temp = 0.0f;
   float last_hum = 0.0f;
 };
@@ -52,12 +68,14 @@ TEST_CASE(thermostat_app_command_and_debounce) {
   telem.setpoint_c = 18.0f;
 
   app.on_controller_telemetry(2000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 22.5f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 1);
   ASSERT_EQ(tx.ack_count, 1);
 
   telem.seq = 2;
   app.on_controller_telemetry(7000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 18.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 2);
   ASSERT_EQ(tx.ack_count, 2);
@@ -88,20 +106,51 @@ TEST_CASE(thermostat_app_ignores_duplicate_and_stale_controller_seq) {
   telem.mode_code = 1;
   telem.setpoint_c = 20.0f;
   app.on_controller_telemetry(1000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
 
   telem.seq = 10;  // duplicate
   telem.setpoint_c = 25.0f;
   app.on_controller_telemetry(2000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
 
   telem.seq = 9;  // stale
   telem.setpoint_c = 15.0f;
   app.on_controller_telemetry(3000, telem);
+  app.send_pending_ack();
   ASSERT_NEAR(app.local_setpoint_c(), 20.0f, 0.01f);
   ASSERT_EQ(tx.last_ack_seq, 10);
+}
+
+// The ACK is not sent from on_controller_telemetry() (the ESP-NOW receive task) but by
+// send_pending_ack() on the loop task; only the latest owed ACK goes out, once.
+TEST_CASE(thermostat_app_telemetry_ack_deferred_to_send_pending_ack) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 5;
+  app.on_controller_telemetry(1000, telem);
+  ASSERT_EQ(tx.ack_count, 0);
+  telem.seq = 6;
+  app.on_controller_telemetry(1100, telem);
+  ASSERT_EQ(tx.ack_count, 0);
+
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 1);
+  ASSERT_EQ(tx.last_ack_seq, 6);
+
+  app.send_pending_ack();  // nothing owed
+  ASSERT_EQ(tx.ack_count, 1);
+
+  telem.seq = 0;  // seq 0 is a valid ACK (stale -> re-ACKs the last accepted seq 6)
+  app.on_controller_telemetry(1200, telem);
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 2);
+  ASSERT_EQ(tx.last_ack_seq, 6);
 }
 
 TEST_CASE(thermostat_app_reset_local_command_sequence_restarts_at_one) {
@@ -240,5 +289,236 @@ TEST_CASE(thermostat_app_telemetry_routes_setpoint_into_mode_bin) {
   app.on_controller_telemetry(8000, t);
   ASSERT_NEAR(app.local_cool_setpoint_c(), 22.5f, 0.01f);
   ASSERT_NEAR(app.local_heat_setpoint_c(), 21.5f, 0.01f);
+}
+TEST_CASE(thermostat_app_retries_ack_lost_to_send_throttle) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 5;
+  telem.mode_code = 1;
+  telem.setpoint_c = 20.0f;
+  app.on_controller_telemetry(1000, telem);
+  tx.accept_acks = false;  // throttled: the transport did not send it
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 0);
+  tx.accept_acks = true;
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 1);
+  ASSERT_EQ(tx.last_ack_seq, 5);
+  app.send_pending_ack();  // sent once only
+  ASSERT_EQ(tx.ack_count, 1);
+}
+
+TEST_CASE(thermostat_app_newer_ack_wins_over_throttled_retry) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  thermostat::ThermostatControllerTelemetry telem;
+  telem.seq = 5;
+  telem.mode_code = 1;
+  telem.setpoint_c = 20.0f;
+  app.on_controller_telemetry(1000, telem);
+  tx.accept_acks = false;
+  app.send_pending_ack();
+  telem.seq = 6;
+  app.on_controller_telemetry(2000, telem);
+  tx.accept_acks = true;
+  app.send_pending_ack();
+  ASSERT_EQ(tx.ack_count, 1);
+  ASSERT_EQ(tx.last_ack_seq, 6);
+}
+// A command the transport throttles (sent within 50 ms of another frame) used to be
+// dropped for good; during a WiFi outage there is no MQTT copy to recover it.
+TEST_CASE(thermostat_app_retries_command_lost_to_send_throttle) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.set_local_setpoint_c(22.5f, 1000);
+  ASSERT_EQ(tx.cmd_count, 0);
+  tx.accept_cmds = true;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 1);
+  {
+    CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+    ASSERT_EQ(decoded.setpoint_decic, static_cast<uint16_t>(225));
+    ASSERT_TRUE(decoded.preserve_mode);
+    ASSERT_TRUE(!decoded.preserve_setpoint);
+  }
+  ASSERT_EQ(app.last_packed_command(), tx.last_cmd);
+  app.send_pending_command();  // sent once only
+  ASSERT_EQ(tx.cmd_count, 1);
+}
+
+// Mode then setpoint, back to back: the bench case. The mode word is throttled; the
+// setpoint word must carry the new mode too instead of preserving the controller's.
+TEST_CASE(thermostat_app_throttled_command_merges_into_next) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  tx.accept_cmds = true;
+  app.set_local_setpoint_c(22.5f, 1001);
+  ASSERT_EQ(tx.cmd_count, 1);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Heat));
+  ASSERT_EQ(decoded.setpoint_decic, static_cast<uint16_t>(225));
+  ASSERT_TRUE(!decoded.preserve_mode);
+  ASSERT_TRUE(!decoded.preserve_setpoint);
+  ASSERT_TRUE(decoded.preserve_fan);
+  app.send_pending_command();  // nothing left owed
+  ASSERT_EQ(tx.cmd_count, 1);
+}
+
+TEST_CASE(thermostat_app_throttled_filter_reset_kept_sync_folded_away) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.request_filter_reset(1000);
+  app.request_sync(1001);
+  tx.accept_cmds = true;
+  app.set_local_fan_mode(FanMode::AlwaysOn, 1002);
+  ASSERT_EQ(tx.cmd_count, 1);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.filter_reset);
+  // The controller applies nothing else from a sync word (and answers every accepted
+  // command with telemetry), so the sync is dropped rather than voiding the fan change.
+  ASSERT_TRUE(!decoded.sync_request);
+  ASSERT_EQ(static_cast<int>(decoded.fan), static_cast<int>(FanMode::AlwaysOn));
+  ASSERT_TRUE(!decoded.preserve_fan);
+  ASSERT_TRUE(decoded.preserve_mode);
+  ASSERT_TRUE(decoded.preserve_setpoint);
+}
+
+TEST_CASE(thermostat_app_throttled_syncs_stay_a_sync) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+
+  tx.accept_cmds = false;
+  app.request_sync(1000);
+  tx.accept_cmds = true;
+  app.request_sync(1001);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.sync_request);
+}
+
+// The F2 bench miss: mode, setpoint, fan back to back; the mode frame's delivery failed
+// after the later frames had gone out preserving mode.
+TEST_CASE(thermostat_app_burst_frames_carry_unconfirmed_fields) {
+  FakeThermostatTransport tx;
+  tx.reports_delivery = true;
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  tx.delivery = thermostat::CommandDelivery::Pending;
+  app.set_local_fan_mode(FanMode::AlwaysOn, 1001);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Heat));
+  ASSERT_TRUE(!decoded.preserve_mode);  // the unconfirmed mode rides along
+  ASSERT_TRUE(!decoded.preserve_fan);
+  ASSERT_TRUE(decoded.preserve_setpoint);
+}
+
+TEST_CASE(thermostat_app_resends_command_that_failed_delivery) {
+  FakeThermostatTransport tx;
+  tx.reports_delivery = true;
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  const uint16_t first_seq = app.last_command_seq();
+  tx.delivery = thermostat::CommandDelivery::Failed;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 2);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(static_cast<int>(decoded.mode), static_cast<int>(FurnaceMode::Heat));
+  ASSERT_TRUE(!decoded.preserve_mode);
+  ASSERT_TRUE(decoded.preserve_fan);
+  ASSERT_TRUE(app.last_command_seq() != first_seq);  // new seq: not dropped as a duplicate
+
+  tx.delivery = thermostat::CommandDelivery::Delivered;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 2);
+  // Confirmed: a later fan change no longer carries the mode.
+  tx.delivery = thermostat::CommandDelivery::None;
+  app.set_local_fan_mode(FanMode::AlwaysOn, 2000);
+  decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.preserve_mode);
+}
+
+TEST_CASE(thermostat_app_delivery_retries_are_capped) {
+  FakeThermostatTransport tx;
+  tx.reports_delivery = true;
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  for (int i = 0; i < 10; ++i) {
+    tx.delivery = thermostat::CommandDelivery::Failed;
+    app.send_pending_command();
+  }
+  ASSERT_EQ(tx.cmd_count, 4);  // the original plus three retries
+  // A new change gets a fresh budget and no longer carries the abandoned mode.
+  app.set_local_fan_mode(FanMode::AlwaysOn, 2000);
+  ASSERT_EQ(tx.cmd_count, 5);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.preserve_mode);
+  tx.delivery = thermostat::CommandDelivery::Failed;
+  app.send_pending_command();
+  ASSERT_EQ(tx.cmd_count, 6);
+}
+
+TEST_CASE(thermostat_app_no_delivery_reports_means_no_carry_over) {
+  FakeThermostatTransport tx;  // reports_delivery = false (sim, MQTT-only builds)
+  thermostat::ThermostatApp app(tx);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  app.set_local_fan_mode(FanMode::AlwaysOn, 1001);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_TRUE(decoded.preserve_mode);
+}
+
+TEST_CASE(thermostat_app_heartbeat_newer_than_now_counts_as_connected) {
+  // The heartbeat is stamped on the WiFi task and can be a few ms later than the loop's
+  // now_ms; that must not wrap into "silent for 49 days".
+  FakeThermostatTransport tx;
+  thermostat::ThermostatApp app(tx);
+  app.on_controller_heartbeat(10005);
+  ASSERT_TRUE(app.controller_connected(10000, 30000));
+  ASSERT_TRUE(!app.controller_connected(50000, 30000));
+}
+
+TEST_CASE(thermostat_app_words_carry_session_and_reset_starts_a_new_one) {
+  FakeThermostatTransport tx;
+  thermostat::ThermostatAppConfig cfg;
+  cfg.command_session_seed = 41;  // boot count
+  thermostat::ThermostatApp app(tx, cfg);
+
+  app.set_local_mode(FurnaceMode::Heat, 1000);
+  const uint8_t s1 = espnow_cmd::decode(tx.last_cmd).session;
+  ASSERT_TRUE(s1 >= 1 && s1 <= espnow_cmd::kMaxSession);
+
+  app.reset_local_command_sequence();
+  app.set_local_mode(FurnaceMode::Off, 2000);
+  CommandWord decoded = espnow_cmd::decode(tx.last_cmd);
+  ASSERT_EQ(decoded.seq, static_cast<uint16_t>(1));
+  ASSERT_TRUE(decoded.session != s1);
+}
+
+TEST_CASE(thermostat_app_consecutive_boots_get_different_sessions) {
+  for (uint32_t boot = 0; boot < 70; ++boot) {
+    FakeThermostatTransport a, b;
+    thermostat::ThermostatAppConfig ca, cb;
+    ca.command_session_seed = boot;
+    cb.command_session_seed = boot + 1;
+    thermostat::ThermostatApp app_a(a, ca), app_b(b, cb);
+    app_a.request_sync(0);
+    app_b.request_sync(0);
+    const uint8_t sa = espnow_cmd::decode(a.last_cmd).session;
+    const uint8_t sb = espnow_cmd::decode(b.last_cmd).session;
+    ASSERT_TRUE(sa != 0 && sb != 0);
+    ASSERT_TRUE(sa != sb);
+  }
 }
 #endif

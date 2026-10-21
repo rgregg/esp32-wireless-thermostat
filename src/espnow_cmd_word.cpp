@@ -9,6 +9,10 @@ namespace espnow_cmd {
 
 uint16_t next_seq(uint16_t current_seq) { return (current_seq + 1) & kSeqMask; }
 
+uint8_t next_session(uint8_t session) {
+  return static_cast<uint8_t>((session % kMaxSession) + 1);
+}
+
 uint32_t encode(const CommandWord &cmd) {
   const uint16_t sp10 = (cmd.setpoint_decic > kSetpointMaxDeciC)
                             ? kSetpointMaxDeciC
@@ -25,6 +29,7 @@ uint32_t encode(const CommandWord &cmd) {
   w |= (cmd.preserve_mode ? 1u : 0u) << 24;
   w |= (cmd.preserve_fan ? 1u : 0u) << 25;
   w |= (cmd.preserve_setpoint ? 1u : 0u) << 26;
+  w |= (static_cast<uint32_t>(cmd.session) & 0x1Fu) << 27;
   return w;
 }
 
@@ -42,6 +47,7 @@ CommandWord decode(uint32_t packed) {
   cmd.preserve_mode = ((packed >> 24) & 0x1u) != 0;
   cmd.preserve_fan = ((packed >> 25) & 0x1u) != 0;
   cmd.preserve_setpoint = ((packed >> 26) & 0x1u) != 0;
+  cmd.session = static_cast<uint8_t>((packed >> 27) & 0x1Fu);
   return cmd;
 }
 

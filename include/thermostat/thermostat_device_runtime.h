@@ -54,6 +54,7 @@ class ThermostatDeviceRuntime {
   uint32_t last_controller_heartbeat_ms() const;
   uint32_t espnow_send_ok_count() const;
   uint32_t espnow_send_fail_count() const;
+  EspNowThermostatTransport &transport() { return node_.transport(); }
 
   FurnaceStateCode controller_state() const;
   std::string status_text(uint32_t now_ms) const;

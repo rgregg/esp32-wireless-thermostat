@@ -57,3 +57,47 @@
     checksum, no inter-env wipe.
   - After any flash-prep `scp`, verify it succeeded and check the remote file's timestamp
     before flashing (`ls -la`); a failed scp leaves stale bins that flash "successfully."
+
+## ESP-NOW channel search: only 1, 6, 11 (2026-10-13)
+- Proposed sweeping channels 1-13 to find the ESP-NOW peer; Ryan corrected: search only the
+  three non-overlapping 2.4 GHz channels (1, 6, 11).
+- **Rule:** for 2.4 GHz channel search or selection on this project, default to {1, 6, 11}
+  (plus a last-known channel if there is one). Don't design full-band sweeps.
+
+## ESP-NOW encryption fails silently in both firmwares (2026-10-17)
+- Bench showed a one-way link: the controller heard the display, the display never heard
+  the controller, while the controller's sends all reported delivered. Two causes, both
+  silent:
+  - The display's peer MAC was stored in the compact form the config page shows
+    (`AABBCCDDEEFF`). `parse_mac()` only took the colon form, failed without error, the
+    peer stayed broadcast, and the "encrypt only a unicast peer" guard turned encryption
+    off. The controller kept encrypting, so the display dropped every frame.
+  - The config forms post blank password inputs ("Leave blank to keep") and the handlers
+    stored the blank, wiping the LMK. The production display was found with no LMK.
+- An ESP-NOW MAC-layer ACK arrives before the receiver's key check, so `send_ok` and the
+  sender's link state prove nothing about the receiver. Only the receiver's RX count does.
+- **Rules:**
+  - Parse MACs and keys through `transport/espnow_config_parse.h`; reject bad values at
+    config time instead of falling back to a default.
+  - A blank secret from a web form means "keep" (`is_blank_secret_form_value`).
+  - Judge an ESP-NOW link by the receiver's `last_espnow_rx_ms` and both sides'
+    `espnow_encrypted`, never by the sender's ack counters or MQTT-fed heartbeat fields.
+
+## Test builds defaulted to the production MQTT broker (2026-10-18)
+- The bench Waveshare controller (test env) had no `mqtt_host` in NVS, so it fell back to
+  the compiled-in default `mqtt.lan` and spent a boot on the production broker under the
+  test base topic. Production devices were unaffected (separate topics), but its HA
+  discovery added a bench controller device to production Home Assistant, and the bench
+  broker never saw it, so the bench display looked like it had no controller over MQTT.
+- `/status` said `mqtt_connected: true` throughout: it was connected, just to the wrong
+  broker. Check the broker's client count (`$SYS/broker/clients/connected`) before
+  trusting a board's MQTT state on the bench.
+- **Rules:**
+  - Every test-identity env compiles in an empty MQTT host (`-D..._MQTT_HOST=\"\"`), so an
+    unconfigured bench board stays off MQTT instead of finding production. Only the
+    production envs keep `mqtt.lan`.
+  - After flashing a bench board, set `mqtt_host` in NVS and confirm the board shows up on
+    the bench broker.
+  - Cleaning up after a leak: clear the retained `homeassistant/.../<node>.../config` and
+    `<base>/devices/<MAC>/...` topics on the production broker with empty retained
+    publishes.

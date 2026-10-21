@@ -141,10 +141,12 @@ class ControllerRuntime {
   struct CommandSource {
     uint8_t mac[6] = {};
     uint16_t last_seq = 0;
+    uint8_t session = 0;  // sender session of last_seq (0: sender sends none)
     bool active = false;
   };
   CommandSource command_sources_[kMaxCommandSources] = {};
   uint16_t last_seq_default_ = 0;  // used when no source MAC provided
+  uint8_t session_default_ = 0;
 };
 
 }  // namespace thermostat

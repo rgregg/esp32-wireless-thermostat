@@ -6,7 +6,10 @@ namespace thermostat {
 
 ThermostatApp::ThermostatApp(IThermostatTransport &transport,
                              const ThermostatAppConfig &config)
-    : transport_(transport), config_(config) {}
+    : transport_(transport),
+      config_(config),
+      session_(espnow_cmd::next_session(
+          static_cast<uint8_t>(config.command_session_seed % espnow_cmd::kMaxSession))) {}
 
 float ThermostatApp::local_setpoint_c() const {
   // Cool mode shows cool bin; Heat and Off show heat bin.
@@ -152,6 +155,11 @@ void ThermostatApp::request_sync(uint32_t now_ms) {
   mark_local_interaction(now_ms);
   SendOptions opts;
   opts.sync_request = true;
+  // The controller applies nothing from a sync word; preserving every field lets a sync
+  // merge with a real change without sending fields nobody changed.
+  opts.preserve_mode = true;
+  opts.preserve_fan = true;
+  opts.preserve_setpoint = true;
   send_command(opts);
 }
 
@@ -168,6 +176,10 @@ void ThermostatApp::request_filter_reset(uint32_t now_ms) {
 
 void ThermostatApp::reset_local_command_sequence() {
   seq_local_ = 0;
+  session_ = espnow_cmd::next_session(session_);  // the controller adopts the new seq
+  has_pending_command_ = false;
+  has_unconfirmed_command_ = false;
+  command_retries_ = 0;
   has_last_packed_command_ = false;
   last_packed_command_ = 0;
   last_command_seq_ = 0;
@@ -185,7 +197,11 @@ bool ThermostatApp::controller_connected(uint32_t now_ms, uint32_t timeout_ms) c
   if (last_controller_heartbeat_ms_ == 0) {
     return false;
   }
-  return static_cast<uint32_t>(now_ms - last_controller_heartbeat_ms_) < timeout_ms;
+  const uint32_t age = static_cast<uint32_t>(now_ms - last_controller_heartbeat_ms_);
+  // A heartbeat stamped on the WiFi task after the loop read now_ms is "in the future";
+  // it is fresh, not 49 days old.
+  if (age >= 0x80000000u) return true;
+  return age < timeout_ms;
 }
 
 FurnaceMode ThermostatApp::mode_from_code(uint8_t mode_code) {
@@ -217,21 +233,90 @@ void ThermostatApp::mark_local_interaction(uint32_t now_ms) {
 }
 
 void ThermostatApp::ack_controller_seq(uint16_t seq) {
-  transport_.publish_controller_ack(seq);
+  pending_ack_.store(kAckPending | seq);
 }
 
-void ThermostatApp::send_command(const SendOptions &opts) {
+void ThermostatApp::send_pending_ack() {
+  uint32_t pending = pending_ack_.exchange(0);
+  if ((pending & kAckPending) == 0) return;
+  if (!transport_.publish_controller_ack(static_cast<uint16_t>(pending & 0xFFFFu))) {
+    // Not sent (send throttle): keep it owed for the next call, unless a newer ACK
+    // was stored meanwhile.
+    uint32_t none = 0;
+    pending_ack_.compare_exchange_strong(none, pending);
+  }
+}
+
+void ThermostatApp::send_pending_command() {
+  switch (transport_.take_command_delivery()) {
+    case CommandDelivery::Delivered:
+      has_unconfirmed_command_ = false;
+      break;
+    case CommandDelivery::Failed:
+      if (has_unconfirmed_command_ && command_retries_ < kMaxCommandRetries) {
+        ++command_retries_;
+        pending_command_opts_ = has_pending_command_
+                                    ? merge_send_options(pending_command_opts_, unconfirmed_opts_)
+                                    : unconfirmed_opts_;
+        has_pending_command_ = true;
+      } else {
+        has_unconfirmed_command_ = false;  // out of retries: drop it
+      }
+      break;
+    case CommandDelivery::None:
+      // Nothing tracked (a throttled word replaced it; the owed word carries its fields).
+      has_unconfirmed_command_ = false;
+      break;
+    case CommandDelivery::Pending:
+      break;
+  }
+  if (!has_pending_command_) return;
+  transmit_command(pending_command_opts_);
+}
+
+ThermostatApp::SendOptions ThermostatApp::merge_send_options(const SendOptions &a,
+                                                             const SendOptions &b) {
+  // Send every field either one changed.
+  SendOptions m;
+  m.filter_reset = a.filter_reset || b.filter_reset;
+  m.preserve_mode = a.preserve_mode && b.preserve_mode;
+  m.preserve_fan = a.preserve_fan && b.preserve_fan;
+  m.preserve_setpoint = a.preserve_setpoint && b.preserve_setpoint;
+  // The controller applies nothing else from a word with sync_request set, and it sends
+  // telemetry after every accepted command anyway: keep the sync only on its own.
+  m.sync_request = (a.sync_request || b.sync_request) && !m.filter_reset && m.preserve_mode &&
+                   m.preserve_fan && m.preserve_setpoint;
+  return m;
+}
+
+void ThermostatApp::send_command(const SendOptions &requested) {
+  command_retries_ = 0;
+  transmit_command(requested);
+}
+
+void ThermostatApp::transmit_command(const SendOptions &requested) {
+  SendOptions opts = requested;
+  if (has_pending_command_) opts = merge_send_options(opts, pending_command_opts_);
+  if (has_unconfirmed_command_) opts = merge_send_options(opts, unconfirmed_opts_);
+
   seq_local_ = espnow_cmd::next_seq(seq_local_);
   CommandWord cmd = build_command_word(local_mode_, local_fan_mode_, local_setpoint_c(),
                                        seq_local_, opts.sync_request, opts.filter_reset);
   cmd.preserve_mode = opts.preserve_mode;
   cmd.preserve_fan = opts.preserve_fan;
   cmd.preserve_setpoint = opts.preserve_setpoint;
+  cmd.session = session_;
 
   last_packed_command_ = espnow_cmd::encode(cmd);
   last_command_seq_ = cmd.seq;
   has_last_packed_command_ = true;
-  transport_.publish_command_word(last_packed_command_);
+  has_pending_command_ = !transport_.publish_command_word(last_packed_command_);
+  if (has_pending_command_) {
+    pending_command_opts_ = opts;
+  } else {
+    has_unconfirmed_command_ = transport_.reports_command_delivery();
+    unconfirmed_opts_ = opts;
+  }
 }
 
 }  // namespace thermostat

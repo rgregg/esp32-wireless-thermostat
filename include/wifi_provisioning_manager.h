@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "softap_provisioning.h"
+#include "wifi_join_tracker.h"
 
 // Shared WiFi connection + provisioning manager.
 // Both display and controller firmware use this to avoid duplicating
@@ -42,8 +43,11 @@ public:
   // provisioning if no credentials are configured.
   void ensure_connected(uint32_t now_ms);
 
-  // Call to handle WiFi events (from WiFi.onEvent callback).
+  // Call to handle WiFi events (from WiFi.onEvent callback; runs in the event task).
+  // on_wifi_connected() on STA GOT_IP; on_wifi_disconnected() on STA DISCONNECTED with
+  // the event's reason code.
   void on_wifi_connected();
+  void on_wifi_disconnected(uint8_t reason);
 
   // Check if we have WiFi credentials configured.
   bool has_credentials() const { return m_ssid.length() > 0; }
@@ -65,8 +69,27 @@ public:
   // Clear credentials from NVS (triggers provisioning mode on next boot).
   void clear_credentials();
 
-  // Mark that a reconnect is needed (e.g. after credentials changed).
+  // Mark that a reconnect is needed (e.g. after credentials changed). The next
+  // ensure_connected() disconnects and starts a fresh join at once. The WiFi watchdog's
+  // forced reconnect comes through here, but only while the STA has an IP (the watchdog
+  // does nothing unless WL_CONNECTED) and at most every 2 minutes, so it can never
+  // re-bounce an STA that is associated without an IP inside its 20 s window.
   void request_reconnect() { m_reconnect_required = true; }
+
+  // Change how often ensure_connected() retries WiFi.begin() while disconnected.
+  void set_retry_interval_ms(uint32_t ms) { m_config.retry_interval_ms = ms; }
+
+  // While suspended, ensure_connected() keeps the STA disconnected and makes no join
+  // attempts, leaving the radio free for ESP-NOW. Clearing it retries immediately.
+  void set_suspended(bool suspended);
+  bool suspended() const { return m_suspended; }
+
+  // True from each connect this manager actually starts (and from arduino-esp32's one
+  // automatic retry) until that attempt ends: GOT_IP, a disconnect reporting its failure,
+  // 10 s without associating, or 20 s associated without an IP (then the STA is
+  // disconnected and the retry interval applies). Always false while suspended. While
+  // true the radio is scanning/associating and its channel must not be changed.
+  bool join_in_progress() const;
 
   bool provisioning_active() const { return m_provisioning_started; }
 
@@ -78,6 +101,8 @@ private:
   bool m_reconnect_required = false;
   bool m_provisioning_started = false;
   bool m_wifi_radio_started = false;
+  bool m_suspended = false;
+  WifiJoinTracker m_join;
 
   void ensure_wifi_radio();
 };
