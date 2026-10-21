@@ -59,6 +59,13 @@
 namespace thermostat {
 namespace {
 
+// Milliseconds since `then`. Heartbeats and MQTT updates are stamped on other tasks, so
+// one can land after the caller read `now`; that is fresh (0), not 49 days old.
+uint32_t ms_since(uint32_t now, uint32_t then) {
+  const uint32_t age = now - then;
+  return age >= 0x80000000u ? 0 : age;
+}
+
 constexpr int kDisplayWidth = 800;
 constexpr int kDisplayHeight = 480;
 constexpr uint32_t kUiTickMs = 5;
@@ -1544,8 +1551,9 @@ void mqtt_publish_state() {
     const uint32_t now_ms = millis();
     const uint32_t mqtt_ms = std::max(g_last_mqtt_command_ms, g_mqtt_ctrl_last_update_ms);
     const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
-    const bool mqtt_active = mqtt_ms > 0 && (now_ms - mqtt_ms) < g_cfg_controller_timeout_ms;
-    const bool espnow_active = espnow_ms > 0 && (now_ms - espnow_ms) < g_cfg_controller_timeout_ms;
+    const bool mqtt_active = mqtt_ms > 0 && ms_since(now_ms, mqtt_ms) < g_cfg_controller_timeout_ms;
+    const bool espnow_active =
+        espnow_ms > 0 && ms_since(now_ms, espnow_ms) < g_cfg_controller_timeout_ms;
     const char *path = espnow_active && mqtt_active ? "mqtt+esp-now"
                        : mqtt_active                ? "mqtt"
                        : espnow_active              ? "esp-now"
@@ -2390,8 +2398,8 @@ void refresh_ui() {
   const uint32_t uptime_s = now / 1000UL;
   const uint32_t last_mqtt_ms = g_last_mqtt_command_ms;
   const uint32_t last_ctrl_hb_ms = g_runtime->last_controller_heartbeat_ms();
-  const uint32_t since_mqtt_ms = last_mqtt_ms > 0 ? (now - last_mqtt_ms) : 0;
-  const uint32_t since_ctrl_ms = last_ctrl_hb_ms > 0 ? (now - last_ctrl_hb_ms) : 0;
+  const uint32_t since_mqtt_ms = last_mqtt_ms > 0 ? ms_since(now, last_mqtt_ms) : 0;
+  const uint32_t since_ctrl_ms = last_ctrl_hb_ms > 0 ? ms_since(now, last_ctrl_hb_ms) : 0;
 
   static char system_text[256];
   snprintf(system_text, sizeof(system_text),
@@ -2495,9 +2503,9 @@ void refresh_ui() {
   const uint32_t mqtt_ctrl_ms = g_mqtt_ctrl_last_update_ms;
   const uint32_t espnow_ms = g_runtime->last_controller_heartbeat_ms();
   const bool controller_connected =
-      (mqtt_cmd_ms > 0 && (now - mqtt_cmd_ms) < g_cfg_controller_timeout_ms) ||
-      (mqtt_ctrl_ms > 0 && (now - mqtt_ctrl_ms) < g_cfg_controller_timeout_ms) ||
-      (espnow_ms > 0 && (now - espnow_ms) < g_cfg_controller_timeout_ms);
+      (mqtt_cmd_ms > 0 && ms_since(now, mqtt_cmd_ms) < g_cfg_controller_timeout_ms) ||
+      (mqtt_ctrl_ms > 0 && ms_since(now, mqtt_ctrl_ms) < g_cfg_controller_timeout_ms) ||
+      (espnow_ms > 0 && ms_since(now, espnow_ms) < g_cfg_controller_timeout_ms);
 
   thermostat::ui::set_mode_button_state(g_runtime->local_mode());
   thermostat::ui::set_fan_button_state(g_runtime->local_fan_mode());
@@ -3382,7 +3390,7 @@ void thermostat_firmware_loop() {
   {
     const uint32_t hb_ms = g_runtime != nullptr ? g_runtime->last_controller_heartbeat_ms() : 0;
     const bool espnow_active = (hb_ms > 0) &&
-        (static_cast<uint32_t>(now - hb_ms) < g_cfg_controller_timeout_ms);
+        (ms_since(now, hb_ms) < g_cfg_controller_timeout_ms);
     // Log controller ESP-NOW connect/disconnect transitions. The only way to see
     // link state on a headless / ESP-NOW-only display (no screen access, no web/MQTT).
     static int prev_espnow_active = -1;  // -1 = unset → logs the first evaluation
@@ -3391,7 +3399,7 @@ void thermostat_firmware_loop() {
       Serial.printf("[espnow] controller %s (hb=%lu ago=%lums)\n",
                     espnow_active ? "CONNECTED" : "disconnected",
                     static_cast<unsigned long>(hb_ms),
-                    hb_ms > 0 ? static_cast<unsigned long>(now - hb_ms) : 0UL);
+                    hb_ms > 0 ? static_cast<unsigned long>(ms_since(now, hb_ms)) : 0UL);
     }
     // The governor tries an in-place recovery first, then reboots on a backed-off
     // ladder (10 min, 1 h, 4 h, then daily) so a long outage cannot loop. Polled on every
