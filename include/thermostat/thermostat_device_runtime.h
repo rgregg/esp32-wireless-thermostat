@@ -70,6 +70,9 @@ class ThermostatDeviceRuntime {
   bool has_controller_weather() const { return has_controller_weather_; }
   void set_last_controller_weather_ms(uint32_t ms) { last_controller_weather_ms_ = ms; }
   uint32_t last_controller_weather_ms() const { return last_controller_weather_ms_; }
+  // Last weather the controller sent over ESP-NOW (valid once has_controller_weather()).
+  float controller_outdoor_temp_c() const { return controller_outdoor_temp_c_; }
+  WeatherIcon controller_weather_icon() const { return controller_weather_icon_; }
 
  private:
   static void on_weather_from_controller(float outdoor_temp_c, WeatherIcon icon,
@@ -80,6 +83,8 @@ class ThermostatDeviceRuntime {
   ThermostatDisplayApp display_;
   bool has_controller_weather_ = false;
   uint32_t last_controller_weather_ms_ = 0;
+  float controller_outdoor_temp_c_ = 0.0f;
+  WeatherIcon controller_weather_icon_ = WeatherIcon::Unknown;
 };
 
 }  // namespace thermostat

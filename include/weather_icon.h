@@ -71,4 +71,24 @@ inline const char *weather_icon_display_text(WeatherIcon icon) {
   }
 }
 
+// Parse a condition received over MQTT: a PirateWeather API icon name ("clear-day") or a
+// display name as the controller publishes it ("Sunny", "Partly Cloudy"), ignoring case.
+inline WeatherIcon weather_icon_from_condition(const char *condition) {
+  const WeatherIcon api = weather_icon_from_api(condition);
+  if (api != WeatherIcon::Unknown || condition == nullptr) return api;
+  for (uint8_t i = 0; i < static_cast<uint8_t>(WeatherIcon::Unknown); ++i) {
+    const auto candidate = static_cast<WeatherIcon>(i);
+    const char *name = weather_icon_display_text(candidate);
+    size_t j = 0;
+    for (; name[j] != '\0' && condition[j] != '\0'; ++j) {
+      char a = name[j], b = condition[j];
+      if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+      if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+      if (a != b) break;
+    }
+    if (name[j] == '\0' && condition[j] == '\0') return candidate;
+  }
+  return WeatherIcon::Unknown;
+}
+
 }  // namespace thermostat
